@@ -1,0 +1,21 @@
+[submodule "AgentCert"]
+	path = AgentCert
+	url = https://github.com/AgentCert/AgentCert.git
+[submodule "app-charts"]
+	path = app-charts
+	url = https://github.com/AgentCert/app-charts.git
+[submodule "agent-charts"]
+	path = agent-charts
+	url = https://github.com/AgentCert/agent-charts.git
+[submodule "certifier"]
+	path = certifier
+	url = https://github.com/AgentCert/certifier.git
+[submodule "flash-agent"]
+	path = flash-agent
+	url = https://github.com/AgentCert/flash-agent.git
+[submodule "agentcert-stack"]
+	path = agentcert-stack
+	url = https://github.com/AgentCert/agentcert-stack.git
+[submodule "chaos-charts"]
+	path = chaos-charts
+	url = https://github.com/AgentCert/chaos-charts.git

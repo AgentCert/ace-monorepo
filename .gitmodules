@@ -19,3 +19,6 @@
 [submodule "chaos-charts"]
 	path = chaos-charts
 	url = https://github.com/AgentCert/chaos-charts.git
+[submodule "agent-sidecar"]
+	path = agent-sidecar
+	url = https://github.com/AgentCert/agent-sidecar.git

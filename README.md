@@ -109,10 +109,6 @@ cp build-paths.env.example build-paths.env
 
 > **Tip** &nbsp;The bridge IP `172.26.0.1` in the examples is the docker bridge gateway. Locate yours with `ip -4 addr show docker0 | grep inet` and replace it everywhere.
 
-> **Quick option — bring up all three local services with a single command**
->
-> Once `.env` is filled in, run `./scripts/start-local-services.sh` to skip sections 3–5 below. The script idempotently starts MongoDB, Langfuse, and LiteLLM; pass `--only-mongo` / `--only-langfuse` / `--only-litellm` (or the matching `--skip-*` flags) to limit its scope. Sections 3–5 remain useful when you need to inspect the underlying steps or run a service against a non-default config.
-
 ### 2. Prerequisites
 
 | Tool | Install |
@@ -122,6 +118,22 @@ cp build-paths.env.example build-paths.env
 | Node.js + yarn | `sudo apt-get install nodejs npm && npm install -g yarn` |
 | kubectl | `sudo snap install kubectl --classic` |
 | git | `sudo apt-get install git` |
+
+> [!IMPORTANT]
+> ### ⭐ Recommended path — one command for all local services
+>
+> Once `.env` is filled in, bring up **MongoDB + Langfuse + LiteLLM** with a single script:
+>
+> ```bash
+> ./scripts/start-local-services.sh
+> ```
+>
+> Idempotent — re-run anytime. Scope it with `--only-mongo` / `--only-langfuse` / `--only-litellm` (or the matching `--skip-*` flags).
+>
+> **➡ If you run this, skip sections 3–5 and jump straight to [§6 Kubernetes cluster access](#6-kubernetes-cluster-access).**
+
+<details>
+<summary><b>Sections 3–5 — manual alternatives</b> (only needed if you want to inspect each step or run a service against a non-default config)</summary>
 
 ### 3. MongoDB
 
@@ -181,6 +193,8 @@ kubectl port-forward -n litellm svc/litellm-proxy 14000:4000
 Set `LITELLM_HOST=http://<docker-bridge-ip>:14000` in `.env`.
 
 In either mode, `LITELLM_MASTER_KEY` in `.env` must match the value compiled into the LiteLLM config / secret.
+
+</details>
 
 ### 6. Kubernetes cluster access
 

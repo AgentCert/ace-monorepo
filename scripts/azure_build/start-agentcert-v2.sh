@@ -420,7 +420,12 @@ if [[ "$SKIP_FRONTEND" == false ]]; then
         if [[ "$needs_install" == true ]]; then
             wait_msg "Installing frontend dependencies..."
             if ! (cd "$WEB_DIR" && yarn install --frozen-lockfile); then
-                (cd "$WEB_DIR" && yarn install)
+                if ! (cd "$WEB_DIR" && yarn install); then
+                    # Corporate networks that intercept TLS break the npm registry's
+                    # CA chain ("unable to get local issuer certificate"). Last-resort
+                    # retry with cert verification off.
+                    (cd "$WEB_DIR" && NODE_TLS_REJECT_UNAUTHORIZED=0 yarn install)
+                fi
             fi
             ok "Frontend dependencies installed"
         else

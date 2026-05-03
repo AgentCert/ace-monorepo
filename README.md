@@ -1,6 +1,57 @@
+<div align="center">
+
 # ACE Monorepo
 
-AgentCert monorepo containing all project components as git submodules.
+#### Agent Certification Engine
+
+<p>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg?logo=go&logoColor=white">
+  <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-326CE5.svg?logo=kubernetes&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED.svg?logo=docker&logoColor=white">
+  <img alt="MongoDB" src="https://img.shields.io/badge/MongoDB-4.2-47A248.svg?logo=mongodb&logoColor=white">
+  <img alt="Langfuse" src="https://img.shields.io/badge/Tracing-Langfuse-1F5BFF.svg">
+  <img alt="LiteLLM" src="https://img.shields.io/badge/Gateway-LiteLLM-6F42C1.svg">
+</p>
+
+</div>
+
+---
+
+## Table of Contents
+
+- [About ACE](#about-ace)
+- [Submodules](#submodules)
+- [Getting the Code](#getting-the-code)
+- [Setup](#setup)
+  - [1. Configuration files](#1-configuration-files)
+  - [2. Prerequisites](#2-prerequisites)
+  - [3. MongoDB](#3-mongodb)
+  - [4. Langfuse](#4-langfuse)
+  - [5. LiteLLM](#5-litellm)
+  - [6. Kubernetes cluster access](#6-kubernetes-cluster-access)
+  - [7. Start AgentCert](#7-start-agentcert)
+- [Certifier Dev Tools](#certifier-dev-tools)
+  - [Dump a Langfuse trace into pipeline-compatible JSON](#dump-a-langfuse-trace-into-pipeline-compatible-json)
+  - [Run the full certification end-to-end](#run-the-full-certification-end-to-end)
+  - [Render a certification report to PDF](#render-a-certification-report-to-pdf)
+- [Admin Actions](#admin-actions)
+  - [Build & push all Docker images to Docker Hub](#build--push-all-docker-images-to-docker-hub)
+- [License](#license)
+
+---
+
+## About ACE
+
+**ACE** stands for **Agent Certification Engine** — a platform for evaluating, fault-injecting, and certifying autonomous agents under controlled chaos conditions. This monorepo aggregates every component required to run the platform end-to-end.
+
+- **Purpose.** Produce reproducible certification reports that quantify how an agent behaves under faults, with evidence (traces, metrics, ground truth) preserved at every phase.
+- **Architecture.** A GraphQL control plane (AgentCert) drives chaos experiments on Kubernetes; the certifier consumes the resulting Langfuse traces and emits a multi-phase certification artifact (JSON + PDF).
+- **Pipeline.** Phase 0 (trace ingest) → Phase 1 (fault bucketing) → Phase 2 (statistical aggregation) → Phase 3 (certificate build).
+- **Local stack.** MongoDB for persistence, Langfuse for OTEL trace storage, LiteLLM as the unified LLM gateway in front of Azure OpenAI.
+- **Layout.** Each concern lives in its own submodule (see [Submodules](#submodules)) so components can be versioned, built, and released independently.
+
+---
 
 ## Submodules
 
@@ -14,21 +65,23 @@ AgentCert monorepo containing all project components as git submodules.
 | [agentcert-stack](./agentcert-stack) | Full stack deployment |
 | [chaos-charts](./chaos-charts) | Chaos engineering charts |
 
-## Getting the code
+---
 
-### Clone with submodules
+## Getting the Code
+
+**Clone with submodules**
 
 ```bash
 git clone --recurse-submodules <repo-url>
 ```
 
-### Initialize submodules (if already cloned)
+**Initialize submodules** (if already cloned)
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### Update all submodules to latest
+**Update all submodules to latest**
 
 ```bash
 git submodule update --remote --merge
@@ -38,7 +91,7 @@ git submodule update --remote --merge
 
 ## Setup
 
-End-to-end bring-up: configure env files → install MongoDB / Langfuse / LiteLLM → wire up kubectl → run [start-agentcert-v2.sh](./scripts/azure_build/start-agentcert-v2.sh).
+End-to-end bring-up: configure env files → install MongoDB / Langfuse / LiteLLM → configure `kubectl` → run [`start-agentcert-v2.sh`](./scripts/azure_build/start-agentcert-v2.sh).
 
 ### 1. Configuration files
 
@@ -49,12 +102,16 @@ cp .env.example .env
 cp build-paths.env.example build-paths.env
 ```
 
-- [.env.example](./.env.example) — secrets, image tags, ports, MongoDB / Langfuse / LiteLLM / Azure OpenAI endpoints. Replace every `CHANGE_ME` and `REPLACE_ME` placeholder.
-- [build-paths.env.example](./build-paths.env.example) — local checkout paths and git URLs for each submodule. Update if your repo isn't at `/srv/projects/ace-monorepo`.
+- [`.env.example`](./.env.example) — secrets, image tags, ports, MongoDB / Langfuse / LiteLLM / Azure OpenAI endpoints. Replace every `CHANGE_ME` and `REPLACE_ME` placeholder.
+- [`build-paths.env.example`](./build-paths.env.example) — submodule checkout paths and git URLs. Paths are resolved relative to the file's own location, so no editing is required — copy (or symlink) it to `build-paths.env` and the configuration is complete.
 
-`.env` is gitignored — never commit secrets. `build-paths.env` is local-machine state and should not be committed either.
+> **Note** &nbsp;`.env` is gitignored — never commit secrets. `build-paths.env` carries no machine-specific state and is safe to commit if you prefer to skip the copy step.
 
-The bridge IP `172.26.0.1` in the examples is the docker bridge gateway. Find yours with `ip -4 addr show docker0 | grep inet` and replace it everywhere.
+> **Tip** &nbsp;The bridge IP `172.26.0.1` in the examples is the docker bridge gateway. Locate yours with `ip -4 addr show docker0 | grep inet` and replace it everywhere.
+
+> **Quick option — bring up all three local services with a single command**
+>
+> Once `.env` is filled in, run `./scripts/start-local-services.sh` to skip sections 3–5 below. The script idempotently starts MongoDB, Langfuse, and LiteLLM; pass `--only-mongo` / `--only-langfuse` / `--only-litellm` (or the matching `--skip-*` flags) to limit its scope. Sections 3–5 remain useful when you need to inspect the underlying steps or run a service against a non-default config.
 
 ### 2. Prerequisites
 
@@ -107,7 +164,7 @@ Then, in the Langfuse UI (default `http://localhost:3000`):
 
 LiteLLM is a unified LLM gateway in front of Azure OpenAI. Two deployment modes:
 
-**a) Local (Docker Compose)** — fastest path:
+**a) Local (Docker Compose)** — recommended for local development:
 
 ```bash
 cd agentcert-stack/litellm-setup
@@ -151,7 +208,7 @@ kubectl get nodes
 
 The startup script reads the active context from `~/.kube/config` (override with `KUBECONFIG`). Required namespaces — `litmus`, `litellm`, and the application namespace (`sock-shop` by default for MCP URLs in `.env`) — are created on demand by the install jobs.
 
-If you don't have a cluster yet and just want the local services up, pass `--skip-litellm` to the startup script.
+> **Note** &nbsp;If you don't have a cluster yet and just want the local services up, pass `--skip-litellm` to the startup script.
 
 ### 7. Start AgentCert
 
@@ -163,7 +220,7 @@ bash scripts/azure_build/start-agentcert-v2.sh \
   --paths-file $(pwd)/build-paths.env
 ```
 
-What it does:
+**What it does**
 
 1. Frees ports `3000`, `3030`, `8081`, `8082`, `2001` (prompts before killing).
 2. Ensures MongoDB is running (skip with `--skip-mongo`).
@@ -175,27 +232,23 @@ What it does:
 
 Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env` (defaults: `admin` / `litmus`).
 
-Stop everything:
+**Stop everything**
 
 ```bash
 bash AgentCert/stop-agentcert.sh
 ```
 
-For a deeper walk-through of the build pipeline (image builds, Docker Hub pushes, the `--llm` flag), see [scripts/azure_build/AZURE_BUILD_GUIDE.md](./scripts/azure_build/AZURE_BUILD_GUIDE.md).
+For a deeper walk-through of the build pipeline (image builds, Docker Hub pushes, the `--llm` flag), see [`scripts/azure_build/AZURE_BUILD_GUIDE.md`](./scripts/azure_build/AZURE_BUILD_GUIDE.md).
 
-## Certifier dev tools
+---
 
-Two helper scripts in `scripts/` drive the certifier pipeline locally without
-spinning up the FastAPI service. Both use the same `TraceService` /
-`BucketPipelineService` / `CertPipelineService` code paths the running
-service uses, and read `LANGFUSE_*` / `AZURE_OPENAI_*` from the root `.env`.
+## Certifier Dev Tools
+
+Two helper scripts in `scripts/` run the certifier pipeline locally without starting the FastAPI service. Both invoke the same `TraceService` / `BucketPipelineService` / `CertPipelineService` code paths used by the running service, and read `LANGFUSE_*` / `AZURE_OPENAI_*` from the root `.env`.
 
 ### Dump a Langfuse trace into pipeline-compatible JSON
 
-`scripts/dump_langfuse_trace.py` fetches a single trace from Langfuse and
-writes `raw_trace.json` plus a `trace_meta.json` summary. Useful for
-collecting offline samples that the certifier can later consume via a
-`FileTraceSource`.
+`scripts/dump_langfuse_trace.py` fetches a single trace from Langfuse and writes `raw_trace.json` plus a `trace_meta.json` summary. This is useful for collecting offline samples that the certifier can later consume via a `FileTraceSource`.
 
 ```bash
 ./scripts/dump_langfuse_trace.py \
@@ -210,9 +263,7 @@ collecting offline samples that the certifier can later consume via a
 
 ### Run the full certification end-to-end
 
-`scripts/run_certification.py` drives Phase 0+1+2+3 against one trace and
-writes outputs into `.tmp/` (gitignored) using the same on-disk layout the
-production API workers create:
+`scripts/run_certification.py` runs Phase 0+1+2+3 against one trace and writes outputs into `.tmp/` (gitignored) using the same on-disk layout the production API workers create:
 
 ```
 .tmp/{agent_id}/{experiment_id}/
@@ -242,17 +293,11 @@ production API workers create:
 ./scripts/run_certification.py --trace-id <UUID> --skip-cert
 ```
 
-Optional flags: `--workspace <dir>` (default `.tmp/`), `--batch-size`
-(LLM classification batch size, default 10), `--runs-per-fault`
-(default 1, used for Phase 2 statistical-significance checks),
-`--no-pdf` (skip the PDF render step), and `--debug` (retain Phase 3
-intermediates).
+Optional flags: `--workspace <dir>` (default `.tmp/`), `--batch-size` (LLM classification batch size, default 10), `--runs-per-fault` (default 1, used for Phase 2 statistical-significance checks), `--no-pdf` (skip the PDF render step), and `--debug` (retain Phase 3 intermediates).
 
 ### Render a certification report to PDF
 
-The `run_certification.py` script renders the PDF automatically. To
-re-render an existing `certification.json` (or one produced by the
-running service), use `scripts/render_certification_pdf.py`:
+The `run_certification.py` script renders the PDF automatically. To re-render an existing `certification.json` (or one produced by the running service), use `scripts/render_certification_pdf.py`:
 
 ```bash
 pip install --user reportlab    # one-time, only needed for PDF output
@@ -267,6 +312,34 @@ pip install --user reportlab    # one-time, only needed for PDF output
   --output ./out/agent-cert.pdf
 ```
 
+---
+
+## Admin Actions
+
+### Build & push all Docker images to Docker Hub
+
+Builds all component images and pushes them to `docker.io/agentcert/*`. Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in the root `.env`.
+
+```bash
+./scripts/build-and-push.sh
+```
+
+**Images pushed**
+
+- `agentcert/agentcert-flash-agent:latest`
+- `agentcert/agent-sidecar:latest`
+- `agentcert/agentcert-install-agent:latest`
+- `agentcert/agentcert-install-app:latest`
+- `agentcert/certifier:latest`
+
+To use a different env file:
+
+```bash
+./scripts/build-and-push.sh --env-file /path/to/.env
+```
+
+---
+
 ## License
 
-[MIT](./LICENSE)
+Released under the [MIT License](./LICENSE).

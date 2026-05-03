@@ -66,8 +66,41 @@ container_running() { docker ps --format '{{.Names}}' | grep -qx "$1"; }
 container_exists()  { docker ps -a --format '{{.Names}}' | grep -qx "$1"; }
 
 # ---------------------------------------------------------------------------
-# MongoDB
+# MongoDB (replSet rs0 + keyFile + root auth admin/1234)
+# AgentCert's DB_SERVER (.env) requires `?replicaSet=rs0&authSource=admin`,
+# so the local mongo must be started as a single-node replica set with auth.
 # ---------------------------------------------------------------------------
+MONGO_IMAGE="mongo:5"
+MONGO_NAME="agentcert-mongo"
+MONGO_DATA_VOL="mongodb_data"
+MONGO_KEYFILE_VOL="mongo-keyfile-vol"
+MONGO_ROOT_USER="admin"
+MONGO_ROOT_PASS="1234"
+
+ensure_mongo_keyfile_vol() {
+    if docker volume inspect "${MONGO_KEYFILE_VOL}" >/dev/null 2>&1; then
+        return 0
+    fi
+    log_info "Creating mongo keyfile volume '${MONGO_KEYFILE_VOL}' ..."
+    docker volume create "${MONGO_KEYFILE_VOL}" >/dev/null
+    local tmp_key
+    tmp_key="$(mktemp)"
+    openssl rand -base64 756 > "${tmp_key}"
+    docker run --rm \
+        -v "${tmp_key}:/tmp/src-keyfile:ro" \
+        -v "${MONGO_KEYFILE_VOL}:/keydata" \
+        "${MONGO_IMAGE}" bash -c \
+        'cp /tmp/src-keyfile /keydata/keyfile && chown 999:999 /keydata/keyfile && chmod 400 /keydata/keyfile' \
+        >/dev/null
+    rm -f "${tmp_key}"
+}
+
+mongo_rs_initialized() {
+    docker exec "${MONGO_NAME}" mongosh --quiet \
+        -u "${MONGO_ROOT_USER}" -p "${MONGO_ROOT_PASS}" --authenticationDatabase admin \
+        --eval 'try { rs.status().ok } catch(e) { 0 }' 2>/dev/null | tail -1 | grep -qx '1'
+}
+
 start_mongo() {
     log_info "MongoDB: checking port 27017 ..."
     if port_in_use 27017; then
@@ -82,29 +115,58 @@ start_mongo() {
         fi
     fi
 
-    local name="agentcert-mongo"
-    if container_exists "${name}"; then
-        log_info "Starting existing container '${name}' ..."
-        docker start "${name}" >/dev/null
-    elif container_exists "m3"; then
-        name="m3"
-        log_info "Starting existing container '${name}' ..."
-        docker start "${name}" >/dev/null
+    ensure_mongo_keyfile_vol
+
+    if container_exists "${MONGO_NAME}"; then
+        log_info "Starting existing container '${MONGO_NAME}' ..."
+        docker start "${MONGO_NAME}" >/dev/null
     else
-        log_info "Creating new container '${name}' (mongo:4.2) ..."
-        docker run -d --name "${name}" -p 27017:27017 mongo:4.2 >/dev/null
+        log_info "Creating new container '${MONGO_NAME}' (${MONGO_IMAGE}, replSet rs0, keyFile, auth) ..."
+        docker run -d --name "${MONGO_NAME}" -p 27017:27017 \
+            -e MONGO_INITDB_ROOT_USERNAME="${MONGO_ROOT_USER}" \
+            -e MONGO_INITDB_ROOT_PASSWORD="${MONGO_ROOT_PASS}" \
+            -v "${MONGO_DATA_VOL}:/data/db" \
+            -v "${MONGO_KEYFILE_VOL}:/keydata:ro" \
+            "${MONGO_IMAGE}" mongod --replSet rs0 --bind_ip_all --keyFile /keydata/keyfile \
+            >/dev/null
     fi
 
+    log_info "Waiting for mongod to accept auth ..."
     local retries=0
-    while (( retries < 15 )); do
-        if docker exec "${name}" mongosh --quiet --eval 'db.adminCommand({ping:1})' >/dev/null 2>&1 \
-           || docker exec "${name}" mongo --eval 'db.adminCommand("ping")' >/dev/null 2>&1; then
-            log_success "MongoDB ready on :27017"
+    while (( retries < 30 )); do
+        if docker exec "${MONGO_NAME}" mongosh --quiet \
+            -u "${MONGO_ROOT_USER}" -p "${MONGO_ROOT_PASS}" --authenticationDatabase admin \
+            --eval 'db.adminCommand({ping:1})' >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1; ((retries++))
+    done
+    if (( retries == 30 )); then
+        log_error "MongoDB did not accept auth within 30s"
+        return 1
+    fi
+
+    if mongo_rs_initialized; then
+        log_success "MongoDB ready on :27017 (replSet rs0 already initialized)"
+        return 0
+    fi
+
+    log_info "Initializing replica set rs0 ..."
+    if ! docker exec "${MONGO_NAME}" mongosh --quiet \
+        -u "${MONGO_ROOT_USER}" -p "${MONGO_ROOT_PASS}" --authenticationDatabase admin \
+        --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})' >/dev/null 2>&1; then
+        log_error "rs.initiate failed"
+        return 1
+    fi
+    retries=0
+    while (( retries < 30 )); do
+        if mongo_rs_initialized; then
+            log_success "MongoDB ready on :27017 (replSet rs0 initialized)"
             return 0
         fi
         sleep 1; ((retries++))
     done
-    log_error "MongoDB did not become ready within 15s"
+    log_error "Replica set did not become healthy within 30s"
     return 1
 }
 

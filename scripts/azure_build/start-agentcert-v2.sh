@@ -323,8 +323,14 @@ if [[ -f "$DOTENV_OVERRIDE" ]]; then
     ok "Loaded local overrides from $DOTENV_OVERRIDE"
 fi
 
-# Default for subscriber callbacks; overridden by local-custom/config/.env if set
-export CHAOS_CENTER_UI_ENDPOINT="${CHAOS_CENTER_UI_ENDPOINT:-http://localhost:${GQL_REST_PORT}}"
+# Subscriber callback URL — baked into generated infra manifests as the
+# subscriber pod's SERVER_ADDR. The chaoscenter Go binary reads this from the
+# upstream-Litmus env var name CHAOS_CENTER_UI_ENDPOINT, so we accept the
+# friendlier SUBSCRIBER_CALLBACK_URL in .env and translate it here.
+# Precedence: pre-exported CHAOS_CENTER_UI_ENDPOINT > pre-exported
+# SUBSCRIBER_CALLBACK_URL > local-custom/config/.env > --env-file
+# (SUBSCRIBER_CALLBACK_URL, then legacy CHAOS_CENTER_UI_ENDPOINT) > localhost fallback.
+export CHAOS_CENTER_UI_ENDPOINT="${CHAOS_CENTER_UI_ENDPOINT:-${SUBSCRIBER_CALLBACK_URL:-$(env_val SUBSCRIBER_CALLBACK_URL "$(env_val CHAOS_CENTER_UI_ENDPOINT "http://localhost:${GQL_REST_PORT}")")}}"
 
 ok "Environment variables set"
 

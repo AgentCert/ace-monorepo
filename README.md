@@ -152,13 +152,6 @@ Then, in the Langfuse UI (default `http://localhost:3000`):
 2. Settings → API Keys → create a key pair.
 3. Put the public/secret keys into `.env` as `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`.
 4. Set `LANGFUSE_HOST` to a URL reachable from BOTH the host and any in-cluster pod (use the docker-bridge IP, not `localhost`).
-5. Regenerate the OTLP authorization header:
-
-   ```bash
-   echo -n "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 -w0
-   ```
-
-   Paste it into `OTEL_EXPORTER_OTLP_HEADERS` and `AGENT_OTEL_EXPORTER_OTLP_HEADERS`.
 
 ### 5. LiteLLM
 

@@ -58,7 +58,9 @@ if [[ -z "${AGENTCERT_ROOT:-}" || ! -d "${AGENTCERT_ROOT}" ]]; then
     exit 1
 fi
 
-PID_DIR="${AGENTCERT_ROOT}"
+# Store PIDs and logs outside the repo to keep it clean
+PID_DIR="/tmp/agentcert-runtime"
+mkdir -p "${PID_DIR}"
 
 # Read a value from the .env (handles unquoted JSON like INFRA_DEPLOYMENTS=[...])
 env_val() {
@@ -274,6 +276,12 @@ export AGENT_SIDECAR_IMAGE="$(env_val AGENT_SIDECAR_IMAGE agentcert/agent-sideca
 export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
 export PROMETHEUS_MCP_SERVER_IMAGE="agentcert/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
+# MCP service URLs injected into agent.config.MCP_URLS at install-agent time
+# (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Default points at
+# the sock-shop ns since MCP servers are now deployed by the sock-shop chart
+# alongside the application, scoping their RBAC to the experiment.
+export K8S_MCP_URL="$(env_val K8S_MCP_URL http://kubernetes-mcp-server.sock-shop.svc.cluster.local:8081/mcp)"
+export PROM_MCP_URL="$(env_val PROM_MCP_URL http://prometheus-mcp-server.sock-shop.svc.cluster.local:9090/mcp)"
 export INFRA_DEPLOYMENTS='["app=chaos-exporter", "name=chaos-operator", "app=event-tracker","app=workflow-controller","app=kubernetes-mcp-server","app=prometheus-mcp-server"]'
 
 export DEFAULT_AGENT_HUB_GIT_URL="${AGENT_CHARTS_GIT_URL:-https://github.com/agentcert/agent-charts}"
@@ -301,8 +309,6 @@ export LANGFUSE_PUBLIC_KEY="$(env_val LANGFUSE_PUBLIC_KEY)"
 export LANGFUSE_SECRET_KEY="$(env_val LANGFUSE_SECRET_KEY)"
 export LANGFUSE_ORG_ID="$(env_val LANGFUSE_ORG_ID)"
 export LANGFUSE_PROJECT_ID="$(env_val LANGFUSE_PROJECT_ID)"
-export OTEL_EXPORTER_OTLP_ENDPOINT="$(env_val AGENT_OTEL_EXPORTER_OTLP_ENDPOINT)"
-export OTEL_EXPORTER_OTLP_HEADERS="$(env_val AGENT_OTEL_EXPORTER_OTLP_HEADERS)"
 
 export PRE_CLEANUP_WAIT_SECONDS="$(env_val PRE_CLEANUP_WAIT_SECONDS 0)"
 export BLIND_TRACES="$(env_val BLIND_TRACES yes)"
@@ -323,60 +329,14 @@ export CHAOS_CENTER_UI_ENDPOINT="${CHAOS_CENTER_UI_ENDPOINT:-http://localhost:${
 ok "Environment variables set"
 
 # ============================================================================
-# Step 3b: LiteLLM K8s ConfigMap + Secret + rollout
+# Step 3b: LiteLLM configuration (assumes LiteLLM already running externally)
 # ============================================================================
-LITELLM_NS="litellm"
-LITELLM_DEPLOY="litellm-proxy"
-LITELLM_DIR="${AGENT_CHARTS_ROOT:-}/litellm"
-SERVER_NS="litmus-chaos"
-SERVER_DEPLOY="litmusportal-server"
-
-if [[ "$SKIP_LITELLM" == true ]]; then
-    status "Skipping LiteLLM K8s sync (--skip-litellm)"
-elif ! command -v kubectl >/dev/null 2>&1; then
-    fail "kubectl not found; skipping LiteLLM K8s sync"
-elif [[ ! -d "${LITELLM_DIR}" ]]; then
-    fail "LiteLLM manifest dir not found: ${LITELLM_DIR} — skipping K8s sync"
-else
-    status "Applying LiteLLM namespace and configmap..."
-    kubectl apply -f "${LITELLM_DIR}/namespace.yaml"
-    sed "s/model_name: LITELLM_MODEL_NAME/model_name: ${AZURE_OPENAI_DEPLOYMENT}/g" \
-        "${LITELLM_DIR}/configmap.yaml" | kubectl apply -f -
-
-    status "Applying LiteLLM secret with keys from .env..."
-    AZURE_API_KEY="$(env_val AZURE_OPENAI_KEY)"
-    [[ -z "${AZURE_API_KEY}" ]] && AZURE_API_KEY="$(env_val AZURE_OPENAI_API_KEY)"
-    AZURE_MODEL="azure/${AZURE_OPENAI_DEPLOYMENT}"
-    kubectl -n "${LITELLM_NS}" create secret generic litellm-secrets \
-        --from-literal=AZURE_API_KEY="${AZURE_API_KEY}" \
-        --from-literal=AZURE_API_BASE="${AZURE_OPENAI_ENDPOINT}" \
-        --from-literal=AZURE_MODEL="${AZURE_MODEL}" \
-        --from-literal=AZURE_API_VERSION="${AZURE_OPENAI_API_VERSION}" \
-        --from-literal=OPENAI_API_KEY="${LITELLM_MASTER_KEY}" \
-        --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
-        --from-literal=LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY}" \
-        --from-literal=LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY}" \
-        --from-literal=LANGFUSE_HOST="${LANGFUSE_HOST}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-    status "Applying LiteLLM deployment and restarting pod..."
-    kubectl apply -f "${LITELLM_DIR}/deployment.yaml"
-    kubectl -n "${LITELLM_NS}" set image deployment/"${LITELLM_DEPLOY}" \
-        litellm="${LITELLM_PROXY_IMAGE}" >/dev/null
-    kubectl -n "${LITELLM_NS}" rollout restart deployment/"${LITELLM_DEPLOY}"
-    kubectl -n "${LITELLM_NS}" rollout status deployment/"${LITELLM_DEPLOY}" --timeout=180s
-    ok "LiteLLM restarted with fresh config and secrets"
-
-    if kubectl get deployment "${SERVER_DEPLOY}" -n "${SERVER_NS}" >/dev/null 2>&1; then
-        OPENAI_BASE_URL="$(env_val OPENAI_BASE_URL http://litellm-proxy.litellm.svc.cluster.local:4000/v1)"
-        kubectl set env deployment/"${SERVER_DEPLOY}" -n "${SERVER_NS}" \
-            LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
-            OPENAI_API_KEY="${LITELLM_MASTER_KEY}" \
-            OPENAI_BASE_URL="${OPENAI_BASE_URL}" \
-            MODEL_ALIAS="${AZURE_OPENAI_DEPLOYMENT}" >/dev/null
-        ok "litmusportal-server env synced"
-    fi
-fi
+# LiteLLM proxy is expected to be running externally (e.g., via docker-compose)
+# Just configure the environment to point to it
+LITELLM_HOST="$(env_val LITELLM_HOST http://localhost:14000)"
+export OPENAI_BASE_URL="${LITELLM_HOST}/v1"
+export OPENAI_API_KEY="${LITELLM_MASTER_KEY}"
+ok "LiteLLM configured at ${LITELLM_HOST}/v1"
 
 # ============================================================================
 # Step 4: Auth Service
@@ -417,8 +377,6 @@ sleep 1
 (cd "$GQL_DIR" && nohup env \
   REST_PORT="$GQL_REST_PORT" \
   GRPC_PORT="$GQL_GRPC_PORT" \
-  OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT" \
-  OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS" \
   "$GQL_BINARY" >> "$PID_DIR/.graphql.log" 2>&1) &
 GQL_PID=$!
 echo "$GQL_PID" > "$PID_DIR/.agentcert-graphql.pid"

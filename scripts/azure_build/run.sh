@@ -177,6 +177,11 @@ export INSTALL_AGENT_IMAGE_PULL_POLICY="Always"
 export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
 export PROMETHEUS_MCP_SERVER_IMAGE="agentcert/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
+# MCP service URLs injected into agent.config.MCP_URLS at install-agent time
+# (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Sock-shop ns since
+# MCP servers deploy alongside the app for namespace-scoped RBAC.
+export K8S_MCP_URL="${K8S_MCP_URL:-http://kubernetes-mcp-server.sock-shop.svc.cluster.local:8081/mcp}"
+export PROM_MCP_URL="${PROM_MCP_URL:-http://prometheus-mcp-server.sock-shop.svc.cluster.local:9090/mcp}"
 
 # Infra deployment labels (used for readiness checks on subscriber connect)
 export INFRA_DEPLOYMENTS='["app=chaos-exporter", "name=chaos-operator", "app=event-tracker","app=workflow-controller","app=kubernetes-mcp-server","app=prometheus-mcp-server"]'
@@ -189,11 +194,7 @@ export DEFAULT_APP_HUB_GIT_URL="https://github.com/agentcert/app-charts"
 export DEFAULT_APP_HUB_BRANCH_NAME="main"
 export DEFAULT_APP_HUB_PATH="/tmp/default"
 
-# OTEL / Langfuse tracing for GraphQL server
-# The Go OTEL tracer in otel_tracer.go reads these at startup.
-# If OTEL_EXPORTER_OTLP_ENDPOINT is empty, tracing is silently disabled.
-export OTEL_EXPORTER_OTLP_ENDPOINT="https://us.cloud.langfuse.com/api/public/otel"
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic cGstbGYtYmExMDgxYTktNzg0OS00MjdmLThhMWMtMmEyZWUwNjkwMGMxOnNrLWxmLTcyNjk0YmQ3LTRhNTktNDMwZC1iODcwLTAxODMxMTRjMDJmZQ=="
+# Langfuse tracing for GraphQL server (REST-based; OTEL exporter retired).
 export LANGFUSE_HOST="https://us.cloud.langfuse.com"
 export LANGFUSE_PUBLIC_KEY="pk-lf-ba1081a9-7849-427f-8a1c-2a2ee06900c1"
 export LANGFUSE_SECRET_KEY="sk-lf-72694bd7-4a59-430d-b870-0183114c02fe"
@@ -263,8 +264,6 @@ pkill -f "$GQL_APP_NAME" 2>/dev/null || true
 (cd "$GQL_DIR" && nohup env \
   REST_PORT="$GQL_REST_PORT" \
   GRPC_PORT="$GQL_GRPC_PORT" \
-  OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT" \
-  OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS" \
   "$GQL_BINARY" >> "$PID_DIR/.graphql.log" 2>&1) &
 GQL_PID=$!
 echo "$GQL_PID" > "$PID_DIR/.agentcert-graphql.pid"

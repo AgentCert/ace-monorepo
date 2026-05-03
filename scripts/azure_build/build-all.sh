@@ -81,6 +81,7 @@ if [[ "${GIT_SYNC}" == "true" ]]; then
   sync_repo "${APP_CHARTS_ROOT}"   "${APP_CHARTS_GIT_URL:-}"
   sync_repo "${AGENT_CHARTS_ROOT}" "${AGENT_CHARTS_GIT_URL:-}"
   sync_repo "${FLASH_AGENT_ROOT}"  "${FLASH_AGENT_GIT_URL:-}"
+  sync_repo "${AGENT_SIDECAR_ROOT}"  "${AGENT_SIDECAR_GIT_URL:-}"
   # chaos-charts is consumed at runtime by the GraphQL server (DEFAULT_HUB_GIT_URL),
   # not by the Docker build pipeline.  We still sync it so the local clone stays
   # in lockstep with the URL exported by start-agentcert.sh / run.sh, which makes
@@ -92,7 +93,7 @@ if [[ "${GIT_SYNC}" == "true" ]]; then
 fi
 
 # ── Validate path vars ─────────────────────────────────────────────────────────
-for var in AGENTCERT_ROOT APP_CHARTS_ROOT AGENT_CHARTS_ROOT FLASH_AGENT_ROOT; do
+for var in AGENTCERT_ROOT APP_CHARTS_ROOT AGENT_CHARTS_ROOT FLASH_AGENT_ROOT AGENT_SIDECAR_ROOT; do
   if [[ -z "${!var:-}" ]]; then
     echo "[ERROR] ${var} is not set in ${PATHS_FILE}" >&2; exit 1
   fi
@@ -136,6 +137,7 @@ log_info "AGENTCERT_ROOT    = ${AGENTCERT_ROOT}"
 log_info "APP_CHARTS_ROOT   = ${APP_CHARTS_ROOT}"
 log_info "AGENT_CHARTS_ROOT = ${AGENT_CHARTS_ROOT}"
 log_info "FLASH_AGENT_ROOT  = ${FLASH_AGENT_ROOT}"
+log_info "AGENT_SIDECAR_ROOT = ${AGENT_SIDECAR_ROOT}"
 log_info "ENV_FILE          = ${ENV_FILE}"
 echo ""
 
@@ -148,15 +150,6 @@ if bash "${SCRIPT_DIR}/build-and-deploy-app-chart.sh" \
   log_success "Completed: Build app chart (Sock Shop)"
 else
   log_error "Failed: Build app chart (Sock Shop)"; exit 1
-fi
-echo ""
-
-# ── Step 2: Build LiteLLM proxy ───────────────────────────────────────────────
-log_info "Starting: Build LiteLLM proxy"
-if bash "${SCRIPT_DIR}/build-litellm.sh" --env-file "${ENV_FILE}"; then
-  log_success "Completed: Build LiteLLM proxy"
-else
-  log_error "Failed: Build LiteLLM proxy"; exit 1
 fi
 echo ""
 

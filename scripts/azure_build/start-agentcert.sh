@@ -53,7 +53,9 @@ if [[ -z "${AGENTCERT_ROOT:-}" || ! -d "${AGENTCERT_ROOT}" ]]; then
     exit 1
 fi
 
-PID_DIR="${AGENTCERT_ROOT}"
+# Store PIDs and logs outside the repo to keep it clean
+PID_DIR="/tmp/agentcert-runtime"
+mkdir -p "${PID_DIR}"
 
 # Helper: read a value from the .env file
 env_val() {
@@ -211,6 +213,11 @@ export AGENT_SIDECAR_IMAGE="$(env_val AGENT_SIDECAR_IMAGE agentcert/agent-sideca
 export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
 export PROMETHEUS_MCP_SERVER_IMAGE="agentcert/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
+# MCP service URLs injected into agent.config.MCP_URLS at install-agent time
+# (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Default points at
+# sock-shop ns; MCP servers deploy alongside the app for namespace-scoped RBAC.
+export K8S_MCP_URL="$(env_val K8S_MCP_URL http://kubernetes-mcp-server.sock-shop.svc.cluster.local:8081/mcp)"
+export PROM_MCP_URL="$(env_val PROM_MCP_URL http://prometheus-mcp-server.sock-shop.svc.cluster.local:9090/mcp)"
 export INFRA_DEPLOYMENTS='["app=chaos-exporter", "name=chaos-operator", "app=event-tracker","app=workflow-controller","app=kubernetes-mcp-server","app=prometheus-mcp-server"]'
 
 # Hub paths from build-paths.env
@@ -230,20 +237,18 @@ export AZURE_OPENAI_EMBEDDING_DEPLOYMENT="$(env_val AZURE_OPENAI_EMBEDDING_DEPLO
 
 # LiteLLM
 export LITELLM_MASTER_KEY="$(env_val LITELLM_MASTER_KEY sk-litellm-local-dev)"
-export LITELLM_PROXY_IMAGE="$(env_val LITELLM_PROXY_IMAGE agentcert/agentcert-litellm-proxy:dev)"
+export LITELLM_PROXY_IMAGE="$(env_val LITELLM_PROXY_IMAGE docker.io/litellm/litellm:v1.82.0-stable)"
 export LITELLM_PROFILE="$(env_val LITELLM_PROFILE azure)"
 export OPENAI_BASE_URL="$(env_val OPENAI_BASE_URL http://litellm-proxy.litellm.svc.cluster.local:4000/v1)"
 export OPENAI_API_KEY="${LITELLM_MASTER_KEY}"
 export MODEL_ALIAS="$(env_val AZURE_OPENAI_DEPLOYMENT gpt-4)"
 
-# Langfuse / OTEL
+# Langfuse
 export LANGFUSE_HOST="$(env_val LANGFUSE_HOST)"
 export LANGFUSE_PUBLIC_KEY="$(env_val LANGFUSE_PUBLIC_KEY)"
 export LANGFUSE_SECRET_KEY="$(env_val LANGFUSE_SECRET_KEY)"
 export LANGFUSE_ORG_ID="$(env_val LANGFUSE_ORG_ID)"
 export LANGFUSE_PROJECT_ID="$(env_val LANGFUSE_PROJECT_ID)"
-export OTEL_EXPORTER_OTLP_ENDPOINT="$(env_val AGENT_OTEL_EXPORTER_OTLP_ENDPOINT)"
-export OTEL_EXPORTER_OTLP_HEADERS="$(env_val AGENT_OTEL_EXPORTER_OTLP_HEADERS)"
 
 # Misc
 export PRE_CLEANUP_WAIT_SECONDS="$(env_val PRE_CLEANUP_WAIT_SECONDS 0)"
@@ -350,8 +355,6 @@ pkill -f "$GQL_APP_NAME" 2>/dev/null || true
 (cd "$GQL_DIR" && nohup env \
   REST_PORT="$GQL_REST_PORT" \
   GRPC_PORT="$GQL_GRPC_PORT" \
-  OTEL_EXPORTER_OTLP_ENDPOINT="$OTEL_EXPORTER_OTLP_ENDPOINT" \
-  OTEL_EXPORTER_OTLP_HEADERS="$OTEL_EXPORTER_OTLP_HEADERS" \
   "$GQL_BINARY" >> "$PID_DIR/.graphql.log" 2>&1) &
 GQL_PID=$!
 echo "$GQL_PID" > "$PID_DIR/.agentcert-graphql.pid"

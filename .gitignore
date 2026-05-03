@@ -46,3 +46,5 @@ temp/
 *.tmp
 
 agent-charts/
+scripts/azure-build/start-agentcert-v2.sh
+local-personal-workspace/

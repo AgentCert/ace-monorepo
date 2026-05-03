@@ -358,7 +358,7 @@ load_images_to_kind() {
     local cluster_name="${KIND_CLUSTER_NAME:-agentcert}"
     
     for img in \
-        "agentcert/flash-agent:latest" \
+        "agentcert/agentcert-flash-agent:latest" \
         "agentcert/agent-sidecar:latest" \
         "agentcert/agentcert-install-agent:latest" \
         "agentcert/agentcert-install-app:latest" \

@@ -2,10 +2,10 @@
 set -uo pipefail
 
 # =============================================================================
-# Start local supporting services: MongoDB, Langfuse, LiteLLM
+# Start local supporting services: MongoDB, Langfuse, LiteLLM, Certifier
 # =============================================================================
 # Idempotent — each service is only started if it isn't already running.
-# Pulls LiteLLM env vars from <repo-root>/.env via `docker compose --env-file`.
+# Pulls env vars from <repo-root>/.env via `docker compose --env-file`.
 #
 # Usage:
 #   ./scripts/start-local-services.sh [options]
@@ -14,10 +14,16 @@ set -uo pipefail
 #   --skip-mongo                  Skip MongoDB
 #   --skip-langfuse               Skip Langfuse
 #   --skip-litellm                Skip LiteLLM
+#   --skip-certifier              Skip Certifier
 #   --only-mongo                  Run only MongoDB
 #   --only-langfuse               Run only Langfuse
 #   --only-litellm                Run only LiteLLM
-#   --env-file PATH               .env to feed LiteLLM (default: <repo-root>/.env)
+#   --only-certifier              Run only Certifier
+#   --pull-certifier              Pull the certifier image from a registry
+#                                 instead of building from source. Default tag:
+#                                 agentcert/certifier:latest. Override the tag
+#                                 with CERTIFIER_IMAGE in your .env.
+#   --env-file PATH               .env to feed services (default: <repo-root>/.env)
 #   --langfuse-dir PATH           Langfuse compose dir (default: /opt/langfuse,
 #                                 then ~/langfuse, then <repo-root>/.tmp/langfuse)
 #   --restart                     Recreate services even if already running
@@ -32,7 +38,10 @@ LANGFUSE_DIR=""
 RUN_MONGO=true
 RUN_LANGFUSE=true
 RUN_LITELLM=true
+RUN_CERTIFIER=true
 RESTART=false
+PULL_CERTIFIER=false
+CERTIFIER_PULL_IMAGE_DEFAULT="agentcert/certifier:latest"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 log_info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -44,17 +53,20 @@ usage() { awk '/^# ====/{c++; next} c>0 && c<3 {sub(/^# ?/,""); print}' "$0"; ex
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-mongo)    RUN_MONGO=false; shift ;;
-        --skip-langfuse) RUN_LANGFUSE=false; shift ;;
-        --skip-litellm)  RUN_LITELLM=false; shift ;;
-        --only-mongo)    RUN_MONGO=true;  RUN_LANGFUSE=false; RUN_LITELLM=false; shift ;;
-        --only-langfuse) RUN_MONGO=false; RUN_LANGFUSE=true;  RUN_LITELLM=false; shift ;;
-        --only-litellm)  RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=true;  shift ;;
-        --env-file)      ENV_FILE="${2:-}"; shift 2 ;;
-        --langfuse-dir)  LANGFUSE_DIR="${2:-}"; shift 2 ;;
-        --restart)       RESTART=true; shift ;;
-        -h|--help)       usage ;;
-        *)               log_error "Unknown argument: $1"; exit 1 ;;
+        --skip-mongo)     RUN_MONGO=false; shift ;;
+        --skip-langfuse)  RUN_LANGFUSE=false; shift ;;
+        --skip-litellm)   RUN_LITELLM=false; shift ;;
+        --skip-certifier) RUN_CERTIFIER=false; shift ;;
+        --only-mongo)     RUN_MONGO=true;  RUN_LANGFUSE=false; RUN_LITELLM=false; RUN_CERTIFIER=false; shift ;;
+        --only-langfuse)  RUN_MONGO=false; RUN_LANGFUSE=true;  RUN_LITELLM=false; RUN_CERTIFIER=false; shift ;;
+        --only-litellm)   RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=true;  RUN_CERTIFIER=false; shift ;;
+        --only-certifier) RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=false; RUN_CERTIFIER=true;  shift ;;
+        --pull-certifier) PULL_CERTIFIER=true; shift ;;
+        --env-file)       ENV_FILE="${2:-}"; shift 2 ;;
+        --langfuse-dir)   LANGFUSE_DIR="${2:-}"; shift 2 ;;
+        --restart)        RESTART=true; shift ;;
+        -h|--help)        usage ;;
+        *)                log_error "Unknown argument: $1"; exit 1 ;;
     esac
 done
 
@@ -244,6 +256,119 @@ start_litellm() {
 }
 
 # ---------------------------------------------------------------------------
+# Certifier (FastAPI app on :${API_PORT:-8000})
+#
+# Talks to the shared monorepo MongoDB (admin:1234, replSet rs0) — we do NOT
+# start the certifier compose's own `mongo` / `mongo-express` services, since
+# the script's `start_mongo` already provides a single-source mongo for the
+# whole monorepo.
+# ---------------------------------------------------------------------------
+CERTIFIER_DIR="${REPO_ROOT}/certifier"
+CERTIFIER_APP_CONTAINER="certifier_app"
+
+# Resolve the certifier image tag in this priority order:
+#   1. --pull-certifier flag → use CERTIFIER_PULL_IMAGE_DEFAULT (overridable via
+#      CERTIFIER_IMAGE in .env)
+#   2. CERTIFIER_IMAGE set in the .env / environment
+#   3. Default local-build tag `certifier:latest`
+_resolve_certifier_image() {
+    local env_image
+    env_image="$(grep -m1 '^CERTIFIER_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2-)"
+    if [[ "${PULL_CERTIFIER}" == true ]]; then
+        echo "${env_image:-${CERTIFIER_PULL_IMAGE_DEFAULT}}"
+    elif [[ -n "${env_image}" ]]; then
+        echo "${env_image}"
+    else
+        echo "certifier:latest"
+    fi
+}
+
+start_certifier() {
+    log_info "Certifier: checking ..."
+
+    if [[ ! -f "${CERTIFIER_DIR}/docker-compose.yml" ]]; then
+        log_error "Compose file not found: ${CERTIFIER_DIR}/docker-compose.yml"
+        return 1
+    fi
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        log_error "Certifier needs an env file (got: ${ENV_FILE}) for AZURE_OPENAI_*, LANGFUSE_*, etc."
+        return 1
+    fi
+
+    # Implicit dependency: the certifier app crashes on boot if mongo isn't
+    # reachable (FastAPI lifespan creates indices). Start the shared monorepo
+    # mongo first if it isn't already up. This mirrors `depends_on` semantics
+    # for compose stacks that live in different directories.
+    if ! container_running "${MONGO_NAME}"; then
+        log_info "Certifier requires MongoDB — starting it first ..."
+        if ! start_mongo; then
+            log_error "MongoDB failed to start; aborting Certifier"
+            return 1
+        fi
+    fi
+
+    local certifier_image
+    certifier_image="$(_resolve_certifier_image)"
+    # Export so compose's `image: ${CERTIFIER_IMAGE:-...}` resolves to the same value
+    export CERTIFIER_IMAGE="${certifier_image}"
+
+    if container_running "${CERTIFIER_APP_CONTAINER}" && [[ "${RESTART}" == false ]]; then
+        log_success "Certifier already up (http://localhost:${API_PORT:-8000}/docs)"
+        return 0
+    fi
+
+    # Acquire the image: pull from registry if --pull-certifier OR if the image
+    # tag looks like a registry path and isn't local yet; otherwise build.
+    if [[ "${PULL_CERTIFIER}" == true ]]; then
+        log_info "Pulling certifier image: ${certifier_image} ..."
+        if ! docker pull "${certifier_image}"; then
+            log_error "Failed to pull '${certifier_image}'. Check the tag and your registry access."
+            return 1
+        fi
+    elif ! docker image inspect "${certifier_image}" >/dev/null 2>&1; then
+        log_info "Image '${certifier_image}' not found locally — building from ${CERTIFIER_DIR} ..."
+        if ! (cd "${CERTIFIER_DIR}" && docker compose --env-file "${ENV_FILE}" build app); then
+            log_error "Certifier image build failed"
+            return 1
+        fi
+    fi
+
+    # Point the app at the script-managed mongo (auth + replSet on the host).
+    # `host.docker.internal:host-gateway` is wired into compose's `extra_hosts`,
+    # so the container can resolve the host network from inside its bridge.
+    #
+    # `directConnection=true` is required because the replica set was initialised
+    # with `host: "localhost:27017"` — from inside the container, that resolves
+    # to the container's own loopback (no mongo there). Direct-connect bypasses
+    # replica-set topology discovery and uses the seed host as-is.
+    local mongo_user="${MONGO_ROOT_USER:-admin}"
+    local mongo_pass="${MONGO_ROOT_PASS:-1234}"
+    local mongo_db="${MONGODB_DATABASE:-agentcert}"
+    export CERTIFIER_MONGODB_URI="mongodb://${mongo_user}:${mongo_pass}@host.docker.internal:27017/${mongo_db}?authSource=admin&directConnection=true"
+
+    local up_args=(--no-deps app)
+    [[ "${RESTART}" == true ]] && up_args=(--force-recreate --no-deps app)
+
+    log_info "Starting Certifier (app only; uses shared monorepo mongo) ..."
+    if ! (cd "${CERTIFIER_DIR}" && docker compose --env-file "${ENV_FILE}" up -d "${up_args[@]}"); then
+        log_error "Certifier compose up failed"
+        return 1
+    fi
+
+    # Wait for /docs to respond — covers app boot + lifespan handler
+    local retries=0
+    while (( retries < 30 )); do
+        if curl -fsS -o /dev/null "http://localhost:${API_PORT:-8000}/docs" 2>/dev/null; then
+            log_success "Certifier up. Swagger UI: http://localhost:${API_PORT:-8000}/docs"
+            return 0
+        fi
+        sleep 2; ((retries++))
+    done
+    log_error "Certifier did not start responding within 60s on :${API_PORT:-8000}/docs"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 echo ""
@@ -258,9 +383,10 @@ run_step() {
     if ! "$@"; then FAILED+=("${label}"); fi
     echo ""
 }
-[[ "${RUN_MONGO}"    == true ]] && run_step mongo    start_mongo
-[[ "${RUN_LANGFUSE}" == true ]] && run_step langfuse start_langfuse
-[[ "${RUN_LITELLM}"  == true ]] && run_step litellm  start_litellm
+[[ "${RUN_MONGO}"     == true ]] && run_step mongo     start_mongo
+[[ "${RUN_LANGFUSE}"  == true ]] && run_step langfuse  start_langfuse
+[[ "${RUN_LITELLM}"   == true ]] && run_step litellm   start_litellm
+[[ "${RUN_CERTIFIER}" == true ]] && run_step certifier start_certifier
 
 echo -e "${CYAN}======================================${NC}"
 if (( ${#FAILED[@]} == 0 )); then

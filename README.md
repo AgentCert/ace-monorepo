@@ -31,6 +31,7 @@
   - [5. LiteLLM](#5-litellm)
   - [6. Kubernetes cluster access](#6-kubernetes-cluster-access)
   - [7. Start AgentCert](#7-start-agentcert)
+- [Certifier API service (Dockerized)](#certifier-api-service-dockerized)
 - [Certifier Dev Tools](#certifier-dev-tools)
   - [Dump a Langfuse trace into pipeline-compatible JSON](#dump-a-langfuse-trace-into-pipeline-compatible-json)
   - [Run the full certification end-to-end](#run-the-full-certification-end-to-end)
@@ -122,13 +123,24 @@ cp build-paths.env.example build-paths.env
 > [!IMPORTANT]
 > ### ⭐ Recommended path — one command for all local services
 >
-> Once `.env` is filled in, bring up **MongoDB + Langfuse + LiteLLM** with a single script:
+> Once `.env` is filled in, bring up **MongoDB + Langfuse + LiteLLM + the Certifier API** with a single script:
 >
 > ```bash
 > ./scripts/start-local-services.sh
 > ```
 >
-> Idempotent — re-run anytime. Scope it with `--only-mongo` / `--only-langfuse` / `--only-litellm` (or the matching `--skip-*` flags).
+> Idempotent — re-run anytime. Scope it with `--only-mongo` / `--only-langfuse` / `--only-litellm` / `--only-certifier` (or the matching `--skip-*` flags). Add `--restart` to recreate already-running services.
+>
+> **What each step brings up**
+>
+> | Step | What it does | Reachable at |
+> |---|---|---|
+> | `mongo` | `mongo:5` single-node replica set (`rs0`) with `admin`/`1234` auth, keyFile, and a persistent named volume. The replica set is initialised on first run. | `mongodb://admin:1234@localhost:27017/?authSource=admin` |
+> | `langfuse` | Upstream Langfuse compose stack (clones to `.tmp/langfuse` if not already on disk at `/opt/langfuse` or `~/langfuse`). | http://localhost:4000 |
+> | `litellm` | LiteLLM proxy compose stack from `agentcert-stack/litellm-setup/`. | http://localhost:14000 |
+> | `certifier` | Builds (if needed) and runs the `certifier:latest` image as `certifier_app`, sharing the script's MongoDB via `host.docker.internal` + `directConnection=true`. Implicitly starts MongoDB first when not already running. | Swagger: http://localhost:8000/docs — OpenAPI: http://localhost:8000/openapi.json |
+>
+> The certifier reads every env var from the monorepo-root `.env` via `env_file: ../.env` in `certifier/docker-compose.yml` — there is no separate `.env` inside `certifier/`.
 >
 > **➡ If you run this, skip sections 3–5 and jump straight to [§6 Kubernetes cluster access](#6-kubernetes-cluster-access).**
 
@@ -246,6 +258,137 @@ bash AgentCert/stop-agentcert.sh
 ```
 
 For a deeper walk-through of the build pipeline (image builds, Docker Hub pushes, the `--llm` flag), see [`scripts/azure_build/AZURE_BUILD_GUIDE.md`](./scripts/azure_build/AZURE_BUILD_GUIDE.md).
+
+---
+
+## Certifier API service (Dockerized)
+
+The full FastAPI certifier — Phase 0 (fault bucketing) → Phase 1 (metrics extraction) → Phase 2 (aggregation) → Phase 3 (12-section certification report) → HTML + PDF rendering via playwright — runs as a single container tagged `certifier:latest` (local) or `agentcert/certifier:latest` (pushed to Docker Hub). The image, compose stack, and start script are designed to share the monorepo's MongoDB rather than ship their own.
+
+### Build locally (default — for developers)
+
+```bash
+./scripts/start-local-services.sh --only-certifier            # builds if no image yet
+./scripts/start-local-services.sh --only-certifier --restart  # force-recreate after a rebuild
+```
+
+The script invokes `docker compose build app` on first use, then runs the
+container. The image is tagged `certifier:latest` and is **not** pushed
+anywhere.
+
+### Pull from Docker Hub (no build toolchain on target host)
+
+The certifier image is published at **[`docker.io/agentcert/certifier:latest`](https://hub.docker.com/r/agentcert/certifier)**:
+
+| | |
+|---|---|
+| Repository | `agentcert/certifier` |
+| Tag | `latest` |
+| Latest digest | `sha256:63e6604bac5ffba71372da37fc761bfaeca664871d6516668801c78d551db7d8` |
+| Compressed size | ~685 MB (11 layers) |
+| Pulled by | `./scripts/start-local-services.sh --only-certifier --pull-certifier` |
+
+```bash
+./scripts/start-local-services.sh --only-certifier --pull-certifier
+```
+
+Pulls `agentcert/certifier:latest` from Docker Hub (default tag), then runs.
+Override the tag by setting `CERTIFIER_IMAGE` in `.env`, for example:
+
+```bash
+# .env
+CERTIFIER_IMAGE=agentcert/certifier:latest                 # default
+# CERTIFIER_IMAGE=registry.acme.com/certifier:v2.1.0       # private registry
+# CERTIFIER_IMAGE=agentcert/certifier@sha256:abcd1234...   # pin by digest
+```
+
+`CERTIFIER_IMAGE` is also honoured directly by `certifier/docker-compose.yml`,
+so plain `docker compose --env-file ../.env up -d` will pull the same tag if
+you've set it.
+
+To publish a new build to Docker Hub, use:
+
+```bash
+./scripts/build-and-push.sh
+# pushes agentcert/certifier:latest (and the other monorepo images)
+```
+
+### Running on a different machine — env handling
+
+The certifier reads **every** env var from a single `.env` at the monorepo
+root (or whatever you pass to `--env-file`). On a new host:
+
+1. `git clone` the repo (or copy `certifier/` + `scripts/` + `.env.example`).
+2. `cp .env.example .env` and fill in the placeholders (`AZURE_OPENAI_*`,
+   `LANGFUSE_*`, `MONGODB_*`, `DOCKERHUB_*`, etc.). `.env` is gitignored.
+3. Run the certifier with one of:
+   ```bash
+   # Pull-mode (no build deps required):
+   ./scripts/start-local-services.sh --only-certifier --pull-certifier
+   # Build-mode (needs docker + git + ~3 GB of pip cache):
+   ./scripts/start-local-services.sh --only-certifier
+   ```
+
+The compose file references the env file as `env_file: ../.env`, and every
+variable is injected into the container's process environment at startup —
+the container itself contains no `.env` file (the `.dockerignore` excludes
+it). Compose `environment:` overrides apply on top, notably
+`MONGODB_CONNECTION_STRING` which is rewritten to talk to the shared monorepo
+mongo via `host.docker.internal` + `directConnection=true`.
+
+### Quick command reference
+
+After `--only-certifier` reports `[OK] Certifier up.`, open
+`http://localhost:8000/docs`. The endpoints are:
+
+| Method | Path | What it does |
+|---|---|---|
+| `POST` | `/api/v1/bucketing-extraction` | Phase 0+1: fetch a trace (Langfuse or file), classify events into per-fault buckets, extract per-fault metrics. Returns `task_id`. |
+| `POST` | `/api/v1/aggregation-certification` | Phase 2+3: aggregate every `*_metrics.json` under the experiment's fault-bucketing tree, build a 12-section certification report, render HTML + PDF. Returns `cert_task_id`. |
+| `GET`  | `/api/v1/tasks` | Poll a bucketing/extraction task by `experiment_id` + `experiment_run_id`. |
+| `GET`  | `/api/v1/cert-tasks` | Poll a certification task by `experiment_id`. |
+
+Outputs land under `certifier/workspace/{agent_id}/{experiment_id}/`:
+
+```
+fault-bucketing/{run_id}/
+  traces/raw_trace.json
+  fault_buckets/{raw_trace_bucket_*.json, bucketing_manifest.json, batch_classification_trace.json}
+  ground_truth/*.json
+  metrics/*_metrics.json          ← input to Phase 2
+  pipeline_summary.json
+aggregation/aggregation.json
+cert-builder/certification.json
+certification/
+  cert-{agent_id}-YYYY-MM-DD.html
+  cert-{agent_id}-YYYY-MM-DD.pdf
+```
+
+End-to-end smoke test (one Langfuse run, ~10 min wall-clock):
+
+```bash
+AGENT="<agent_id>"; EXP="<experiment_id>"; RID="<experiment_run_id>"
+
+# Phase 0+1
+curl -s -X POST -H "Content-Type: application/json" -d "$(cat <<EOF
+{"agent_id":"${AGENT}","experiment_id":"${EXP}","run_id":"${RID}",
+ "trace_source":{"type":"langfuse"},"storage_config":{"type":"local"}}
+EOF
+)" http://localhost:8000/api/v1/bucketing-extraction
+
+# Poll
+curl -s "http://localhost:8000/api/v1/tasks?experiment_id=${EXP}&experiment_run_id=${RID}"
+
+# Phase 2+3 (consumes every metrics.json under the experiment)
+curl -s -X POST -H "Content-Type: application/json" -d "$(cat <<EOF
+{"agent_id":"${AGENT}","agent_name":"vaya","experiment_id":"${EXP}",
+ "runs_per_fault":5,"storage_config":{"type":"local"}}
+EOF
+)" http://localhost:8000/api/v1/aggregation-certification
+
+# Poll
+curl -s "http://localhost:8000/api/v1/cert-tasks?experiment_id=${EXP}"
+```
 
 ---
 

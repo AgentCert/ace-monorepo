@@ -1,24 +1,43 @@
+# =============================================================================
+# Submodule configuration
+#
+# Every submodule declares the upstream branch it tracks. Run
+#   git submodule update --remote --merge
+# to fast-forward each submodule's working copy to the head of the declared
+# branch; then `git add <submodule>` + commit to advance the monorepo pointer.
+# Git submodules always pin to a SHA, never to a branch name — `branch = ...`
+# below is only a hint that drives `--remote` operations.
+# =============================================================================
+
 [submodule "AgentCert"]
 	path = AgentCert
 	url = https://github.com/AgentCert/AgentCert.git
+	branch = main
 [submodule "app-charts"]
 	path = app-charts
 	url = https://github.com/AgentCert/app-charts.git
+	branch = main
 [submodule "agent-charts"]
 	path = agent-charts
 	url = https://github.com/AgentCert/agent-charts.git
+	branch = main
 [submodule "certifier"]
 	path = certifier
 	url = https://github.com/AgentCert/certifier.git
+	branch = main
 [submodule "flash-agent"]
 	path = flash-agent
 	url = https://github.com/AgentCert/flash-agent.git
+	branch = main
 [submodule "agentcert-stack"]
 	path = agentcert-stack
 	url = https://github.com/AgentCert/agentcert-stack.git
+	branch = main
 [submodule "chaos-charts"]
 	path = chaos-charts
 	url = https://github.com/AgentCert/chaos-charts.git
+	branch = master
 [submodule "agent-sidecar"]
 	path = agent-sidecar
 	url = https://github.com/AgentCert/agent-sidecar.git
+	branch = main

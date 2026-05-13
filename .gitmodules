@@ -41,3 +41,7 @@
 	path = agent-sidecar
 	url = https://github.com/AgentCert/agent-sidecar.git
 	branch = main
+[submodule "litmus-go"]
+	path = litmus-go
+	url = https://github.com/AgentCert/litmus-go.git
+	branch = master

@@ -32,6 +32,7 @@
   - [6. Kubernetes cluster access](#6-kubernetes-cluster-access)
   - [7. Start AgentCert](#7-start-agentcert)
 - [Certifier API service (Dockerized)](#certifier-api-service-dockerized)
+- [Certifier endpoint configuration (for AgentCert integration)](#certifier-endpoint-configuration-for-agentcert-integration)
 - [Certifier Dev Tools](#certifier-dev-tools)
   - [Dump a Langfuse trace into pipeline-compatible JSON](#dump-a-langfuse-trace-into-pipeline-compatible-json)
   - [Run the full certification end-to-end](#run-the-full-certification-end-to-end)
@@ -347,6 +348,37 @@ After `--only-certifier` reports `[OK] Certifier up.`, open
 | `POST` | `/api/v1/aggregation-certification` | Phase 2+3: aggregate every `*_metrics.json` under the experiment's fault-bucketing tree, build a 12-section certification report, render HTML + PDF. Returns `cert_task_id`. |
 | `GET`  | `/api/v1/tasks` | Poll a bucketing/extraction task by `experiment_id` + `experiment_run_id`. |
 | `GET`  | `/api/v1/cert-tasks` | Poll a certification task by `experiment_id`. |
+
+### Certifier endpoint configuration (for AgentCert integration)
+
+To connect AgentCert GraphQL to the Certifier APIs above and the certificate PDF endpoint, set these variables:
+
+- `CERTIFIER_BASE_URL` - base URL used for `/api/v1/bucketing-extraction`, `/api/v1/tasks`, `/api/v1/aggregation-certification`, and `/api/v1/cert-tasks`
+- `CERTIFICATE_PDF_BASE_URL` - base URL used by AgentCert's PDF proxy endpoint
+
+Example (Azure):
+
+```bash
+CERTIFIER_BASE_URL=https://your-azure-certifier-host
+CERTIFICATE_PDF_BASE_URL=https://your-azure-pdf-host
+```
+
+Where to update:
+
+1. Local/scripted startup (primary path)
+  - Update root `.env` and run `scripts/azure_build/start-agentcert-v2.sh --env-file ...`
+
+2. Kubernetes deployment manifests
+  - Update both keys in:
+    - `AgentCert/chaoscenter/manifests/litmus-getting-started.yaml`
+    - `AgentCert/chaoscenter/manifests/litmus-installation.yaml`
+    - `AgentCert/chaoscenter/manifests/litmus-without-resources.yaml`
+
+3. Direct GraphQL local run (advanced/dev-only path)
+  - Update `AgentCert/chaoscenter/graphql/server/.env`
+
+> Note:
+> Use `start-agentcert-v2.sh` as the startup entrypoint. If you see old references to `start-agentcert.sh`, treat them as outdated.
 
 Outputs land under `certifier/workspace/{agent_id}/{experiment_id}/`:
 

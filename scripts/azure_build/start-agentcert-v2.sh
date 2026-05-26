@@ -281,7 +281,12 @@ export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
 # the sock-shop ns since MCP servers are now deployed by the sock-shop chart
 # alongside the application, scoping their RBAC to the experiment.
 export K8S_MCP_URL="$(env_val K8S_MCP_URL http://kubernetes-mcp-server.sock-shop.svc.cluster.local:8081/mcp)"
-export PROM_MCP_URL="$(env_val PROM_MCP_URL http://prometheus-mcp-server.sock-shop.svc.cluster.local:9090/mcp)"
+# 8083 = Service port for prometheus-mcp-server in the sock-shop chart
+# (targetPort 9090 is container-side only and not reachable via cluster DNS).
+export PROM_MCP_URL="$(env_val PROM_MCP_URL http://prometheus-mcp-server.sock-shop.svc.cluster.local:8083/mcp)"
+# Path the GraphQL binary uses (via godotenv.Overload in server.go init) so
+# the monorepo-root .env is the single source of truth for the binary.
+export AGENTCERT_ENV_FILE="${ENV_FILE}"
 export INFRA_DEPLOYMENTS='["app=chaos-exporter", "name=chaos-operator", "app=event-tracker","app=workflow-controller","app=kubernetes-mcp-server","app=prometheus-mcp-server"]'
 
 export DEFAULT_AGENT_HUB_GIT_URL="${AGENT_CHARTS_GIT_URL:-https://github.com/agentcert/agent-charts}"
@@ -383,6 +388,7 @@ sleep 1
 (cd "$GQL_DIR" && nohup env \
   REST_PORT="$GQL_REST_PORT" \
   GRPC_PORT="$GQL_GRPC_PORT" \
+  AGENTCERT_ENV_FILE="$AGENTCERT_ENV_FILE" \
   "$GQL_BINARY" >> "$PID_DIR/.graphql.log" 2>&1) &
 GQL_PID=$!
 echo "$GQL_PID" > "$PID_DIR/.agentcert-graphql.pid"

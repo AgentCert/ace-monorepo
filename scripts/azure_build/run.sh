@@ -181,7 +181,9 @@ export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
 # (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Sock-shop ns since
 # MCP servers deploy alongside the app for namespace-scoped RBAC.
 export K8S_MCP_URL="${K8S_MCP_URL:-http://kubernetes-mcp-server.sock-shop.svc.cluster.local:8081/mcp}"
-export PROM_MCP_URL="${PROM_MCP_URL:-http://prometheus-mcp-server.sock-shop.svc.cluster.local:9090/mcp}"
+# 8083 = Service port for prometheus-mcp-server in the sock-shop chart
+# (targetPort 9090 is container-side only and not reachable via cluster DNS).
+export PROM_MCP_URL="${PROM_MCP_URL:-http://prometheus-mcp-server.sock-shop.svc.cluster.local:8083/mcp}"
 
 # Infra deployment labels (used for readiness checks on subscriber connect)
 export INFRA_DEPLOYMENTS='["app=chaos-exporter", "name=chaos-operator", "app=event-tracker","app=workflow-controller","app=kubernetes-mcp-server","app=prometheus-mcp-server"]'

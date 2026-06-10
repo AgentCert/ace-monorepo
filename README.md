@@ -38,6 +38,7 @@
   - [Render a certification report to PDF](#render-a-certification-report-to-pdf)
 - [Admin Actions](#admin-actions)
   - [Build & push all Docker images to Docker Hub](#build--push-all-docker-images-to-docker-hub)
+- [Community & Contributing](#community--contributing)
 - [License](#license)
 
 ---
@@ -487,6 +488,16 @@ To use a different env file:
 ```bash
 ./scripts/build-and-push.sh --env-file /path/to/.env
 ```
+
+---
+
+## Community & Contributing
+
+Questions, ideas, or want to help build ACE? Join us on Slack:
+
+**[👉 AgentCert Slack workspace](https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw)**
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, branching, commit, issue, and pull-request guidelines.
 
 ---
 

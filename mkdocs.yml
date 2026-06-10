@@ -1,0 +1,35 @@
+site_name: ACE Wiki
+site_description: Documentation for ACE — the Agent Certification Engine.
+site_url: https://agentcert.github.io/ace-monorepo/
+repo_url: https://github.com/AgentCert/ace-monorepo
+repo_name: AgentCert/ace-monorepo
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Try it out: quickstart.md

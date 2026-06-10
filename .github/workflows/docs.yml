@@ -1,0 +1,44 @@
+name: Deploy docs
+
+# Build and publish the MkDocs site to GitHub Pages whenever code is pushed
+# or merged into the git-actions-deploy branch. workflow_dispatch also allows
+# a manual run from the Actions tab.
+on:
+  push:
+    branches: [git-actions-deploy]
+  workflow_dispatch:
+
+# Permissions required by the GitHub Pages deploy action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment; newer pushes cancel in-progress ones.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-docs.txt
+      - run: mkdocs build --strict --site-dir site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

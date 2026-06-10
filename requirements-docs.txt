@@ -1,0 +1,3 @@
+# Documentation site toolchain (MkDocs Material).
+# Pulls in mkdocs itself as a dependency. Used by .github/workflows/docs.yml.
+mkdocs-material==9.5.39

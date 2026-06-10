@@ -13,6 +13,7 @@ dist/
 build/
 *.egg-info/
 *.whl
+site/
 
 # IDE
 .idea/

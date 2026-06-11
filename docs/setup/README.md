@@ -70,17 +70,19 @@ Go, Node, kubectl, or kind is required — the stack builds its own images and
 | Compose plugin v2.20+ | `docker compose version` | bundled with recent Docker |
 | Your user in the `docker` group | `groups \| grep docker` | `sudo usermod -aG docker "$USER"` (re-login) |
 
-Get the code (with submodules) and configure:
+Get the code (with submodules), then run the setup wizard:
 
 ```bash
 git clone --recurse-submodules <repo-url> ace-monorepo
 cd ace-monorepo
-cp .env.example .env        # then edit — see configuration.md
+./scripts/setup.sh          # creates .env, asks only what matters (Azure OpenAI)
 ```
 
-At minimum fill in the `AZURE_OPENAI_*` keys in `.env`. Everything else has
-working defaults. See **[configuration.md](./configuration.md)** for the full
-reference and for changing ports.
+The wizard defaults everything except the **Azure OpenAI** credentials (the one
+thing truly required for the agent's LLM calls). Prefer editing by hand?
+`cp .env.example .env` and fill just the `AZURE_OPENAI_*` block — everything else
+has a working default. See **[configuration.md](./configuration.md)** for the
+full reference and for changing ports.
 
 ---
 

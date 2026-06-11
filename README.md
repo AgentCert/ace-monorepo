@@ -1,3 +1,4 @@
+
 <div align="center">
 
 # ACE Monorepo
@@ -6,10 +7,10 @@
 
 <p>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.21+-00ADD8.svg?logo=go&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.24+-00ADD8.svg?logo=go&logoColor=white">
   <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-326CE5.svg?logo=kubernetes&logoColor=white">
-  <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED.svg?logo=docker&logoColor=white">
-  <img alt="MongoDB" src="https://img.shields.io/badge/MongoDB-4.2-47A248.svg?logo=mongodb&logoColor=white">
+  <img alt="Docker Compose" src="https://img.shields.io/badge/Docker%20Compose-one--command-2496ED.svg?logo=docker&logoColor=white">
+  <img alt="MongoDB" src="https://img.shields.io/badge/MongoDB-5.0-47A248.svg?logo=mongodb&logoColor=white">
   <img alt="Langfuse" src="https://img.shields.io/badge/Tracing-Langfuse-1F5BFF.svg">
   <img alt="LiteLLM" src="https://img.shields.io/badge/Gateway-LiteLLM-6F42C1.svg">
 </p>
@@ -29,7 +30,7 @@
   - [2. Prerequisites](#2-prerequisites)
   - [3. Bring everything up](#3-bring-everything-up)
   - [4. Cluster scenarios (`CLUSTER_MODE`)](#4-cluster-scenarios-cluster_mode)
-  - [5. Langfuse & LiteLLM toggles](#5-langfuse--litellm-toggles)
+  - [5. MongoDB / Langfuse / LiteLLM toggles](#5-mongodb--langfuse--litellm-toggles)
   - [6. Operating the stack](#6-operating-the-stack)
   - [📚 Detailed setup guides (docs/setup/)](#-detailed-setup-guides--docssetup)
 - [Legacy script-based setup](#legacy-script-based-setup)
@@ -64,10 +65,12 @@ All project documentation lives in **[`docs/`](./docs)**:
 |---|---|---|
 | **Setup & operations** | [`docs/setup/`](./docs/setup/) | One-command bring-up, the three cluster routes, configuration & port reference, and the full experiment walkthrough. **Start here** to run the platform. |
 | **Architecture** | [`docs/architecture.md`](./docs/architecture.md) | End-to-end system architecture of the control plane + certifier. |
+| **Workflow animation** | [`docs/animated_archiecture/`](./docs/animated_archiecture/agentcert_workflow_animation.html) | Self-contained HTML animation of the AgentCert workflow (open in a browser). |
 | **Methodology** | [`docs/Methodologies/`](./docs/Methodologies/) | The certification methodology: [introduction](./docs/Methodologies/01-Introduction.md), [experiment design](./docs/Methodologies/02-Experiment-Design.md), [metrics](./docs/Methodologies/03-Metrics.md), [pipeline](./docs/Methodologies/04-Pipeline.md), [certification](./docs/Methodologies/05-Certification.md), [observations](./docs/Methodologies/06-Observations.md). |
 | **API** | [`docs/api.md`](./docs/api.md) · [`docs/api-changes-features-api-fixes.md`](./docs/api-changes-features-api-fixes.md) · [`docs/polling-api-redesign.md`](./docs/polling-api-redesign.md) | API reference, change log, and the polling-API redesign. |
 | **Storage** | [`docs/mongodb-storage.md`](./docs/mongodb-storage.md) | MongoDB storage model. |
 | **Compliance** | [`docs/rai-compliance-workflow.md`](./docs/rai-compliance-workflow.md) | Responsible-AI compliance workflow. |
+| **Testing & coverage** | [`docs/testing.md`](./docs/testing.md) | Running the test suites (Python/Go/TS), generating coverage, and the SonarQube dashboard. |
 
 > New to the platform? Go straight to **[`docs/setup/`](./docs/setup/)** and the [Quick Start](#quick-start-docker-compose) below.
 
@@ -77,13 +80,15 @@ All project documentation lives in **[`docs/`](./docs)**:
 
 | Module | Description |
 |--------|-------------|
-| [AgentCert](./AgentCert) | Core AgentCert platform |
-| [app-charts](./app-charts) | Application Helm charts |
-| [agent-charts](./agent-charts) | Agent Helm charts |
-| [certifier](./certifier) | Certification engine |
-| [flash-agent](./flash-agent) | Flash agent implementation |
-| [agentcert-stack](./agentcert-stack) | Full stack deployment |
-| [chaos-charts](./chaos-charts) | Chaos engineering charts |
+| [AgentCert](./AgentCert) | Core AgentCert platform — GraphQL control plane, auth, web UI |
+| [app-charts](./app-charts) | Application Helm charts (e.g. sock-shop) + the install-app image |
+| [agent-charts](./agent-charts) | Agent Helm charts + the install-agent image |
+| [certifier](./certifier) | Certification engine (FastAPI pipeline → JSON + PDF report) |
+| [flash-agent](./flash-agent) | Flash agent implementation (the agent under test) |
+| [agent-sidecar](./agent-sidecar) | Sidecar that proxies the agent's LLM/MCP traffic |
+| [agentcert-stack](./agentcert-stack) | Full-stack deployment assets (LiteLLM setup, etc.) |
+| [chaos-charts](./chaos-charts) | Chaos experiment & fault definitions (tracks `master`) |
+| [litmus-go](./litmus-go) | Litmus chaos experiment executors (Go) |
 
 ---
 
@@ -115,9 +120,14 @@ Everything — the Kubernetes cluster, MongoDB, the AgentCert control plane (aut
 GraphQL + UI), LiteLLM, Langfuse, and the Certifier — comes up with **one command**:
 
 ```bash
-cp .env.example .env        # then fill in the placeholders (Azure keys etc.)
+./scripts/setup.sh          # interactive: creates .env, asks only what matters
 docker compose up -d
 ```
+
+> First time? **[`./scripts/setup.sh`](./scripts/setup.sh)** is the easy path — it
+> creates `.env` and prompts only for the few values that actually matter (Azure
+> OpenAI), defaulting everything else. Prefer manual? `cp .env.example .env` and
+> fill just the `AZURE_OPENAI_*` block — see [§1](#1-configuration-files).
 
 No host-side Go/Node/kubectl toolchain is required — the only prerequisites are
 **Docker** and the **docker compose** plugin. The stack builds its own images,
@@ -135,13 +145,28 @@ together from a single `.env`.
 
 ### 1. Configuration files
 
+**Easiest — the setup wizard:**
+
+```bash
+./scripts/setup.sh
+```
+
+It creates `.env` from `.env.example`, asks only for the **Azure OpenAI**
+credentials (the one thing that's truly required) plus your `CLUSTER_MODE`, and
+defaults everything else. It's idempotent — re-run any time; Enter keeps current
+values. It can also bring the stack up for you at the end.
+
+**Manual alternative:**
+
 ```bash
 cp .env.example .env
 ```
 
-Fill in `.env` — at minimum the `AZURE_OPENAI_*` keys. The compose-specific
-switches live in the **"Docker Compose one-command bring-up"** block at the
-bottom of `.env`:
+For the default all-local flow you only need to fill the **`AZURE_OPENAI_*`**
+block (key, endpoint, chat deployment) — MongoDB creds, the LiteLLM key, and the
+Langfuse keys are all defaulted (Langfuse keys are auto-provisioned for the local
+stack). The compose-specific switches live in the **"Docker Compose one-command
+bring-up"** block at the bottom of `.env`:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -149,12 +174,15 @@ bottom of `.env`:
 | `KIND_CLUSTER_NAME` | `agentcert` | Name of the kind cluster created/reused. |
 | `HOST_KUBE_DIR` | `~/.kube` | Host kube dir mounted into the control plane. |
 | `HOST_PUBLIC_IP` | _(empty)_ | Required only for `CLUSTER_MODE=cloud` (pod call-backs). |
+| `MONGO_MODE` | `local` | `local` runs MongoDB in-stack; `external` reuses one via `DB_SERVER`. |
 | `LANGFUSE_MODE` | `local` | `local` runs Langfuse in-stack; `external` uses `LANGFUSE_HOST`. |
 | `LITELLM_MODE` | `local` | `local` runs the LiteLLM proxy; `external` uses `LITELLM_HOST`. |
-| `COMPOSE_PROFILES` | `langfuse,litellm` | Profiles activated (derive from the two `*_MODE` switches). |
+| `COMPOSE_PROFILES` | `mongo,langfuse,litellm` | Profiles compose actually reads — one token per `*_MODE=local`. |
+| `LANGFUSE_HOST_COMPOSE` | `http://langfuse-web:3000` | Langfuse URL for compose-bridge services (litellm, certifier); they reach it by service name, not the kind-gateway IP. |
 
 > **Note** &nbsp;`build-paths.env` is no longer needed for the compose flow — it
-> is only used by the [legacy scripts](#legacy-script-based-setup).
+> is only used by the [legacy scripts](#legacy-script-based-setup). Full
+> reference incl. **changing busy ports**: [`docs/setup/configuration.md`](./docs/setup/configuration.md).
 
 ### 2. Prerequisites
 
@@ -205,7 +233,7 @@ the control plane starts. Pick the value that matches your environment:
 | `CLUSTER_MODE` | Scenario | Behaviour |
 |---|---|---|
 | `auto` _(default)_ | "just work" | Probe the mounted kubeconfig — **reuse it if it works** (covers both cloud and local), **otherwise create a kind cluster**. |
-| `cloud` | **K8s on cloud, VM logged in** (AKS/EKS/GKE) | Reuse the existing cloud context. Set `HOST_PUBLIC_IP` so in-cluster pods can call back to this VM. Exec-auth kubeconfigs (`az`/`aws`/`gcloud`) need the cloud CLI + creds mounted — see the override snippet below. |
+| `cloud` | **K8s on cloud, VM logged in** (AKS/EKS/GKE) | Reuse the existing cloud context. Repoint the host endpoints (`SERVER_ADDR`, `SUBSCRIBER_CALLBACK_URL`, `LANGFUSE_HOST`, `LITELLM_HOST`) at `HOST_PUBLIC_IP` so remote pods can reach the VM. Use a cert-based kubeconfig (`az aks get-credentials --admin`). See [route 3](./docs/setup/route-3-cloud-aks.md). |
 | `local` | **Existing local cluster** (kind/minikube/k3s) | Reuse the existing local context; fail fast if none is reachable. |
 | `fresh` / `kind` | **Starting from scratch** | Always ensure a local kind cluster named `KIND_CLUSTER_NAME` (reusing `local-personal-workspace/kind-agentcert.yaml` if present). |
 
@@ -213,24 +241,24 @@ The control-plane containers run on the **host network**, so they bind the same
 ports the old scripts did and the `.env` contract (`172.26.0.1` = the kind
 network gateway / `localhost`) keeps working unchanged across all four cases.
 
-**Cloud exec-auth override** — for `CLUSTER_MODE=cloud` when your kubeconfig uses
-a CLI auth plugin, drop a `docker-compose.override.yml` next to the root compose:
+> **Cloud (route 3) note.** Prefer a **certificate-based** kubeconfig
+> (`az aks get-credentials --admin`) — it works with the stock images. An
+> exec-auth kubeconfig (Azure AD / `kubelogin`, `aws`, `gcloud`) needs the auth
+> plugin baked into **both** the `cluster-init` and `graphql` images, since
+> `cluster-init` runs `kubectl cluster-info` first. Full details, the
+> `docker-compose.override.yml`, and the firewall/endpoint checklist are in
+> [`docs/setup/route-3-cloud-aks.md`](./docs/setup/route-3-cloud-aks.md). For
+> most demos, `auto` against a local kind cluster is simplest.
 
-```yaml
-services:
-  cluster-init:
-    volumes:
-      - ${HOME}/.azure:/root/.azure          # or ~/.aws, ~/.config/gcloud
-  graphql:
-    volumes:
-      - ${HOME}/.azure:/root/.azure
-```
+### 5. MongoDB / Langfuse / LiteLLM toggles
 
-(and bake the relevant CLI into the `graphql` image, or generate a token-based
-kubeconfig). For most demos, `auto` against a local kind cluster is simplest.
+Each supporting service can run **in the stack** (`local`) or point at an
+**existing** instance (`external`). The `*_MODE` switch decides; `COMPOSE_PROFILES`
+must carry the matching token (`mongo` / `langfuse` / `litellm`) for each `local`.
 
-### 5. Langfuse & LiteLLM toggles
-
+- **`MONGO_MODE=local`** (default) runs `mongo:5` (replSet `rs0` + auth) under the
+  `mongo` profile. Set **`external`** + drop `mongo` from `COMPOSE_PROFILES` to
+  reuse an existing MongoDB via `DB_SERVER` / `MONGODB_CONNECTION_STRING`.
 - **`LANGFUSE_MODE=local`** (default) brings up the vendored Langfuse stack
   (`compose/langfuse/`) under the `langfuse` profile and **auto-provisions** the
   org/project/API keys from `.env` (`LANGFUSE_*`) on first boot — no manual UI
@@ -283,82 +311,41 @@ for the build-pipeline walk-through (image builds, Docker Hub pushes, the
 
 ## Certifier API service (Dockerized)
 
-The full FastAPI certifier — Phase 0 (fault bucketing) → Phase 1 (metrics extraction) → Phase 2 (aggregation) → Phase 3 (12-section certification report) → HTML + PDF rendering via playwright — runs as a single container tagged `certifier:latest` (local) or `agentcert/certifier:latest` (pushed to Docker Hub). The image, compose stack, and start script are designed to share the monorepo's MongoDB rather than ship their own.
+The full FastAPI certifier — Phase 0 (fault bucketing) → Phase 1 (metrics extraction) → Phase 2 (aggregation) → Phase 3 (12-section certification report) → HTML + PDF rendering via playwright — runs as the **`app`** service (container `certifier_app`) and **comes up automatically with `docker compose up -d`** at `http://localhost:8000/docs`. It shares the monorepo's MongoDB rather than shipping its own.
 
-### Build locally (default — for developers)
-
-```bash
-./scripts/start-local-services.sh --only-certifier            # builds if no image yet
-./scripts/start-local-services.sh --only-certifier --restart  # force-recreate after a rebuild
-```
-
-The script invokes `docker compose build app` on first use, then runs the
-container. The image is tagged `certifier:latest` and is **not** pushed
-anywhere.
-
-### Pull from Docker Hub (no build toolchain on target host)
-
-The certifier image is published at **[`docker.io/agentcert/certifier:latest`](https://hub.docker.com/r/agentcert/certifier)**:
-
-| | |
-|---|---|
-| Repository | `agentcert/certifier` |
-| Tag | `latest` |
-| Latest digest | `sha256:63e6604bac5ffba71372da37fc761bfaeca664871d6516668801c78d551db7d8` |
-| Compressed size | ~685 MB (11 layers) |
-| Pulled by | `./scripts/start-local-services.sh --only-certifier --pull-certifier` |
+### Build / run just the certifier
 
 ```bash
-./scripts/start-local-services.sh --only-certifier --pull-certifier
+docker compose up -d --build app          # build + run only the certifier
+docker compose up -d --force-recreate app # recreate after a rebuild
+docker compose logs -f app                # tail it
 ```
 
-Pulls `agentcert/certifier:latest` from Docker Hub (default tag), then runs.
-Override the tag by setting `CERTIFIER_IMAGE` in `.env`, for example:
+### Use a prebuilt image instead of building
+
+The certifier image is published at **[`docker.io/agentcert/certifier:latest`](https://hub.docker.com/r/agentcert/certifier)**. To pull it instead of building from source, set `CERTIFIER_IMAGE` in `.env`, then bring the service up:
 
 ```bash
 # .env
-CERTIFIER_IMAGE=agentcert/certifier:latest                 # default
+CERTIFIER_IMAGE=agentcert/certifier:latest                 # default published tag
 # CERTIFIER_IMAGE=registry.acme.com/certifier:v2.1.0       # private registry
-# CERTIFIER_IMAGE=agentcert/certifier@sha256:abcd1234...   # pin by digest
+# CERTIFIER_IMAGE=agentcert/certifier@sha256:<digest>      # pin by digest
 ```
-
-`CERTIFIER_IMAGE` is also honoured directly by `certifier/docker-compose.yml`,
-so plain `docker compose --env-file ../.env up -d` will pull the same tag if
-you've set it.
-
-To publish a new build to Docker Hub, use:
 
 ```bash
-./scripts/build-and-push.sh
-# pushes agentcert/certifier:latest (and the other monorepo images)
+docker compose pull app && docker compose up -d app
 ```
 
-### Running on a different machine — env handling
+To publish a new build (plus the other release images) to Docker Hub, use
+[`./scripts/build-and-push.sh`](#build--push-all-docker-images-to-docker-hub).
 
-The certifier reads **every** env var from a single `.env` at the monorepo
-root (or whatever you pass to `--env-file`). On a new host:
+### Env handling
 
-1. `git clone` the repo (or copy `certifier/` + `scripts/` + `.env.example`).
-2. `cp .env.example .env` and fill in the placeholders (`AZURE_OPENAI_*`,
-   `LANGFUSE_*`, `MONGODB_*`, `DOCKERHUB_*`, etc.). `.env` is gitignored.
-3. Run the certifier with one of:
-   ```bash
-   # Pull-mode (no build deps required):
-   ./scripts/start-local-services.sh --only-certifier --pull-certifier
-   # Build-mode (needs docker + git + ~3 GB of pip cache):
-   ./scripts/start-local-services.sh --only-certifier
-   ```
-
-The compose file references the env file as `env_file: ../.env`, and every
-variable is injected into the container's process environment at startup —
-the container itself contains no `.env` file (the `.dockerignore` excludes
-it). Compose `environment:` overrides apply on top, notably
-`MONGODB_CONNECTION_STRING` which is rewritten to talk to the shared monorepo
-mongo via `host.docker.internal` + `directConnection=true`.
+The certifier reads **every** env var from the monorepo-root `.env` (referenced as `env_file: ../.env` in `certifier/docker-compose.yml`); the container ships no `.env` of its own (`.dockerignore` excludes it). The root compose layers `environment:` overrides on top — notably `MONGODB_CONNECTION_STRING` (the shared mongo via `host.docker.internal` + `directConnection=true`) and `LANGFUSE_HOST` (the in-network `langfuse-web` service name, so trace reads aren't blocked by the host firewall). On a new host: `git clone`, `cp .env.example .env`, fill the placeholders (`AZURE_OPENAI_*`, `LANGFUSE_*`, `MONGODB_*`, …), then `docker compose up -d`.
 
 ### Quick command reference
 
-After `--only-certifier` reports `[OK] Certifier up.`, open
+Once `docker compose ps` shows `certifier_app` healthy, open
 `http://localhost:8000/docs`. The endpoints are:
 
 | Method | Path | What it does |

@@ -81,14 +81,31 @@ CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh/cloud)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
+# The kind docker-network gateway is the address in-cluster pods use to reach
+# host services. Its subnet is assigned PER-BOX (NOT always 172.26.0.1 — it
+# depends on how many docker networks already exist), so detect it rather than
+# hardcoding. Empty if the kind network doesn't exist yet (fresh VM); we
+# re-detect after bring-up below.
+detect_kind_gw() {
+    docker network inspect kind \
+        -f '{{range .IPAM.Config}}{{.Gateway}}
+{{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
+}
+
 # In-cluster pods call back to the control plane on this host. For kind/local
-# that's the kind-network gateway (172.26.0.1, the .env default); for cloud the
-# VM must be reachable at a routable IP, so ask for it.
+# that's the kind-network gateway; for cloud the VM must be reachable at a
+# routable IP, so ask for it.
 if [[ "${CLUSTER_MODE}" == cloud ]]; then
     CALLBACK_HOST="$(ask HOST_PUBLIC_IP 'VM public/reachable IP (in-cluster pods call back here)')"
     CALLBACK_HOST="$(echo "${CALLBACK_HOST}" | tr -d '[:space:]')"
 else
-    CALLBACK_HOST="172.26.0.1"
+    CALLBACK_HOST="$(detect_kind_gw || true)"
+    if [[ -n "${CALLBACK_HOST}" ]]; then
+        echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
+    else
+        CALLBACK_HOST="172.26.0.1"
+        warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
+    fi
 fi
 echo
 
@@ -128,6 +145,10 @@ if cb:
     sets["SUBSCRIBER_CALLBACK_URL"] = f"http://{cb}:8081"
     sets["SERVER_ADDR"]             = f"http://{cb}:8081/query"
     sets["PORTAL_ENDPOINT"]         = f"http://{cb}:8081"
+    # The chaos/flash agent runs INSIDE the cluster, so it reaches the host's
+    # LiteLLM gateway and Langfuse via the same pod->host gateway IP.
+    sets["LITELLM_HOST"]            = f"http://{cb}:14000"
+    sets["LANGFUSE_HOST"]           = f"http://{cb}:4000"
     if cm == "cloud":
         sets["HOST_PUBLIC_IP"] = cb
 
@@ -193,6 +214,25 @@ PY
     else
         printf '%s=%s\n' "$k" "$v" >> "${ENV_FILE}"
     fi
+}
+
+# Replace ONLY the host in an http(s)/mongodb URL env var, preserving the
+# scheme, any user:pass@, the port and path. Used to retarget pod->host
+# callback URLs at the real kind gateway without clobbering remapped ports.
+rehost() {
+    local k="$1" h="$2"
+    grep -qE "^${k}=" "${ENV_FILE}" || return 0
+    python3 - "${ENV_FILE}" "$k" "$h" <<'PY'
+import sys, re
+path, k, h = sys.argv[1:4]
+ls = open(path).read().splitlines()
+for i, l in enumerate(ls):
+    m = re.match(rf'^{re.escape(k)}=(.*)$', l)
+    if m:
+        v = re.sub(r'(//(?:[^/@]+@)?)[^:/]+', r'\g<1>' + h, m.group(1), count=1)
+        ls[i] = f"{k}={v}"
+open(path, "w").write("\n".join(ls) + "\n")
+PY
 }
 
 # Runs `docker compose up -d` and, on failure, resolves the three common causes:
@@ -343,6 +383,26 @@ compose_up() {
         break
     done
     rm -f "${log}"
+
+    # Re-detect the kind gateway now that bring-up has created the kind network
+    # (on a fresh VM it didn't exist when we wrote .env). If it differs from what
+    # we wrote, retarget the pod->host callback URLs and recreate graphql so the
+    # in-cluster subscriber/agent use the correct per-VM address.
+    if [[ "${result}" == ok && "${CLUSTER_MODE}" != cloud ]]; then
+        local gw_now
+        gw_now="$(detect_kind_gw || true)"
+        if [[ -n "${gw_now}" && "${gw_now}" != "${CALLBACK_HOST}" ]]; then
+            warn "kind gateway is ${gw_now} (placeholder was ${CALLBACK_HOST}) — retargeting pod->host callbacks in .env."
+            rehost SUBSCRIBER_CALLBACK_URL "${gw_now}"
+            rehost SERVER_ADDR             "${gw_now}"
+            rehost PORTAL_ENDPOINT         "${gw_now}"
+            rehost LITELLM_HOST            "${gw_now}"
+            rehost LANGFUSE_HOST           "${gw_now}"
+            CALLBACK_HOST="${gw_now}"
+            ( cd "${REPO_ROOT}" && docker compose up -d --force-recreate graphql >/dev/null 2>&1 ) || true
+            ok "Retargeted callbacks at ${gw_now} and recreated graphql."
+        fi
+    fi
     echo
     if [[ "${result}" == ok ]]; then
         local lport luser lpass admu admp lmode

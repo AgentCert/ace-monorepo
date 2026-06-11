@@ -21,6 +21,7 @@
 ## Table of Contents
 
 - [About ACE](#about-ace)
+- [Documentation](#documentation)
 - [Submodules](#submodules)
 - [Getting the Code](#getting-the-code)
 - [Quick Start (Docker Compose)](#quick-start-docker-compose)
@@ -52,6 +53,23 @@
 - **Pipeline.** Phase 0 (trace ingest) → Phase 1 (fault bucketing) → Phase 2 (statistical aggregation) → Phase 3 (certificate build).
 - **Local stack.** MongoDB for persistence, Langfuse for OTEL trace storage, LiteLLM as the unified LLM gateway in front of Azure OpenAI.
 - **Layout.** Each concern lives in its own submodule (see [Submodules](#submodules)) so components can be versioned, built, and released independently.
+
+---
+
+## Documentation
+
+All project documentation lives in **[`docs/`](./docs)**:
+
+| Area | Where | What's inside |
+|---|---|---|
+| **Setup & operations** | [`docs/setup/`](./docs/setup/) | One-command bring-up, the three cluster routes, configuration & port reference, and the full experiment walkthrough. **Start here** to run the platform. |
+| **Architecture** | [`docs/architecture.md`](./docs/architecture.md) | End-to-end system architecture of the control plane + certifier. |
+| **Methodology** | [`docs/Methodologies/`](./docs/Methodologies/) | The certification methodology: [introduction](./docs/Methodologies/01-Introduction.md), [experiment design](./docs/Methodologies/02-Experiment-Design.md), [metrics](./docs/Methodologies/03-Metrics.md), [pipeline](./docs/Methodologies/04-Pipeline.md), [certification](./docs/Methodologies/05-Certification.md), [observations](./docs/Methodologies/06-Observations.md). |
+| **API** | [`docs/api.md`](./docs/api.md) · [`docs/api-changes-features-api-fixes.md`](./docs/api-changes-features-api-fixes.md) · [`docs/polling-api-redesign.md`](./docs/polling-api-redesign.md) | API reference, change log, and the polling-API redesign. |
+| **Storage** | [`docs/mongodb-storage.md`](./docs/mongodb-storage.md) | MongoDB storage model. |
+| **Compliance** | [`docs/rai-compliance-workflow.md`](./docs/rai-compliance-workflow.md) | Responsible-AI compliance workflow. |
+
+> New to the platform? Go straight to **[`docs/setup/`](./docs/setup/)** and the [Quick Start](#quick-start-docker-compose) below.
 
 ---
 

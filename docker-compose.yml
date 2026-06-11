@@ -30,8 +30,10 @@ name: ace
 
 # Pull in the certifier stack and the profile-gated Langfuse stack so a single
 # `docker compose up` covers everything.
+# NOTE: the certifier `app` service is defined inline below (not via `include`)
+# so we can add its mongo dependency + Langfuse override without tripping the
+# "services.app conflicts with imported resource" error on Docker Compose < 2.21.
 include:
-  - certifier/docker-compose.yml
   - compose/langfuse/docker-compose.yml
 
 services:
@@ -254,17 +256,47 @@ services:
       retries: 3
       start_period: 40s
 
-  # ── Certifier: add the mongo dependency the standalone compose can't express ─
+  # ── Certifier API (inlined from certifier/docker-compose.yml) ───────────────
+  # Defined here rather than `include`d so the mongo dependency + Langfuse
+  # override below don't require Compose 2.21+'s included-service merging.
   app:
+    build:
+      context: ./certifier
+      dockerfile: Dockerfile
+      target: runtime
+    image: ${CERTIFIER_IMAGE:-certifier:latest}
+    container_name: certifier_app
+    restart: unless-stopped
     depends_on:
       mongo-init:
         condition: service_completed_successfully
         required: false
+    ports:
+      - "${API_PORT:-8000}:${API_PORT:-8000}"
+    env_file:
+      - .env
     environment:
-      # Same reason as litellm: the certifier reads Langfuse traces but runs on
-      # the compose bridge, so it must reach Langfuse by service name, not the
-      # kind-gateway IP (which UFW drops for non-172.26 sources).
+      # Shared monorepo mongo over host.docker.internal (directConnection bypasses
+      # the replica-set topology, which advertises localhost:27017).
+      MONGODB_CONNECTION_STRING: "${CERTIFIER_MONGODB_URI:-mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-1234}@host.docker.internal:27017/${MONGODB_DATABASE:-agentcert}?authSource=admin&directConnection=true}"
+      # Reach Langfuse by compose service name, not the kind-gateway IP (which
+      # UFW drops for non-172.26 sources). Override for LANGFUSE_MODE=external.
       LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}
+      PYTHONPATH: /app
+      API_PORT: "${API_PORT:-8000}"
+      WORKSPACE_DIR: /app/workspace
+      CERT_WORKSPACE_DIR: /app/workspace/cert
+    volumes:
+      - ./certifier/workspace:/app/workspace
+    healthcheck:
+      test: ["CMD", "sh", "-c",
+             "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:${API_PORT:-8000}/docs')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
   mongodb_data:

@@ -40,20 +40,34 @@ kind_cluster_exists() {
 
 ensure_kind() {
     if kind_cluster_exists; then
-        ok "kind cluster '${KIND_CLUSTER_NAME}' already exists — reusing it."
-    else
-        log "Creating kind cluster '${KIND_CLUSTER_NAME}' ..."
-        # Make sure ~/.kube exists so kind can write the kubeconfig.
-        mkdir -p "$(dirname "${KUBECONFIG}")"
-        if [[ -f "${KIND_CONFIG}" ]]; then
-            log "Using kind config ${KIND_CONFIG}"
-            kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"
-        else
-            warn "No kind config at ${KIND_CONFIG} — creating with defaults."
-            kind create cluster --name "${KIND_CLUSTER_NAME}"
+        kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
+        if context_works; then
+            ok "kind cluster '${KIND_CLUSTER_NAME}' already exists and is reachable — reusing it."
+            return 0
         fi
+        # Cluster exists but the API server is down (node container stopped, e.g.
+        # Exited 137). Try to restart its node(s) before giving up / recreating.
+        warn "kind cluster '${KIND_CLUSTER_NAME}' exists but its API server is unreachable — starting its node(s)…"
+        docker ps -a --format '{{.Names}}' \
+            | grep -E "^${KIND_CLUSTER_NAME}-(control-plane|worker)" \
+            | xargs -r docker start >/dev/null 2>&1 || true
+        for _ in $(seq 1 30); do
+            context_works && { ok "Restarted existing kind cluster '${KIND_CLUSTER_NAME}'."; return 0; }
+            sleep 2
+        done
+        warn "Still unreachable after restart — recreating the cluster."
+        kind delete cluster --name "${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
     fi
-    # Point the active context at the (possibly new) kind cluster.
+
+    log "Creating kind cluster '${KIND_CLUSTER_NAME}' ..."
+    mkdir -p "$(dirname "${KUBECONFIG}")"   # so kind can write the kubeconfig
+    if [[ -f "${KIND_CONFIG}" ]]; then
+        log "Using kind config ${KIND_CONFIG}"
+        kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"
+    else
+        warn "No kind config at ${KIND_CONFIG} — creating with defaults."
+        kind create cluster --name "${KIND_CLUSTER_NAME}"
+    fi
     kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
 }
 

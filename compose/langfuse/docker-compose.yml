@@ -27,8 +27,7 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    ports:
-      - 127.0.0.1:4030:3030
+    # No host port published — the worker is reached only internally.
     environment: &langfuse-worker-env
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:${LANGFUSE_PORT:-4000}}
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres}
@@ -113,9 +112,7 @@ services:
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
-    ports:
-      - 127.0.0.1:8123:8123
-      - 127.0.0.1:9000:9000
+    # No host ports — reached internally as clickhouse:8123 / :9000.
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
@@ -132,9 +129,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-miniosecret}
+    # Only the S3 API is published (the browser fetches media from it); the
+    # console stays internal.
     ports:
-      - 9090:9000
-      - 127.0.0.1:9091:9001
+      - "${MINIO_API_PORT:-9090}:9000"
     volumes:
       - langfuse_minio_data:/data
     healthcheck:
@@ -151,8 +149,6 @@ services:
     command: >
       --requirepass ${REDIS_AUTH:-myredissecret}
       --maxmemory-policy noeviction
-    ports:
-      - 127.0.0.1:6379:6379
     volumes:
       - langfuse_redis_data:/data
     healthcheck:
@@ -176,8 +172,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TZ: UTC
       PGTZ: UTC
-    ports:
-      - 127.0.0.1:5432:5432
     volumes:
       - langfuse_postgres_data:/var/lib/postgresql/data
 

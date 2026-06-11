@@ -283,7 +283,7 @@ services:
     environment:
       # Shared monorepo mongo over host.docker.internal (directConnection bypasses
       # the replica-set topology, which advertises localhost:27017).
-      MONGODB_CONNECTION_STRING: "${CERTIFIER_MONGODB_URI:-mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-1234}@mongo:27017/${MONGODB_DATABASE:-agentcert}?authSource=admin&directConnection=true}"
+      MONGODB_CONNECTION_STRING: "${CERTIFIER_MONGODB_URI:-mongodb://${MONGODB_USERNAME:-admin}:${MONGODB_PASSWORD:-1234}@mongo:27017/${MONGODB_DATABASE:-agentcert}?authSource=admin&directConnection=true}"
       # Reach Langfuse by compose service name, not the kind-gateway IP (which
       # UFW drops for non-172.26 sources). Override for LANGFUSE_MODE=external.
       LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}

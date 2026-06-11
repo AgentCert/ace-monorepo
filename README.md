@@ -23,14 +23,15 @@
 - [About ACE](#about-ace)
 - [Submodules](#submodules)
 - [Getting the Code](#getting-the-code)
-- [Setup](#setup)
+- [Quick Start (Docker Compose)](#quick-start-docker-compose)
   - [1. Configuration files](#1-configuration-files)
   - [2. Prerequisites](#2-prerequisites)
-  - [3. MongoDB](#3-mongodb)
-  - [4. Langfuse](#4-langfuse)
-  - [5. LiteLLM](#5-litellm)
-  - [6. Kubernetes cluster access](#6-kubernetes-cluster-access)
-  - [7. Start AgentCert](#7-start-agentcert)
+  - [3. Bring everything up](#3-bring-everything-up)
+  - [4. Cluster scenarios (`CLUSTER_MODE`)](#4-cluster-scenarios-cluster_mode)
+  - [5. Langfuse & LiteLLM toggles](#5-langfuse--litellm-toggles)
+  - [6. Operating the stack](#6-operating-the-stack)
+  - [📚 Detailed setup guides (docs/setup/)](#-detailed-setup-guides--docssetup)
+- [Legacy script-based setup](#legacy-script-based-setup)
 - [Certifier API service (Dockerized)](#certifier-api-service-dockerized)
 - [Certifier Dev Tools](#certifier-dev-tools)
   - [Dump a Langfuse trace into pipeline-compatible JSON](#dump-a-langfuse-trace-into-pipeline-compatible-json)
@@ -90,176 +91,177 @@ git submodule update --remote --merge
 
 ---
 
-## Setup
+## Quick Start (Docker Compose)
 
-End-to-end bring-up: configure env files → install MongoDB / Langfuse / LiteLLM → configure `kubectl` → run [`start-agentcert-v2.sh`](./scripts/azure_build/start-agentcert-v2.sh).
+Everything — the Kubernetes cluster, MongoDB, the AgentCert control plane (auth +
+GraphQL + UI), LiteLLM, Langfuse, and the Certifier — comes up with **one command**:
+
+```bash
+cp .env.example .env        # then fill in the placeholders (Azure keys etc.)
+docker compose up -d
+```
+
+No host-side Go/Node/kubectl toolchain is required — the only prerequisites are
+**Docker** and the **docker compose** plugin. The stack builds its own images,
+provisions a Kubernetes cluster if you don't have one, and wires every service
+together from a single `.env`.
+
+> ### 📚 Detailed setup guides — [`docs/setup/`](./docs/setup/)
+> Step-by-step, user-friendly docs for every scenario:
+> - **[Setup overview & prerequisites](./docs/setup/README.md)**
+> - **[Configuration & changing ports](./docs/setup/configuration.md)** — every `.env` switch + how to move busy ports
+> - **[Route 1 — reuse an existing local cluster](./docs/setup/route-1-existing-cluster.md)**
+> - **[Route 2 — fresh machine (compose creates kind)](./docs/setup/route-2-fresh-kind.md)**
+> - **[Route 3 — cloud Kubernetes (AKS/EKS/GKE)](./docs/setup/route-3-cloud-aks.md)**
+> - **[Running your first experiment](./docs/setup/running-an-experiment.md)** — create infra → enable chaos → apply YAML → run → certify
 
 ### 1. Configuration files
 
-Copy the two example files at the repo root and fill them in:
-
 ```bash
 cp .env.example .env
-cp build-paths.env.example build-paths.env
 ```
 
-- [`.env.example`](./.env.example) — secrets, image tags, ports, MongoDB / Langfuse / LiteLLM / Azure OpenAI endpoints. Replace every `CHANGE_ME` and `REPLACE_ME` placeholder.
-- [`build-paths.env.example`](./build-paths.env.example) — submodule checkout paths and git URLs. Paths are resolved relative to the file's own location, so no editing is required — copy (or symlink) it to `build-paths.env` and the configuration is complete.
+Fill in `.env` — at minimum the `AZURE_OPENAI_*` keys. The compose-specific
+switches live in the **"Docker Compose one-command bring-up"** block at the
+bottom of `.env`:
 
-> **Note** &nbsp;`.env` is gitignored — never commit secrets. `build-paths.env` carries no machine-specific state and is safe to commit if you prefer to skip the copy step.
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLUSTER_MODE` | `auto` | How the Kubernetes cluster is sourced — see [§4](#4-cluster-scenarios-cluster_mode). |
+| `KIND_CLUSTER_NAME` | `agentcert` | Name of the kind cluster created/reused. |
+| `HOST_KUBE_DIR` | `~/.kube` | Host kube dir mounted into the control plane. |
+| `HOST_PUBLIC_IP` | _(empty)_ | Required only for `CLUSTER_MODE=cloud` (pod call-backs). |
+| `LANGFUSE_MODE` | `local` | `local` runs Langfuse in-stack; `external` uses `LANGFUSE_HOST`. |
+| `LITELLM_MODE` | `local` | `local` runs the LiteLLM proxy; `external` uses `LITELLM_HOST`. |
+| `COMPOSE_PROFILES` | `langfuse,litellm` | Profiles activated (derive from the two `*_MODE` switches). |
 
-> **Tip** &nbsp;The bridge IP `172.26.0.1` in the examples is the docker bridge gateway. Locate yours with `ip -4 addr show docker0 | grep inet` and replace it everywhere.
+> **Note** &nbsp;`build-paths.env` is no longer needed for the compose flow — it
+> is only used by the [legacy scripts](#legacy-script-based-setup).
 
 ### 2. Prerequisites
 
 | Tool | Install |
 |------|---------|
-| Docker | `sudo apt-get install docker.io` |
-| Go 1.21+ | `sudo apt-get install golang-go` |
-| Node.js + yarn | `sudo apt-get install nodejs npm && npm install -g yarn` |
-| kubectl | `sudo snap install kubectl --classic` |
-| git | `sudo apt-get install git` |
+| Docker (28+) | `sudo apt-get install docker.io` |
+| docker compose plugin (v2.20+) | bundled with recent Docker; `docker compose version` to check |
 
-> [!IMPORTANT]
-> ### ⭐ Recommended path — one command for all local services
->
-> Once `.env` is filled in, bring up **MongoDB + Langfuse + LiteLLM + the Certifier API** with a single script:
->
-> ```bash
-> ./scripts/start-local-services.sh
-> ```
->
-> Idempotent — re-run anytime. Scope it with `--only-mongo` / `--only-langfuse` / `--only-litellm` / `--only-certifier` (or the matching `--skip-*` flags). Add `--restart` to recreate already-running services.
->
-> **What each step brings up**
->
-> | Step | What it does | Reachable at |
-> |---|---|---|
-> | `mongo` | `mongo:5` single-node replica set (`rs0`) with `admin`/`1234` auth, keyFile, and a persistent named volume. The replica set is initialised on first run. | `mongodb://admin:1234@localhost:27017/?authSource=admin` |
-> | `langfuse` | Upstream Langfuse compose stack (clones to `.tmp/langfuse` if not already on disk at `/opt/langfuse` or `~/langfuse`). | http://localhost:4000 |
-> | `litellm` | LiteLLM proxy compose stack from `agentcert-stack/litellm-setup/`. | http://localhost:14000 |
-> | `certifier` | Builds (if needed) and runs the `certifier:latest` image as `certifier_app`, sharing the script's MongoDB via `host.docker.internal` + `directConnection=true`. Implicitly starts MongoDB first when not already running. | Swagger: http://localhost:8000/docs — OpenAPI: http://localhost:8000/openapi.json |
->
-> The certifier reads every env var from the monorepo-root `.env` via `env_file: ../.env` in `certifier/docker-compose.yml` — there is no separate `.env` inside `certifier/`.
->
-> **➡ If you run this, skip sections 3–5 and jump straight to [§6 Kubernetes cluster access](#6-kubernetes-cluster-access).**
+For `CLUSTER_MODE` `fresh`/`auto`, the one-shot `cluster-init` container uses the
+mounted docker socket to create a [kind](https://kind.sigs.k8s.io) cluster — no
+host install of kind/kubectl is required.
 
-<details>
-<summary><b>Sections 3–5 — manual alternatives</b> (only needed if you want to inspect each step or run a service against a non-default config)</summary>
-
-### 3. MongoDB
-
-The startup script will start a `mongo:4.2` container automatically (`agentcert-mongo`, port `27017`). To start one manually:
+### 3. Bring everything up
 
 ```bash
-docker run -d --name agentcert-mongo -p 27017:27017 \
-  -e MONGO_INITDB_ROOT_USERNAME=admin \
-  -e MONGO_INITDB_ROOT_PASSWORD=CHANGE_ME \
-  mongo:4.2
+docker compose up -d          # build images + start the full stack
+docker compose ps             # watch services become healthy
+docker compose logs -f graphql
 ```
 
-Update `MONGODB_USERNAME`, `MONGODB_PASSWORD`, and `DB_SERVER` in `.env` to match.
+Order is enforced by `depends_on`: `cluster-init` resolves Kubernetes →
+`mongo`/`mongo-init` initialise the replica set → `auth`, then `graphql`, then
+`web` start; `litellm`, `langfuse`, and the `certifier` come up alongside.
 
-### 4. Langfuse
+**Reachable at**
 
-Langfuse is the OTEL backend for agent traces. Run a local instance via the official Langfuse compose stack:
+| Service | URL |
+|---|---|
+| AgentCert UI | http://localhost:2001 |
+| GraphQL (REST/WS) | http://localhost:8081 |
+| Auth (REST) | http://localhost:3000 |
+| Certifier (Swagger) | http://localhost:8000/docs |
+| LiteLLM proxy | http://localhost:14000 |
+| Langfuse | http://localhost:4000 |
+| MongoDB | `mongodb://admin:1234@localhost:27017/?replicaSet=rs0&authSource=admin` |
+
+Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env` (defaults `admin` /
+`litmus`).
+
+> The UI now serves over **HTTP on :2001** (prod nginx image), replacing the old
+> dev server's self-signed HTTPS.
+
+### 4. Cluster scenarios (`CLUSTER_MODE`)
+
+The one-shot `cluster-init` service resolves a working Kubernetes context before
+the control plane starts. Pick the value that matches your environment:
+
+| `CLUSTER_MODE` | Scenario | Behaviour |
+|---|---|---|
+| `auto` _(default)_ | "just work" | Probe the mounted kubeconfig — **reuse it if it works** (covers both cloud and local), **otherwise create a kind cluster**. |
+| `cloud` | **K8s on cloud, VM logged in** (AKS/EKS/GKE) | Reuse the existing cloud context. Set `HOST_PUBLIC_IP` so in-cluster pods can call back to this VM. Exec-auth kubeconfigs (`az`/`aws`/`gcloud`) need the cloud CLI + creds mounted — see the override snippet below. |
+| `local` | **Existing local cluster** (kind/minikube/k3s) | Reuse the existing local context; fail fast if none is reachable. |
+| `fresh` / `kind` | **Starting from scratch** | Always ensure a local kind cluster named `KIND_CLUSTER_NAME` (reusing `local-personal-workspace/kind-agentcert.yaml` if present). |
+
+The control-plane containers run on the **host network**, so they bind the same
+ports the old scripts did and the `.env` contract (`172.26.0.1` = the kind
+network gateway / `localhost`) keeps working unchanged across all four cases.
+
+**Cloud exec-auth override** — for `CLUSTER_MODE=cloud` when your kubeconfig uses
+a CLI auth plugin, drop a `docker-compose.override.yml` next to the root compose:
+
+```yaml
+services:
+  cluster-init:
+    volumes:
+      - ${HOME}/.azure:/root/.azure          # or ~/.aws, ~/.config/gcloud
+  graphql:
+    volumes:
+      - ${HOME}/.azure:/root/.azure
+```
+
+(and bake the relevant CLI into the `graphql` image, or generate a token-based
+kubeconfig). For most demos, `auto` against a local kind cluster is simplest.
+
+### 5. Langfuse & LiteLLM toggles
+
+- **`LANGFUSE_MODE=local`** (default) brings up the vendored Langfuse stack
+  (`compose/langfuse/`) under the `langfuse` profile and **auto-provisions** the
+  org/project/API keys from `.env` (`LANGFUSE_*`) on first boot — no manual UI
+  setup. Set **`LANGFUSE_MODE=external`** and remove `langfuse` from
+  `COMPOSE_PROFILES` to point at a hosted Langfuse via `LANGFUSE_HOST`.
+- **`LITELLM_MODE=local`** (default) runs the LiteLLM proxy under the `litellm`
+  profile. Set **`external`** and drop `litellm` from `COMPOSE_PROFILES` to use a
+  remote gateway via `LITELLM_HOST`.
+
+`COMPOSE_PROFILES` is what compose actually reads; keep it in sync with the two
+`*_MODE` switches (both local → `langfuse,litellm`).
+
+### 6. Operating the stack
 
 ```bash
-git clone https://github.com/langfuse/langfuse.git /tmp/langfuse
-cd /tmp/langfuse
-docker compose up -d
+docker compose up -d --build       # rebuild after code changes
+docker compose ps                  # status / health
+docker compose logs -f graphql     # tail a service
+docker compose restart graphql     # restart one service
+docker compose down                # stop everything (keeps volumes/data)
+docker compose down -v             # stop + wipe mongo/langfuse/litellm volumes
 ```
 
-Then, in the Langfuse UI (default `http://localhost:3000`):
-
-1. Create an organization + project.
-2. Settings → API Keys → create a key pair.
-3. Put the public/secret keys into `.env` as `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`.
-4. Set `LANGFUSE_HOST` to a URL reachable from BOTH the host and any in-cluster pod (use the docker-bridge IP, not `localhost`).
-
-### 5. LiteLLM
-
-LiteLLM is a unified LLM gateway in front of Azure OpenAI. Two deployment modes:
-
-**a) Local (Docker Compose)** — recommended for local development:
-
-```bash
-cd agentcert-stack/litellm-setup
-docker compose -f docker-compose-litellm.yml up -d
-# Proxy is now at http://localhost:4000
-```
-
-Set `LITELLM_HOST=http://<docker-bridge-ip>:4000` in `.env`.
-
-**b) In-cluster (Kubernetes)**:
-
-```bash
-kubectl apply -f agent-charts/litellm/namespace.yaml
-kubectl apply -f agent-charts/litellm/secret.yaml      # edit first with your keys
-kubectl apply -f agent-charts/litellm/configmap.yaml
-kubectl apply -f agent-charts/litellm/deployment.yaml
-# Port-forward so the host process can reach it:
-kubectl port-forward -n litellm svc/litellm-proxy 14000:4000
-```
-
-Set `LITELLM_HOST=http://<docker-bridge-ip>:14000` in `.env`.
-
-In either mode, `LITELLM_MASTER_KEY` in `.env` must match the value compiled into the LiteLLM config / secret.
-
-</details>
-
-### 6. Kubernetes cluster access
-
-The GraphQL server launches chaos experiments and install jobs as Kubernetes resources, so it needs a working `kubectl` context.
-
-```bash
-# Check current context
-kubectl config current-context
-kubectl get nodes
-
-# Common ways to wire it up:
-# - AKS:        az aks get-credentials --resource-group <rg> --name <cluster>
-# - GKE:        gcloud container clusters get-credentials <cluster> --zone <zone>
-# - EKS:        aws eks update-kubeconfig --name <cluster> --region <region>
-# - Local kind: kind create cluster --name agentcert
-# - Existing kubeconfig: export KUBECONFIG=/path/to/kubeconfig
-```
-
-The startup script reads the active context from `~/.kube/config` (override with `KUBECONFIG`). Required namespaces — `litmus`, `litellm`, and the application namespace (`sock-shop` by default for MCP URLs in `.env`) — are created on demand by the install jobs.
-
-> **Note** &nbsp;If you don't have a cluster yet and just want the local services up, pass `--skip-litellm` to the startup script.
-
-### 7. Start AgentCert
-
-Once `.env`, `build-paths.env`, MongoDB, Langfuse, LiteLLM, and `kubectl` are all set up:
-
-```bash
-bash scripts/azure_build/start-agentcert-v2.sh \
-  --env-file   $(pwd)/.env \
-  --paths-file $(pwd)/build-paths.env
-```
-
-**What it does**
-
-1. Frees ports `3000`, `3030`, `8081`, `8082`, `2001` (prompts before killing).
-2. Ensures MongoDB is running (skip with `--skip-mongo`).
-3. Exports every variable from `.env` and starts:
-   - **Auth service** (`go run`) on `:3000` (REST) / `:3030` (gRPC)
-   - **GraphQL server** (built binary) on `:8081`
-   - **Frontend** (`yarn dev`) on `https://localhost:2001` (skip with `--skip-frontend`)
-4. Logs go to `/tmp/agentcert-runtime/.{auth,graphql,frontend}.log`.
-
-Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env` (defaults: `admin` / `litmus`).
-
-**Stop everything**
-
-```bash
-bash AgentCert/stop-agentcert.sh
-```
-
-For a deeper walk-through of the build pipeline (image builds, Docker Hub pushes, the `--llm` flag), see [`scripts/azure_build/AZURE_BUILD_GUIDE.md`](./scripts/azure_build/AZURE_BUILD_GUIDE.md).
+The kind cluster created by `cluster-init` is **not** removed by
+`docker compose down` (it lives outside compose). Remove it explicitly with
+`kind delete cluster --name agentcert`.
 
 ---
+
+## Legacy script-based setup
+
+The original shell-script flow still works and is kept for development against
+host-run Go/Node processes. It requires the host toolchain (Go, Node/yarn,
+kubectl) and both config files (`.env` + `build-paths.env`):
+
+```bash
+cp .env.example .env
+cp build-paths.env.example build-paths.env
+./scripts/start-local-services.sh          # MongoDB + Langfuse + LiteLLM + Certifier
+bash scripts/azure_build/start-agentcert-v2.sh \
+    --env-file   $(pwd)/.env \
+    --paths-file $(pwd)/build-paths.env     # auth + GraphQL + frontend on the host
+bash AgentCert/stop-agentcert.sh           # stop the host processes
+```
+
+See [`scripts/azure_build/AZURE_BUILD_GUIDE.md`](./scripts/azure_build/AZURE_BUILD_GUIDE.md)
+for the build-pipeline walk-through (image builds, Docker Hub pushes, the
+`--llm` flag).
+
 
 ## Certifier API service (Dockerized)
 

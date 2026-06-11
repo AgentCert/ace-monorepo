@@ -1,0 +1,37 @@
+# =============================================================================
+# Isolation override for the "fresh from scratch" test (route 2).
+#
+# Used as:
+#   docker compose -p acefresh -f docker-compose.yml -f compose/fresh.override.yml up -d
+#
+# The base compose pins container_name on several services; this override
+# suffixes them with -fresh so the fresh stack never collides with the
+# (stopped, preserved) originals. The acefresh project also gives every named
+# volume a fresh acefresh_* identity, so MongoDB/Langfuse start empty.
+#
+# Pair with env:
+#   CLUSTER_MODE=fresh KIND_CLUSTER_NAME=agentcert-fresh
+#   KIND_CONFIG=/repo/compose/kind/kind-fresh.yaml
+#   COMPOSE_PROFILES=mongo,langfuse,litellm
+# =============================================================================
+services:
+  cluster-init:
+    container_name: ace-cluster-init-fresh
+    environment:
+      KIND_CONFIG: /repo/compose/kind/kind-fresh.yaml
+  mongo-keyfile:
+    container_name: ace-mongo-keyfile-fresh
+  mongo:
+    container_name: agentcert-mongo-fresh
+  mongo-init:
+    container_name: ace-mongo-init-fresh
+  auth:
+    container_name: agentcert-auth-fresh
+  graphql:
+    container_name: agentcert-graphql-fresh
+  web:
+    container_name: agentcert-web-fresh
+  litellm:
+    container_name: litellm-proxy-fresh
+  app:
+    container_name: certifier_app_fresh

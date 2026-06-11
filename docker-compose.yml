@@ -1,0 +1,277 @@
+# =============================================================================
+# ACE Monorepo — one-command bring-up
+#
+#   docker compose up -d
+#
+# Replaces the old two-script flow (scripts/start-local-services.sh +
+# scripts/azure_build/start-agentcert-v2.sh). Everything is driven by the
+# monorepo-root .env — see the "Docker Compose one-command bring-up" block
+# there for the switches: CLUSTER_MODE, LANGFUSE_MODE, LITELLM_MODE.
+#
+# Service map
+#   cluster-init  one-shot: ensures a working Kubernetes context (auto/cloud/
+#                 local/fresh) per CLUSTER_MODE; creates a kind cluster if none.
+#   mongo         mongo:5 replSet rs0 + keyFile + auth (admin/1234).
+#   auth          AgentCert authentication service   (REST :3000 / gRPC :3030)
+#   graphql       AgentCert GraphQL control plane     (REST :8081 / gRPC :8082)
+#   web           AgentCert UI (nginx)                (http://localhost:2001)
+#   litellm       LiteLLM gateway  [profile: litellm] (http://localhost:14000)
+#   app           Certifier API   (included)          (http://localhost:8000)
+#   langfuse-*    Langfuse stack   [profile: langfuse](http://localhost:4000)
+#
+# Networking: the control-plane services (cluster-init, mongo, auth, graphql,
+# web) use host networking so they bind the same host ports the old scripts did
+# and the existing .env contract (172.26.0.1 / localhost) keeps working across
+# every cluster scenario. In-cluster pods reach host-published services
+# (litellm :14000, langfuse :4000) via the kind gateway 172.26.0.1.
+# =============================================================================
+
+name: ace
+
+# Pull in the certifier stack and the profile-gated Langfuse stack so a single
+# `docker compose up` covers everything.
+include:
+  - certifier/docker-compose.yml
+  - compose/langfuse/docker-compose.yml
+
+services:
+
+  # ── Kubernetes provisioner (runs first; everything k8s-dependent waits) ─────
+  cluster-init:
+    build: ./compose/cluster-init
+    image: ace/cluster-init:latest
+    container_name: ace-cluster-init
+    network_mode: host
+    environment:
+      CLUSTER_MODE: ${CLUSTER_MODE:-auto}
+      KIND_CLUSTER_NAME: ${KIND_CLUSTER_NAME:-agentcert}
+      HOST_PUBLIC_IP: ${HOST_PUBLIC_IP:-}
+      KUBECONFIG: /host-kube/config
+      KUBECONFIG_OUT: /shared/config
+      KIND_CONFIG: /repo/local-personal-workspace/kind-agentcert.yaml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Directory (not file) so a machine with no ~/.kube still works.
+      - ${HOST_KUBE_DIR:-${HOME}/.kube}:/host-kube
+      # World-readable kubeconfig copy for non-root app containers.
+      - kubeconfig:/shared
+      - .:/repo:ro
+      # For CLUSTER_MODE=cloud with exec-auth kubeconfigs, mount the cloud cred
+      # dir + CLI via a docker-compose.override.yml (see README). Not mounted by
+      # default so a clean host doesn't get empty root-owned ~/.azure dirs.
+    restart: "no"
+
+  # ── MongoDB (replSet rs0 + keyFile + root auth) ─────────────────────────────
+  mongo-keyfile:
+    image: mongo:5
+    container_name: ace-mongo-keyfile
+    profiles: ["mongo"]
+    entrypoint:
+      - bash
+      - -c
+      - 'test -s /keydata/keyfile || { openssl rand -base64 756 > /keydata/keyfile && chmod 400 /keydata/keyfile && chown 999:999 /keydata/keyfile; }'
+    volumes:
+      - mongo_keyfile:/keydata
+    restart: "no"
+
+  mongo:
+    image: mongo:5
+    container_name: agentcert-mongo
+    profiles: ["mongo"]
+    network_mode: host
+    depends_on:
+      mongo-keyfile:
+        condition: service_completed_successfully
+    command: ["mongod", "--replSet", "rs0", "--keyFile", "/keydata/keyfile", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-1234}
+    volumes:
+      - mongodb_data:/data/db
+      - mongo_keyfile:/keydata:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "-u", "${MONGODB_USERNAME:-admin}", "-p", "${MONGODB_PASSWORD:-1234}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot: initialise the single-node replica set rs0 (idempotent).
+  mongo-init:
+    image: mongo:5
+    container_name: ace-mongo-init
+    profiles: ["mongo"]
+    network_mode: host
+    depends_on:
+      mongo:
+        condition: service_healthy
+    entrypoint:
+      - bash
+      - -c
+      - >
+        mongosh --quiet --host localhost:27017
+        -u ${MONGODB_USERNAME:-admin} -p ${MONGODB_PASSWORD:-1234} --authenticationDatabase admin
+        --eval 'try { if (rs.status().ok) { print("rs0 already initialized"); } }
+                catch (e) { rs.initiate({_id:"rs0", members:[{_id:0, host:"localhost:27017"}]}); print("rs0 initiated"); }'
+    restart: "no"
+
+  # ── AgentCert authentication service ────────────────────────────────────────
+  auth:
+    build:
+      context: AgentCert/chaoscenter/authentication
+      dockerfile: Dockerfile
+    image: ace/agentcert-auth:latest
+    container_name: agentcert-auth
+    network_mode: host
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+        required: false
+    env_file:
+      - .env
+    environment:
+      # Per-service ports (deliberately NOT in .env — see the .env comment).
+      REST_PORT: "${AUTH_REST_PORT:-3000}"
+      GRPC_PORT: "${AUTH_GRPC_PORT:-3030}"
+      DB_USER: ${MONGODB_USERNAME:-admin}
+      DB_PASSWORD: ${MONGODB_PASSWORD:-1234}
+    restart: unless-stopped
+
+  # ── AgentCert GraphQL control plane ─────────────────────────────────────────
+  graphql:
+    build:
+      context: AgentCert/chaoscenter/graphql
+      dockerfile: server/Dockerfile
+    image: ace/agentcert-graphql:latest
+    container_name: agentcert-graphql
+    network_mode: host
+    depends_on:
+      cluster-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+        required: false
+      auth:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # Generic per-service ports the binary reads (script mapped GQL_* → these).
+      REST_PORT: "${GQL_REST_PORT:-8081}"
+      GRPC_PORT: "${GQL_GRPC_PORT:-8082}"
+      DB_USER: ${MONGODB_USERNAME:-admin}
+      DB_PASSWORD: ${MONGODB_PASSWORD:-1234}
+      # Required keys the binary validates under LITMUS_*-prefixed names (the v2
+      # script renamed CHAOS_*_IMAGE → LITMUS_CHAOS_*_IMAGE at launch). Not in
+      # .env, so they survive godotenv.Overload.
+      LITMUS_CHAOS_OPERATOR_IMAGE: ${CHAOS_OPERATOR_IMAGE:-litmuschaos/chaos-operator:3.0.0}
+      LITMUS_CHAOS_RUNNER_IMAGE: ${CHAOS_RUNNER_IMAGE:-litmuschaos/chaos-runner:3.0.0}
+      LITMUS_CHAOS_EXPORTER_IMAGE: ${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}
+      # godotenv.Overload re-reads this file at init, so .env stays authoritative.
+      AGENTCERT_ENV_FILE: /srv/projects/ace-monorepo/.env
+      # World-readable copy written by cluster-init (host ~/.kube/config is 0600,
+      # unreadable by this container's uid 65534).
+      KUBECONFIG: /kube/config
+      # Computed values the v2 script derived (not present verbatim in .env).
+      OPENAI_BASE_URL: ${LITELLM_HOST:-http://172.26.0.1:14000}/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-agentcert-2026}
+      MODEL_ALIAS: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      CHAOS_CENTER_UI_ENDPOINT: ${SUBSCRIBER_CALLBACK_URL:-http://172.26.0.1:8081}
+      DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
+      DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
+      PRE_CLEANUP_WAIT_SECONDS: ${PRE_CLEANUP_WAIT_SECONDS:-0}
+    volumes:
+      # World-readable kubeconfig from cluster-init (kind apiserver reachable on
+      # host net at 127.0.0.1:<port>).
+      - kubeconfig:/kube:ro
+      # Mount the repo at its own absolute path so AGENT_CHARTS_ROOT /
+      # APP_CHARTS_ROOT / AGENTCERT_ENV_FILE (all absolute in .env) resolve.
+      - .:/srv/projects/ace-monorepo:ro
+    restart: unless-stopped
+
+  # ── AgentCert UI ────────────────────────────────────────────────────────────
+  web:
+    build:
+      context: AgentCert/chaoscenter/web
+      # Self-build dist (the repo ships no dist/); inline keeps it out of the
+      # AgentCert submodule.
+      dockerfile_inline: |
+        FROM node:24 AS builder
+        WORKDIR /web
+        COPY . .
+        RUN corepack enable || true
+        RUN yarn install --frozen-lockfile || yarn install
+        RUN yarn build
+        FROM registry.access.redhat.com/ubi8/ubi-minimal:8.10
+        RUN microdnf update --nodocs \
+            && microdnf module enable nginx:1.20 \
+            && microdnf install --nodocs nginx \
+            && microdnf clean all
+        COPY --from=builder /web/dist /opt/chaos
+        RUN chown 65534:0 -R /opt/chaos /var/log/nginx /etc/nginx
+        USER 65534
+        EXPOSE 2001
+        ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]
+    image: ace/agentcert-web:latest
+    container_name: agentcert-web
+    network_mode: host
+    depends_on:
+      graphql:
+        condition: service_started
+    volumes:
+      # Compose-tailored nginx: proxies /auth/→:3000 and /api/→:8081 on host net.
+      - ./compose/web-nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+  # ── LiteLLM gateway (profile: litellm) ──────────────────────────────────────
+  litellm:
+    image: ${LITELLM_PROXY_IMAGE:-litellm/litellm:v1.82.0-stable}
+    container_name: litellm-proxy
+    profiles: ["litellm"]
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${LITELLM_PORT:-14000}:4000"
+    env_file:
+      - .env
+    environment:
+      # litellm runs on the compose bridge, so it CANNOT reach Langfuse at the
+      # kind-gateway IP (172.26.0.1:4000) used by host/in-cluster callers — those
+      # packets are dropped by UFW (port 4000 is allowed only from 172.26.0.0/16).
+      # Reach Langfuse by its compose service name instead (same network). For
+      # LANGFUSE_MODE=external, set LANGFUSE_HOST_COMPOSE to your external URL.
+      LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}
+    volumes:
+      - ./agentcert-stack/litellm-setup/litellm_config.yaml:/app/config.yaml:ro
+      - litellm-data:/app/data
+    command: --config /app/config.yaml --port 4000 --detailed_debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ── Certifier: add the mongo dependency the standalone compose can't express ─
+  app:
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+        required: false
+    environment:
+      # Same reason as litellm: the certifier reads Langfuse traces but runs on
+      # the compose bridge, so it must reach Langfuse by service name, not the
+      # kind-gateway IP (which UFW drops for non-172.26 sources).
+      LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongo_keyfile:
+    driver: local
+  litellm-data:
+    driver: local
+  kubeconfig:
+    driver: local

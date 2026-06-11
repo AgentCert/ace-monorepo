@@ -1,0 +1,28 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    # Label so an ingress controller can schedule here (ingress-nginx kind preset)
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # ingress (host 8080 -> node 80), matching the old cluster
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      # Prometheus NodePort (sock-shop monitoring)
+      - containerPort: 31090
+        hostPort: 31090
+        protocol: TCP
+      # Grafana NodePort (sock-shop monitoring)
+      - containerPort: 31687
+        hostPort: 31687
+        protocol: TCP
+      # dex NodePort (auth OIDC)
+      - containerPort: 32000
+        hostPort: 32000
+        protocol: TCP

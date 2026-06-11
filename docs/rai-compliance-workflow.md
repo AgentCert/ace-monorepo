@@ -1,3 +1,9 @@
+---
+title: "RAI Compliance"
+parent: "Reference"
+nav_order: 5
+---
+
 # Responsible AI Decision Workflow
 
 This workflow defines the cleaned Section 6 design for Responsible AI and Security. It keeps the report executive-friendly while still explaining how the score is calculated.

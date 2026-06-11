@@ -1,3 +1,9 @@
+---
+title: "6 · Observations"
+parent: "Methodology"
+nav_order: 6
+---
+
 # 06 — Observations
 
 Living record of findings from real AgentCert runs: detection performance, PII exposure patterns, hallucination behaviour, and fault bucketing analysis.

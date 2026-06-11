@@ -1,3 +1,9 @@
+---
+title: "Route 1 · Existing Cluster"
+parent: "Setup"
+nav_order: 2
+---
+
 # Route 1 — Reuse an existing local cluster
 
 **Use this when:** you already have a working local Kubernetes cluster running

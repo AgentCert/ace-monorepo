@@ -1,3 +1,9 @@
+---
+title: "5 · Certification"
+parent: "Methodology"
+nav_order: 5
+---
+
 # 05 — Certification
 
 How the certification report is built, what each of the 12 sections contains, and which scenario applies depending on data completeness.

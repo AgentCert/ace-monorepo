@@ -1,3 +1,9 @@
+---
+title: "4 · Pipeline"
+parent: "Methodology"
+nav_order: 4
+---
+
 # 04 — Pipeline Architecture
 
 The technical implementation of the AgentCert pipeline: four phases (fault bucketing, metrics extraction, aggregation, certification) plus the optional statistical hypothesis framework.

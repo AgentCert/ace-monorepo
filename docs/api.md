@@ -1,3 +1,9 @@
+---
+title: "API Reference"
+parent: "Reference"
+nav_order: 1
+---
+
 # API Reference — AgentCert Certifier
 
 Base URL: `http://localhost:8000`  

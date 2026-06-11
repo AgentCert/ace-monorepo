@@ -1,3 +1,9 @@
+---
+title: "2 · Experiment Design"
+parent: "Methodology"
+nav_order: 2
+---
+
 # 02 — Experiment Design
 
 How AgentCert experiments are structured: the principles behind controlled fault injection, the methods and standards used, the fault taxonomy, and how each fault is specified with ground truth.

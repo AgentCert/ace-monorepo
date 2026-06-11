@@ -1,3 +1,9 @@
+---
+title: "1 · Introduction"
+parent: "Methodology"
+nav_order: 1
+---
+
 # 01 — Introduction
 
 Why AgentCert exists, what it does at a high level, and the core assumptions the entire pipeline rests on.

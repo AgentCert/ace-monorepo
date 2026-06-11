@@ -1,3 +1,9 @@
+---
+title: "Polling API Redesign"
+parent: "Reference"
+nav_order: 3
+---
+
 # Polling API Redesign — Semantic Query Parameters
 
 ## Problem

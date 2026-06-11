@@ -1,3 +1,9 @@
+---
+title: "Route 3 · Cloud (AKS/EKS/GKE)"
+parent: "Setup"
+nav_order: 4
+---
+
 # Route 3 — Cloud Kubernetes (AKS / EKS / GKE)
 
 **Use this when:** your Kubernetes cluster lives in the cloud and your VM is

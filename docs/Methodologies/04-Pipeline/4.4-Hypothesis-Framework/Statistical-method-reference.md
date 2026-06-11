@@ -1,3 +1,7 @@
+---
+nav_exclude: true
+---
+
 # Statistical Methods Reference
 
 [[_TOC_]]

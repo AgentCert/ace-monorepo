@@ -1,0 +1,44 @@
+# =============================================================================
+# GitHub Pages / Jekyll config for the ACE docs site (built from docs/).
+# Theme: just-the-docs — searchable left sidebar, mobile nav, clean typography.
+# Pinned to v0.6.2 for compatibility with the github-pages gem (Jekyll 3.x).
+# =============================================================================
+
+title: ACE
+description: >-
+  Agent Certification Engine — evaluate, fault-inject, and certify autonomous
+  agents under controlled chaos. One-command setup, three cluster routes, and a
+  reproducible certification pipeline.
+
+remote_theme: just-the-docs/just-the-docs@v0.6.2
+
+# GitHub Pages only runs safelisted plugins; list the ones this site relies on.
+plugins:
+  - jekyll-remote-theme   # required to pull the just-the-docs theme
+  - jekyll-relative-links # resolve relative .md links to page URLs
+  - jekyll-seo-tag        # <title>/meta/OpenGraph tags
+
+# ── just-the-docs options ────────────────────────────────────────────────────
+color_scheme: light
+search_enabled: true
+search:
+  heading_level: 3
+  previews: 3
+heading_anchors: true
+
+# Top-right auxiliary link
+aux_links:
+  "GitHub ↗":
+    - "https://github.com/AgentCert/ace-monorepo"
+aux_links_new_tab: true
+
+# Footer
+back_to_top: true
+back_to_top_text: "Back to top"
+footer_content: >-
+  ACE — Agent Certification Engine · Released under the MIT License.
+last_edit_timestamp: false
+
+# Keep build output out of the source.
+exclude:
+  - _site/

@@ -1,3 +1,9 @@
+---
+title: "Configuration & Ports"
+parent: "Setup"
+nav_order: 1
+---
+
 # Configuration & Changing Ports
 
 Everything is driven by the single **`.env`** file at the repo root. This page

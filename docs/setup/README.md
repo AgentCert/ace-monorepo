@@ -1,3 +1,9 @@
+---
+title: "Setup"
+nav_order: 2
+has_children: true
+---
+
 # ACE — One-Command Setup Guide
 
 This folder is the **complete, user-friendly guide** to bringing up the ACE

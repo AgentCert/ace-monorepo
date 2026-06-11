@@ -1,3 +1,9 @@
+---
+title: "Testing & Coverage"
+parent: "Reference"
+nav_order: 6
+---
+
 # Testing & Code Coverage
 
 This guide covers how to run the test suites across the monorepo, how

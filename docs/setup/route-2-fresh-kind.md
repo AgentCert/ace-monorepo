@@ -1,3 +1,9 @@
+---
+title: "Route 2 · Fresh kind"
+parent: "Setup"
+nav_order: 3
+---
+
 # Route 2 — Fresh machine (compose creates the kind cluster)
 
 **Use this when:** you have a clean machine with Docker but **no Kubernetes

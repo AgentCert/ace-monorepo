@@ -1,3 +1,9 @@
+---
+title: "API Changes & Fixes"
+parent: "Reference"
+nav_order: 2
+---
+
 # API Changes — `features/api-fixes`
 
 ## Overview

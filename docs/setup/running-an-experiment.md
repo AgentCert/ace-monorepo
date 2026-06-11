@@ -1,3 +1,9 @@
+---
+title: "Running an Experiment"
+parent: "Setup"
+nav_order: 5
+---
+
 # Running Your First Experiment
 
 This is the end-to-end flow **after the stack is up**: from logging in to a

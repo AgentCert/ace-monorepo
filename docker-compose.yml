@@ -41,7 +41,7 @@ services:
   # ── Kubernetes provisioner (runs first; everything k8s-dependent waits) ─────
   cluster-init:
     build: ./compose/cluster-init
-    image: ace/cluster-init:latest
+    image: agentcert/cluster-init:latest
     container_name: ace-cluster-init
     network_mode: host
     environment:
@@ -123,7 +123,7 @@ services:
     build:
       context: AgentCert/chaoscenter/authentication
       dockerfile: Dockerfile
-    image: ace/agentcert-auth:latest
+    image: agentcert/agentcert-auth:latest
     container_name: agentcert-auth
     network_mode: host
     depends_on:
@@ -145,7 +145,7 @@ services:
     build:
       context: AgentCert/chaoscenter/graphql
       dockerfile: server/Dockerfile
-    image: ace/agentcert-graphql:latest
+    image: agentcert/agentcert-graphql:latest
     container_name: agentcert-graphql
     network_mode: host
     depends_on:
@@ -215,7 +215,7 @@ services:
         USER 65534
         EXPOSE 2001
         ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]
-    image: ace/agentcert-web:latest
+    image: agentcert/agentcert-web:latest
     container_name: agentcert-web
     network_mode: host
     depends_on:

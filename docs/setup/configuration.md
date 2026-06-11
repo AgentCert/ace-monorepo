@@ -162,7 +162,7 @@ it for kind ingress, see the [route guides](./route-2-fresh-kind.md) and the
 ```bash
 ss -tlnp "( sport = :8081 )"          # your processes
 sudo ss -tlnp "( sport = :8081 )"     # include root-owned listeners
-docker ps --format '{{.Names}}\t{{.Ports}}' | grep 8081
+docker ps --format '{% raw %}{{.Names}}\t{{.Ports}}{% endraw %}' | grep 8081
 ```
 
 ---

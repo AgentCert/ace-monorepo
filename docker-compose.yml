@@ -80,11 +80,16 @@ services:
     image: mongo:5
     container_name: agentcert-mongo
     profiles: ["mongo"]
-    network_mode: host
+    # Bridge networking (NOT host) + a published port. The mongo image's
+    # user-init step always binds 27017 *inside the container* — on a bridge
+    # that can never collide with a 27017 already in use on the host. Map any
+    # free host port to the container's 27017 via MONGO_PORT (default 27017).
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
     depends_on:
       mongo-keyfile:
         condition: service_completed_successfully
-    command: ["mongod", "--replSet", "rs0", "--keyFile", "/keydata/keyfile", "--bind_ip_all", "--port", "${MONGO_PORT:-27017}"]
+    command: ["mongod", "--replSet", "rs0", "--keyFile", "/keydata/keyfile", "--bind_ip_all"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USERNAME:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-1234}
@@ -92,7 +97,7 @@ services:
       - mongodb_data:/data/db
       - mongo_keyfile:/keydata:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--port", "${MONGO_PORT:-27017}", "-u", "${MONGODB_USERNAME:-admin}", "-p", "${MONGODB_PASSWORD:-1234}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok"]
+      test: ["CMD", "mongosh", "--quiet", "-u", "${MONGODB_USERNAME:-admin}", "-p", "${MONGODB_PASSWORD:-1234}", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -100,11 +105,11 @@ services:
     restart: unless-stopped
 
   # One-shot: initialise the single-node replica set rs0 (idempotent).
+  # On the compose network, so it reaches mongo by service name on 27017.
   mongo-init:
     image: mongo:5
     container_name: ace-mongo-init
     profiles: ["mongo"]
-    network_mode: host
     depends_on:
       mongo:
         condition: service_healthy
@@ -112,10 +117,10 @@ services:
       - bash
       - -c
       - >
-        mongosh --quiet --host localhost:${MONGO_PORT:-27017}
+        mongosh --quiet --host mongo:27017
         -u ${MONGODB_USERNAME:-admin} -p ${MONGODB_PASSWORD:-1234} --authenticationDatabase admin
         --eval 'try { if (rs.status().ok) { print("rs0 already initialized"); } }
-                catch (e) { rs.initiate({_id:"rs0", members:[{_id:0, host:"localhost:${MONGO_PORT:-27017}"}]}); print("rs0 initiated"); }'
+                catch (e) { rs.initiate({_id:"rs0", members:[{_id:0, host:"localhost:27017"}]}); print("rs0 initiated"); }'
     restart: "no"
 
   # ── AgentCert authentication service ────────────────────────────────────────
@@ -278,7 +283,7 @@ services:
     environment:
       # Shared monorepo mongo over host.docker.internal (directConnection bypasses
       # the replica-set topology, which advertises localhost:27017).
-      MONGODB_CONNECTION_STRING: "${CERTIFIER_MONGODB_URI:-mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-1234}@host.docker.internal:${MONGO_PORT:-27017}/${MONGODB_DATABASE:-agentcert}?authSource=admin&directConnection=true}"
+      MONGODB_CONNECTION_STRING: "${CERTIFIER_MONGODB_URI:-mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASS:-1234}@mongo:27017/${MONGODB_DATABASE:-agentcert}?authSource=admin&directConnection=true}"
       # Reach Langfuse by compose service name, not the kind-gateway IP (which
       # UFW drops for non-172.26 sources). Override for LANGFUSE_MODE=external.
       LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}

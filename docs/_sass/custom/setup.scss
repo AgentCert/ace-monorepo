@@ -1,0 +1,10 @@
+// =============================================================================
+// just-the-docs SCSS variable overrides.
+// This file is imported by the theme BEFORE it lays out the nav, so changing
+// $nav-width here shrinks the sidebar AND re-aligns the main content margin
+// automatically (no manual margin math needed).
+// =============================================================================
+
+// Left navigation sidebar width (theme default is 264px). Smaller = more room
+// for content. Tune this single number to taste.
+$nav-width: 160px;

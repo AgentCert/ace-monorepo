@@ -1,0 +1,8 @@
+// just-the-docs puts max-width: $content-width (~800px) on .main, which leaves
+// a lot of dead whitespace on the right on wide screens. Remove it so the content
+// fills everything to the right of the sidebar.
+.main,
+.main-content,
+.main-content-wrap {
+  max-width: none;
+}

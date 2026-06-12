@@ -185,6 +185,15 @@ services:
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-agentcert-2026}
       MODEL_ALIAS: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
       CHAOS_CENTER_UI_ENDPOINT: ${SUBSCRIBER_CALLBACK_URL:-http://172.26.0.1:8081}
+      # graphql → certifier. Two endpoints, both on the certifier service:
+      #   CERTIFIER_BASE_URL       — certification data/scorecard API client
+      #   CERTIFICATE_PDF_BASE_URL — the "Download Certificate" PDF proxy
+      # Both default to the local compose certifier (host network → published
+      # host API_PORT). Override either in .env to use a hosted/Azure certifier;
+      # they can point at the same host. (graphql's code defaults are the dead
+      # ports :8088/:8089 → "connection refused", so we always set them here.)
+      CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL:-http://localhost:8000}
+      CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL:-http://localhost:8000}
       DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
       DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
       PRE_CLEANUP_WAIT_SECONDS: ${PRE_CLEANUP_WAIT_SECONDS:-0}

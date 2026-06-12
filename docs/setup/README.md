@@ -108,14 +108,19 @@ docker compose logs -f graphql
 ## Day-to-day commands
 
 ```bash
-docker compose up -d            # start / apply changes
-docker compose up -d --build    # rebuild after code changes
-docker compose ps               # status + health
-docker compose logs -f <svc>    # tail one service (graphql, auth, web, ...)
-docker compose restart <svc>    # restart one service
-docker compose down             # stop everything (data volumes kept)
-docker compose down -v          # stop + WIPE all data volumes
+docker compose up -d                              # start / apply changes
+docker compose up -d --force-recreate auth graphql web app  # restart control plane + reload .env
+docker compose ps                                 # status + health
+docker compose logs -f <svc>                      # tail one service (graphql, auth, web, app, ...)
+docker compose down                               # stop everything (data volumes kept)
+docker compose down -v                            # stop + WIPE all data volumes
 ```
+
+> **`docker compose restart` does NOT reload `.env`.** Env vars are read only
+> when a container is *created*, so after editing `.env` use
+> `up -d --force-recreate`. Neither command pulls/rebuilds images — see
+> **[managing-services.md](./managing-services.md)** for restarting, reloading
+> config, and updating images (pull vs build).
 
 > The kind cluster created by `cluster-init` lives **outside** compose and is
 > **not** removed by `docker compose down`. Delete it explicitly with
@@ -131,3 +136,4 @@ docker compose down -v          # stop + WIPE all data volumes
 - **[route-2-fresh-kind.md](./route-2-fresh-kind.md)** — fresh machine, compose makes the cluster.
 - **[route-3-cloud-aks.md](./route-3-cloud-aks.md)** — point at a cloud (AKS/EKS/GKE) cluster.
 - **[running-an-experiment.md](./running-an-experiment.md)** — the full UI flow from login to a certified experiment.
+- **[managing-services.md](./managing-services.md)** — restart individual services, reload `.env`, and update images (pull vs rebuild).

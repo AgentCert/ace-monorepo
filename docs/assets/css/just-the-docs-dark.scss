@@ -1,6 +1,0 @@
----
----
-/* Dark theme not used — site runs light scheme only. */
-/* This empty override prevents LibSass from compiling the theme's dark SCSS, */
-/* which uses Dart-Sass-only min()/max() with mixed rem/px units and fails    */
-/* on GitHub Pages (jekyll-sass-converter 1.5.2 / LibSass).                  */

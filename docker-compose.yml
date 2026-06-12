@@ -183,7 +183,7 @@ services:
       # Computed values the v2 script derived (not present verbatim in .env).
       OPENAI_BASE_URL: ${LITELLM_HOST:-http://172.26.0.1:14000}/v1
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-agentcert-2026}
-      MODEL_ALIAS: ${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      MODEL_ALIAS: ${FLASH_AGENT_MODEL:-gpt-4o}
       CHAOS_CENTER_UI_ENDPOINT: ${SUBSCRIBER_CALLBACK_URL:-http://172.26.0.1:8081}
       # graphql → certifier. Two endpoints, both on the certifier service:
       #   CERTIFIER_BASE_URL       — certification data/scorecard API client

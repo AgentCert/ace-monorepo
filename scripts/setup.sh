@@ -62,20 +62,109 @@ echo -e "${DIM}all-local 'docker compose up' flow. Only Azure OpenAI is${NC}"
 echo -e "${DIM}required for the agent's LLM calls to actually work.${NC}"
 echo
 
-# --- REQUIRED: Azure OpenAI -------------------------------------------------
-echo -e "${BOLD}1) Azure OpenAI${NC} ${DIM}(required for real agent runs)${NC}"
-AZ_KEY="$(ask AZURE_OPENAI_KEY 'API key')"
-AZ_ENDPOINT="$(ask AZURE_OPENAI_ENDPOINT 'Endpoint URL (https://<resource>.openai.azure.com/)')"
-AZ_DEPLOY="$(ask AZURE_OPENAI_CHAT_DEPLOYMENT_NAME 'Chat deployment name (e.g. gpt4o)')"
-AZ_APIVER="$(ask AZURE_OPENAI_API_VERSION 'API version (Enter for default)')"
-# Sanitize: strip whitespace and a stray trailing ']' that easily sneaks in on paste.
-AZ_ENDPOINT="$(echo "${AZ_ENDPOINT}" | tr -d '[:space:]')"; AZ_ENDPOINT="${AZ_ENDPOINT%]}"
-AZ_DEPLOY="$(echo "${AZ_DEPLOY}" | tr -d '[:space:]')"
-AZ_APIVER="$(echo "${AZ_APIVER}" | tr -d '[:space:]')"
+# --- Build & push (optional) ------------------------------------------------
+declare -a ALL_BUILD_IMAGES=(
+    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile|direct"
+    "2|agent-sidecar|agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile|direct"
+    "3|install-agent|agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile|direct"
+    "4|install-app|agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile|direct"
+    "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
+    "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
+    "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
+    "8|web|agentcert/agentcert-web|||compose:agentcert-web"
+    "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
+)
+DO_BUILD=0; DH_USER=""; DH_TOKEN=""
+declare -a SELECTED_BUILD_IMAGES=()
+
+read -rp "$(echo -e "${BOLD}Build and push Docker images to Docker Hub?${NC} ${DIM}[y/N]${NC}: ")" _build_ans
+if [[ "$_build_ans" =~ ^[Yy] ]]; then
+    echo
+    echo -e "   Select services to build ${DIM}(space-separated numbers, or Enter for all):${NC}"
+    for _entry in "${ALL_BUILD_IMAGES[@]}"; do
+        IFS='|' read -r _num _label _img _ _ _method <<< "$_entry"
+        [[ "$_method" == compose:* ]] && _note="via compose" || _note="direct"
+        echo -e "     ${BOLD}${_num})${NC} ${_label}  ${DIM}(${_img}:latest, ${_note})${NC}"
+    done
+    read -rp "   Selection [all]: " _sel
+    for _entry in "${ALL_BUILD_IMAGES[@]}"; do
+        IFS='|' read -r _num _ _ _ _ _ <<< "$_entry"
+        if [[ -z "$_sel" ]] || echo " ${_sel} " | grep -qw "${_num}"; then
+            SELECTED_BUILD_IMAGES+=("$_entry")
+        fi
+    done
+    if [[ ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
+        echo
+        DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
+        DH_TOKEN="$(ask DOCKERHUB_TOKEN 'Docker Hub token (dckr_pat_...)')"
+        DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
+        DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
+        [[ -n "$DH_USER" && -n "$DH_TOKEN" ]] && DO_BUILD=1 \
+            || warn "Docker Hub credentials missing — skipping build."
+    fi
+fi
+echo
+
+# --- Section 1: LiteLLM model configuration --------------------------------
+echo -e "${BOLD}1) LiteLLM models${NC} ${DIM}(configure which providers the proxy can reach; press Enter to skip a provider)${NC}"
+echo
+
+echo -e "   ${BOLD}a) Azure OpenAI${NC}"
+echo -e "      ${DIM}Used by: LiteLLM proxy (flash-agent) + certifier (direct SDK calls)${NC}"
+echo -e "      ${DIM}Certifier needs Azure regardless of which model the flash-agent uses.${NC}"
+AZ_KEY="$(ask AZURE_OPENAI_KEY 'API key (Enter to skip)')"
+AZ_ENDPOINT=""; AZ_DEPLOY=""; AZ_DEPLOY_GPT5=""; AZ_DEPLOY_EMBED=""
+AZ_ALIAS=""; AZ_APIVER=""
+if [[ -n "$AZ_KEY" ]]; then
+    AZ_ENDPOINT="$(ask AZURE_OPENAI_ENDPOINT 'Endpoint (https://<resource>.openai.azure.com/)')"
+    AZ_APIVER="$(ask AZURE_OPENAI_API_VERSION 'API version (Enter for default)')"
+    echo -e "      ${DIM}-- Certifier model deployments (exact names in Azure Portal) --${NC}"
+    AZ_DEPLOY="$(ask AZURE_OPENAI_CHAT_DEPLOYMENT_NAME 'Standard model deployment (certifier gpt-4o, e.g. gpt4o)')"
+    AZ_DEPLOY_GPT5="$(ask AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME 'Reasoning model deployment (certifier gpt-5.2, Enter = same as above)')"
+    AZ_DEPLOY_EMBED="$(ask AZURE_EMBEDDING_MODEL 'Embedding deployment (Enter to skip embeddings)')"
+    echo -e "      ${DIM}-- LiteLLM alias --${NC}"
+    AZ_ALIAS="$(ask AZURE_OPENAI_DEPLOYMENT 'Model alias in LiteLLM (what agents call it, e.g. gpt-4o)')"
+    # Sanitize: strip whitespace and a stray trailing ']' that easily sneaks in on paste.
+    AZ_ENDPOINT="$(echo "${AZ_ENDPOINT}" | tr -d '[:space:]')"; AZ_ENDPOINT="${AZ_ENDPOINT%]}"
+    AZ_DEPLOY="$(echo "${AZ_DEPLOY}" | tr -d '[:space:]')"
+    AZ_DEPLOY_GPT5="$(echo "${AZ_DEPLOY_GPT5:-${AZ_DEPLOY}}" | tr -d '[:space:]')"
+    AZ_DEPLOY_EMBED="$(echo "${AZ_DEPLOY_EMBED}" | tr -d '[:space:]')"
+    AZ_ALIAS="$(echo "${AZ_ALIAS:-gpt-4o}" | tr -d '[:space:]')"
+    AZ_APIVER="$(echo "${AZ_APIVER}" | tr -d '[:space:]')"
+fi
+echo
+
+echo -e "   ${BOLD}b) Google Gemini${NC} ${DIM}(provides: gemini-3-flash  gemini-2.5-flash  gemini-2.5-flash-lite)${NC}"
+GEMINI_KEY="$(ask GEMINI_API_KEY 'API key (Enter to skip)')"
+GEMINI_KEY="$(echo "${GEMINI_KEY}" | tr -d '[:space:]')"
+echo
+
+echo -e "   ${BOLD}c) OpenRouter${NC} ${DIM}(provides: auto-free)${NC}"
+OPENROUTER_KEY="$(ask OPENROUTER_API_KEY 'API key (Enter to skip)')"
+OPENROUTER_KEY="$(echo "${OPENROUTER_KEY}" | tr -d '[:space:]')"
+echo
+
+# --- Section 2: Flash-agent model selection --------------------------------
+# Build the list of active model aliases from whatever was just configured.
+CONFIGURED_MODELS=()
+[[ -n "$AZ_KEY" ]] && CONFIGURED_MODELS+=("${AZ_ALIAS:-gpt-4o}")
+[[ -n "$GEMINI_KEY" ]] && CONFIGURED_MODELS+=("gemini-3-flash" "gemini-2.5-flash" "gemini-2.5-flash-lite")
+[[ -n "$OPENROUTER_KEY" ]] && CONFIGURED_MODELS+=("auto-free")
+
+echo -e "${BOLD}2) Flash-agent model${NC} ${DIM}(which LiteLLM alias the agent will request)${NC}"
+if [[ ${#CONFIGURED_MODELS[@]} -gt 0 ]]; then
+    echo -e "   ${DIM}Configured: ${CONFIGURED_MODELS[*]}${NC}"
+    DEFAULT_FLASH="${CONFIGURED_MODELS[0]}"
+else
+    warn "   No providers configured — flash-agent won't be able to make LLM calls. Re-run to add one."
+    DEFAULT_FLASH="$(cur FLASH_AGENT_MODEL)"; DEFAULT_FLASH="${DEFAULT_FLASH:-gpt-4o}"
+fi
+FLASH_MODEL="$(ask FLASH_AGENT_MODEL 'Flash-agent model alias')"
+FLASH_MODEL="$(echo "${FLASH_MODEL:-${DEFAULT_FLASH}}" | tr -d '[:space:]')"
 echo
 
 # --- OPTIONAL: cluster + infra modes ---------------------------------------
-echo -e "${BOLD}2) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
+echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
 echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind · cloud=AKS/EKS/GKE${NC}"
 CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh/cloud)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
@@ -111,32 +200,73 @@ echo
 
 # --- write values (robust; values can contain / and special chars) ---------
 export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
-       _AZ_APIVER="$AZ_APIVER" _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST"
+       _AZ_DEPLOY_GPT5="$AZ_DEPLOY_GPT5" _AZ_DEPLOY_EMBED="$AZ_DEPLOY_EMBED" \
+       _AZ_ALIAS="$AZ_ALIAS" _AZ_APIVER="$AZ_APIVER" \
+       _GEMINI_KEY="$GEMINI_KEY" _OPENROUTER_KEY="$OPENROUTER_KEY" \
+       _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
+       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN"
 python3 - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
-key  = os.environ["_AZ_KEY"]
-ep   = os.environ["_AZ_ENDPOINT"]
-dep  = os.environ["_AZ_DEPLOY"]
 cm   = os.environ["_CLUSTER_MODE"]
 
-# Azure resource is reused across the main, certifier-reasoning, and embedding
-# model configs by default, so fan the same key/endpoint out to all of them.
 sets = {"CLUSTER_MODE": cm}
+
+# ── Azure OpenAI ──────────────────────────────────────────────────────────────
+key         = os.environ.get("_AZ_KEY", "")
+ep          = os.environ.get("_AZ_ENDPOINT", "")
+dep         = os.environ.get("_AZ_DEPLOY", "")
+dep_gpt5    = os.environ.get("_AZ_DEPLOY_GPT5", "") or dep   # falls back to standard if not set
+dep_embed   = os.environ.get("_AZ_DEPLOY_EMBED", "")
+az_alias    = os.environ.get("_AZ_ALIAS", "")
+ver         = os.environ.get("_AZ_APIVER", "")
 if key:
+    # Fan the same key/endpoint to all Azure consumers — certifier standard, reasoning, embedding.
     for k in ("AZURE_OPENAI_KEY","AZURE_OPENAI_API_KEY","AZURE_OPENAI_GPT5_API_KEY","AZURE_EMBEDDING_API_KEY"):
         sets[k] = key
 if ep:
     for k in ("AZURE_OPENAI_ENDPOINT","AZURE_OPENAI_GPT5_ENDPOINT","AZURE_EMBEDDING_ENDPOINT"):
         sets[k] = ep
 if dep:
-    for k in ("AZURE_OPENAI_DEPLOYMENT","AZURE_OPENAI_CHAT_DEPLOYMENT_NAME","AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME"):
-        sets[k] = dep
-ver = os.environ.get("_AZ_APIVER", "")
+    # Certifier standard model (gpt-4o in configs.json) — actual Azure deployment name.
+    sets["AZURE_OPENAI_CHAT_DEPLOYMENT_NAME"] = dep
+    # LiteLLM backend: full "azure/<deployment>" string for litellm_config.yaml.
+    sets["LITELLM_AZURE_CHAT_MODEL"] = f"azure/{dep}"
+if dep_gpt5:
+    # Certifier reasoning model (gpt-5.2 in configs.json) — may differ from standard.
+    sets["AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME"] = dep_gpt5
+if dep_embed:
+    # Certifier embedding model — only set if user provided a deployment.
+    sets["AZURE_EMBEDDING_MODEL"] = dep_embed
+if az_alias:
+    # LiteLLM model_name for the Azure entry (litellm_config.yaml reads via os.environ).
+    sets["AZURE_OPENAI_DEPLOYMENT"] = az_alias
 if ver:
-    # main + reasoning model share the chat API version; embeddings keep their own.
     for k in ("AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_GPT5_API_VERSION"):
         sets[k] = ver
+
+# ── Gemini ────────────────────────────────────────────────────────────────────
+gemini_key = os.environ.get("_GEMINI_KEY", "")
+if gemini_key:
+    sets["GEMINI_API_KEY"] = gemini_key
+
+# ── OpenRouter ────────────────────────────────────────────────────────────────
+openrouter_key = os.environ.get("_OPENROUTER_KEY", "")
+if openrouter_key:
+    sets["OPENROUTER_API_KEY"] = openrouter_key
+
+# ── Flash-agent model alias ───────────────────────────────────────────────────
+flash_model = os.environ.get("_FLASH_MODEL", "")
+if flash_model:
+    sets["FLASH_AGENT_MODEL"] = flash_model
+
+# ── Docker Hub ────────────────────────────────────────────────────────────────
+dh_user = os.environ.get("_DH_USER", "")
+dh_token = os.environ.get("_DH_TOKEN", "")
+if dh_user:
+    sets["DOCKERHUB_USERNAME"] = dh_user
+if dh_token:
+    sets["DOCKERHUB_TOKEN"] = dh_token
 
 # Network endpoints in-cluster pods use to reach the control plane on this host
 # (so SUBSCRIBER_CALLBACK_URL is never left as the YOUR_HOST_LAN_IP placeholder).
@@ -178,19 +308,31 @@ for k, v in sets.items():
 open(path, "w").write("\n".join(lines) + "\n")
 PY
 
-ok "Wrote Azure OpenAI settings + CLUSTER_MODE=${CLUSTER_MODE} to .env"
+ok "Wrote LiteLLM model config, flash-agent model, and CLUSTER_MODE=${CLUSTER_MODE} to .env"
 
 # --- summary + sanity -------------------------------------------------------
 echo
 echo -e "${CYAN}-------------------------------------------------------${NC}"
-if [[ -z "$AZ_KEY" || -z "$AZ_ENDPOINT" || -z "$AZ_DEPLOY" ]]; then
-    warn "Azure OpenAI is not fully set — the stack will still start, but the"
-    warn "agent's LLM calls will fail until you set AZURE_OPENAI_* (re-run this)."
-else
-    ok "Azure OpenAI configured."
+if [[ -n "$AZ_KEY" ]]; then
+    ok "Azure OpenAI"
+    echo -e "   LiteLLM alias   : ${BOLD}${AZ_ALIAS}${NC}  →  deployment ${BOLD}${AZ_DEPLOY}${NC}"
+    echo -e "   Certifier std   : ${BOLD}${AZ_DEPLOY}${NC}"
+    echo -e "   Certifier reason: ${BOLD}${AZ_DEPLOY_GPT5:-${AZ_DEPLOY}}${NC}"
+    [[ -n "$AZ_DEPLOY_EMBED" ]] && echo -e "   Certifier embed : ${BOLD}${AZ_DEPLOY_EMBED}${NC}" \
+                                || echo -e "   Certifier embed : ${DIM}(skipped)${NC}"
 fi
-echo -e "  Cluster mode : ${BOLD}${CLUSTER_MODE}${NC}"
-echo -e "  Infra        : MongoDB + Langfuse + LiteLLM run locally ${DIM}(defaults; edit .env to change)${NC}"
+if [[ -n "$GEMINI_KEY" ]]; then
+    ok "Gemini         gemini-3-flash  gemini-2.5-flash  gemini-2.5-flash-lite"
+fi
+if [[ -n "$OPENROUTER_KEY" ]]; then
+    ok "OpenRouter     auto-free"
+fi
+if [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then
+    warn "No LLM providers configured — agents won't be able to make LLM calls (re-run to add one)."
+fi
+echo -e "  Flash-agent model : ${BOLD}${FLASH_MODEL}${NC}"
+echo -e "  Cluster mode      : ${BOLD}${CLUSTER_MODE}${NC}"
+echo -e "  Infra             : MongoDB + Langfuse + LiteLLM run locally ${DIM}(defaults; edit .env to change)${NC}"
 echo -e "${CYAN}-------------------------------------------------------${NC}"
 echo
 echo -e "Next:  ${BOLD}docker compose up -d${NC}    ${DIM}then open http://localhost:2001 (admin / litmus)${NC}"
@@ -431,6 +573,61 @@ compose_up() {
         warn "Bring-up did NOT fully succeed (see above). After fixing, re-run: docker compose up -d"
     fi
 }
+
+# --- build and push (if requested earlier) ----------------------------------
+if [[ "${DO_BUILD}" -eq 1 ]]; then
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  Build & push selected images${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo
+    if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
+        ok "Logged in to Docker Hub as ${DH_USER}"
+        BUILD_FAILED=()
+        for _entry in "${SELECTED_BUILD_IMAGES[@]}"; do
+            IFS='|' read -r _num _label _img _ctx _df _method <<< "$_entry"
+            echo
+            echo -e "${CYAN}▸${NC} ${BOLD}${_img}:latest${NC}  ${DIM}(${_label})${NC}"
+            if [[ "$_method" == compose:* ]]; then
+                # inline dockerfile or compose-managed build — delegate to docker compose
+                _svc="${_method#compose:}"
+                if ( cd "${REPO_ROOT}" && docker compose build "${_svc}" ); then
+                    ok "  Built ${_img}:latest"
+                else
+                    warn "  Build failed: ${_label}"
+                    BUILD_FAILED+=("${_label} (build)"); continue
+                fi
+            else
+                if [[ ! -f "${_ctx}/${_df}" ]]; then
+                    warn "  Dockerfile not found: ${_ctx}/${_df} — skipping"
+                    BUILD_FAILED+=("${_label} (no Dockerfile)"); continue
+                fi
+                if docker build -t "${_img}:latest" -f "${_ctx}/${_df}" "${_ctx}"; then
+                    ok "  Built ${_img}:latest"
+                else
+                    warn "  Build failed: ${_label}"
+                    BUILD_FAILED+=("${_label} (build)"); continue
+                fi
+            fi
+            if docker push "${_img}:latest"; then
+                ok "  Pushed ${_img}:latest"
+            else
+                warn "  Push failed: ${_label}"
+                BUILD_FAILED+=("${_label} (push)")
+            fi
+        done
+        echo
+        if [[ ${#BUILD_FAILED[@]} -eq 0 ]]; then
+            ok "All selected images built and pushed successfully."
+        else
+            warn "Completed with failures: ${BUILD_FAILED[*]}"
+        fi
+    else
+        warn "Docker Hub login failed — images were NOT built."
+    fi
+    echo -e "${CYAN}=======================================================${NC}"
+    echo
+fi
 
 read -rp "$(echo -e "Bring the stack up now with 'docker compose up -d'? ${DIM}[y/N]${NC}: ")" go
 if [[ "$go" =~ ^[Yy] ]]; then

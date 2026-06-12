@@ -1,11 +1,2 @@
-// =============================================================================
-// just-the-docs SCSS variable overrides.
-// This file is imported by the theme BEFORE it lays out the nav, so changing
-// $nav-width here shrinks the sidebar AND re-aligns the main content margin
-// automatically (no manual margin math needed).
-// =============================================================================
-
-// Left navigation sidebar width. Must be in REM — the theme's mq() mixin
-// combines this with other rem values; mixing px+rem causes a LibSass error.
-// 13.75rem ≈ 220 px at 16 px base. Theme default is 16.5rem (264 px).
-$nav-width: 13.75rem;
+// 11rem ≈ 176 px. Theme default is 16.5rem (264 px).
+$nav-width: 11rem;

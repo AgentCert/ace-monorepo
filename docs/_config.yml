@@ -12,6 +12,7 @@ description: >-
   reproducible certification pipeline.
 
 remote_theme: just-the-docs/just-the-docs@v0.6.2
+repository: AgentCert/ace-monorepo
 
 # All plugins must be listed here when building outside the github-pages gem.
 plugins:

@@ -39,6 +39,8 @@ jobs:
         working-directory: docs
         env:
           JEKYLL_ENV: production
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAGES_REPO_NWO: ${{ github.repository }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

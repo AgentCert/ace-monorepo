@@ -2,6 +2,7 @@
 title: Methodology
 nav_order: 4
 has_children: true
+nav_fold: true
 ---
 
 # Certification Methodology

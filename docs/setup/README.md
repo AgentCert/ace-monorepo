@@ -2,6 +2,7 @@
 title: "Setup"
 nav_order: 2
 has_children: true
+nav_fold: true
 ---
 
 # ACE — One-Command Setup Guide

@@ -5,6 +5,7 @@
 // automatically (no manual margin math needed).
 // =============================================================================
 
-// Left navigation sidebar width (theme default is 264px). Smaller = more room
-// for content. Tune this single number to taste.
-$nav-width: 220px;
+// Left navigation sidebar width. Must be in REM — the theme's mq() mixin
+// combines this with other rem values; mixing px+rem causes a LibSass error.
+// 13.75rem ≈ 220 px at 16 px base. Theme default is 16.5rem (264 px).
+$nav-width: 13.75rem;

@@ -1,7 +1,8 @@
 # =============================================================================
-# GitHub Pages / Jekyll config for the ACE docs site (built from docs/).
-# Theme: just-the-docs — searchable left sidebar, mobile nav, clean typography.
-# Pinned to v0.6.2 for compatibility with the github-pages gem (Jekyll 3.x).
+# Jekyll config for the ACE docs site (built from docs/).
+# Theme: just-the-docs v0.6.2 — searchable left sidebar, mobile nav.
+# Build: GitHub Actions workflow (.github/workflows/pages.yml) with Jekyll 4
+# and Dart Sass (sass-embedded). See docs/Gemfile for gem versions.
 # =============================================================================
 
 title: ACE
@@ -12,11 +13,18 @@ description: >-
 
 remote_theme: just-the-docs/just-the-docs@v0.6.2
 
-# GitHub Pages only runs safelisted plugins; list the ones this site relies on.
+# All plugins must be listed here when building outside the github-pages gem.
 plugins:
-  - jekyll-remote-theme   # required to pull the just-the-docs theme
-  - jekyll-relative-links # resolve relative .md links to page URLs
-  - jekyll-seo-tag        # <title>/meta/OpenGraph tags
+  - jekyll-remote-theme         # pulls the just-the-docs theme
+  - jekyll-relative-links       # resolves relative .md links to page URLs
+  - jekyll-seo-tag              # <title>/meta/OpenGraph tags
+  - jekyll-include-cache        # required by just-the-docs
+  - jekyll-optional-front-matter # pages without front matter
+  - jekyll-default-layout       # auto-assigns layout to pages
+  - jekyll-titles-from-headings # extracts page title from first H1
+  - jekyll-github-metadata      # exposes GitHub repo metadata
+  - jekyll-paginate             # pagination support
+  - jekyll-gist                 # GitHub Gist embedding
 
 # ── just-the-docs options ────────────────────────────────────────────────────
 color_scheme: light
@@ -39,6 +47,8 @@ footer_content: >-
   ACE — Agent Certification Engine · Released under the MIT License.
 last_edit_timestamp: false
 
-# Keep build output out of the source.
+# Keep build output and tooling out of the source.
 exclude:
   - _site/
+  - Gemfile
+  - Gemfile.lock

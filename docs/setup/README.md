@@ -5,11 +5,9 @@ has_children: true
 nav_fold: true
 ---
 
-# You're 5 minutes from your first certification report.
+# You're minutes away from your first certification report.
 
-In a single `docker compose up -d` you get a complete platform: Kubernetes chaos injection, an LLM observability layer, a statistical certification pipeline, and a UI to drive it all. No infrastructure expertise required.
-
-This guide takes you from zero to a running certification experiment.
+One command starts the entire platform: Kubernetes chaos injection, an LLM observability layer, a statistical certification pipeline, and a UI to drive it all. No Go, Node, kubectl, kind, or Helm needs to be on your host — the stack builds its own images and provisions Kubernetes automatically.
 
 ---
 
@@ -17,29 +15,44 @@ This guide takes you from zero to a running certification experiment.
 
 **Prerequisites: Docker 28+ and the compose plugin. That's it.**
 
-```bash
-# 1. Clone with submodules
-git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
-cd ace-monorepo
-
-# 2. Configure — wizard asks only for your Azure OpenAI key
-./scripts/setup.sh
-
-# 3. Start everything
-docker compose up -d
-```
+<div class="qs-steps">
+  <div class="qs-step">
+    <div class="qs-num">1</div>
+    <div class="qs-body">
+      <strong>Clone with submodules</strong>
+      <pre><code>git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
+cd ace-monorepo</code></pre>
+    </div>
+  </div>
+  <div class="qs-step">
+    <div class="qs-num">2</div>
+    <div class="qs-body">
+      <strong>Configure — wizard walks you through LLM providers, flash-agent model, and cluster mode</strong>
+      <pre><code>./scripts/setup.sh</code></pre>
+    </div>
+  </div>
+  <div class="qs-step">
+    <div class="qs-num">3</div>
+    <div class="qs-body">
+      <strong>Start everything</strong>
+      <pre><code>docker compose up -d</code></pre>
+    </div>
+  </div>
+</div>
 
 Open **[http://localhost:2001](http://localhost:2001)** · login `admin / litmus`
 
-First run takes 5–15 minutes to build images; subsequent starts take seconds.
-
-> **Stuck?** Join [Slack ↗](https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw) — the fastest way to get unblocked.
+<div class="callout callout-info">
+<span class="callout-title">First run</span>
+Building images takes 5–15 minutes; subsequent starts take seconds.<br>
+<strong>Stuck?</strong> Join <a href="https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw">Slack ↗</a> — the fastest way to get unblocked.
+</div>
 
 ---
 
 ## Prerequisites
 
-You need **Docker** and the **compose plugin**. Nothing else — no Go, Node, kubectl, kind, or Helm needs to be on your host. The stack builds its own images and provisions Kubernetes automatically.
+You need **Docker** and the **compose plugin**. Nothing else.
 
 | Tool | Min version | Check | Install |
 |---|---|---|---|
@@ -47,24 +60,76 @@ You need **Docker** and the **compose plugin**. Nothing else — no Go, Node, ku
 | Docker Compose plugin | v2.20+ | `docker compose version` | bundled with recent Docker |
 | User in `docker` group | — | `groups \| grep docker` | `sudo usermod -aG docker $USER` then re-login |
 
-**Azure OpenAI** — the Flash ITOps agent uses Azure OpenAI for LLM calls. You need an endpoint and API key. Every other credential is auto-generated.
+**LLM credentials** — you need at least one of:
+
+<div class="route-grid" style="grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin-top: .6rem; margin-bottom: .8rem;">
+  <div class="route-card">
+    <div class="route-label">Azure OpenAI</div>
+    <div class="route-card-when">Powers both the <strong>flash-agent</strong> and the <strong>certifier</strong>. Required if you want certification reports.</div>
+  </div>
+  <div class="route-card">
+    <div class="route-label">Google Gemini</div>
+    <div class="route-card-when">Powers the <strong>flash-agent</strong> only. Provides <code>gemini-3-flash</code>, <code>gemini-2.5-flash</code>, <code>gemini-2.5-flash-lite</code>.</div>
+  </div>
+  <div class="route-card">
+    <div class="route-label">OpenRouter</div>
+    <div class="route-card-when">Powers the <strong>flash-agent</strong> only. Provides the <code>auto-free</code> alias for no-cost routing.</div>
+  </div>
+</div>
+
+<div class="callout callout-warning">
+<span class="callout-title">Certifier always needs Azure OpenAI</span>
+The 4-phase certification pipeline calls Azure OpenAI directly (standard model, reasoning model, embedding model). If you skip Azure credentials the flash-agent can still run experiments via Gemini or OpenRouter, but the certifier will not produce reports.
+</div>
 
 ---
 
-## What comes up
+## What Comes Up
 
-One command starts the entire platform:
+One `docker compose up -d` starts the full platform:
 
-| Service | What it does | URL |
-|---|---|---|
-| **Web UI** | AgentCert console — agents, experiments, reports | [localhost:2001](http://localhost:2001) |
-| **GraphQL API** | Control plane that drives all experiment logic | localhost:8081 |
-| **Auth** | JWT + OIDC via Dex | :3000 / :3030 |
-| **MongoDB** | Persistence (replica set `rs0`) | :27017 |
-| **LiteLLM** | LLM gateway in front of Azure OpenAI | localhost:14000 |
-| **Langfuse** | Trace store — every agent decision recorded here | [localhost:4000](http://localhost:4000) |
-| **Certifier** | 4-phase pipeline → 12-section PDF report | [localhost:8000/docs](http://localhost:8000/docs) |
-| **cluster-init** | One-shot: provisions Kubernetes (or reuses existing) | — |
+<div class="svc-grid">
+  <div class="svc-card">
+    <div class="svc-card-name">Web UI</div>
+    <div class="svc-card-desc">AgentCert console — agents, experiments, reports</div>
+    <a href="http://localhost:2001" class="svc-card-port">:2001</a>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">GraphQL API</div>
+    <div class="svc-card-desc">Control plane: registries, experiment logic, Helm bridge</div>
+    <span class="svc-card-port">:8081</span>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">Auth</div>
+    <div class="svc-card-desc">JWT issuance + OIDC via Dex</div>
+    <span class="svc-card-port">:3000 / :3030</span>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">MongoDB</div>
+    <div class="svc-card-desc">Sole persistence layer (replica set <code>rs0</code>)</div>
+    <span class="svc-card-port">:27017</span>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">LiteLLM</div>
+    <div class="svc-card-desc">LLM gateway — proxies calls to Azure OpenAI</div>
+    <a href="http://localhost:14000" class="svc-card-port">:14000</a>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">Langfuse</div>
+    <div class="svc-card-desc">Trace store — every agent decision recorded here</div>
+    <a href="http://localhost:4000" class="svc-card-port">:4000</a>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">Certifier</div>
+    <div class="svc-card-desc">4-phase pipeline → 12-section certification report</div>
+    <a href="http://localhost:8000/docs" class="svc-card-port">:8000/docs</a>
+  </div>
+  <div class="svc-card">
+    <div class="svc-card-name">cluster-init</div>
+    <div class="svc-card-desc">One-shot: provisions Kubernetes or reuses existing cluster</div>
+    <span class="svc-card-port">one-shot</span>
+  </div>
+</div>
 
 ---
 
@@ -99,17 +164,10 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
 ┌──────────────────────────────────────────────────────────┐
 │  Certifier :8000  — 4-phase pipeline                      │
 │                                                           │
-│  Phase 0 · Fault Bucketing                                │
-│    LLM classifies trace events into per-fault windows     │
-│                                                           │
-│  Phase 1 · Metrics Extraction  (×30 runs)                 │
-│    TTD, TTR, hallucination score, PII rate per fault      │
-│                                                           │
-│  Phase 2 · Statistical Aggregation                        │
-│    Mean, P95, confidence intervals across all runs        │
-│                                                           │
-│  Phase 3 · Certification                                  │
-│    12-section report with pass/fail verdict → PDF         │
+│  Phase 0 · Fault Bucketing     → classify trace events   │
+│  Phase 1 · Metrics Extraction  → TTD, TTR, scores ×30    │
+│  Phase 2 · Statistical Agg     → mean, P95, CI           │
+│  Phase 3 · Certification       → 12-section report + PDF │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -123,17 +181,35 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
 
 ---
 
-## Choosing your Kubernetes route
+## Choose Your Kubernetes Route
 
-The platform drives chaos experiments on a Kubernetes cluster. Set `CLUSTER_MODE` in `.env`:
+Set `CLUSTER_MODE` in `.env` to match your situation:
 
-| Route | Your situation | `CLUSTER_MODE` | Guide |
-|---|---|---|---|
-| **Route 1** | Local cluster already running (kind/minikube/k3s) | `local` | [→](./route-1-existing-cluster.md) |
-| **Route 2** | Fresh machine, nothing installed | `fresh` | [→](./route-2-fresh-kind.md) |
-| **Route 3** | Cloud cluster (AKS / EKS / GKE) | `cloud` | [→](./route-3-cloud-aks.md) |
+<div class="route-grid">
+  <div class="route-card">
+    <div class="route-label">Route 1</div>
+    <div class="route-card-title">Existing cluster</div>
+    <div class="route-card-env">CLUSTER_MODE=local</div>
+    <div class="route-card-when">You already have a working kind / minikube / k3s cluster and a valid kubeconfig. Lightest path — only the ACE control plane starts.</div>
+    <a href="/setup/route-1-existing-cluster.html" class="route-card-link">Setup guide →</a>
+  </div>
+  <div class="route-card">
+    <div class="route-label">Route 2</div>
+    <div class="route-card-title">Fresh machine</div>
+    <div class="route-card-env">CLUSTER_MODE=fresh</div>
+    <div class="route-card-when">Clean machine with Docker but no Kubernetes yet. <code>cluster-init</code> creates a local kind cluster for you. The true one-command path.</div>
+    <a href="/setup/route-2-fresh-kind.html" class="route-card-link">Setup guide →</a>
+  </div>
+  <div class="route-card">
+    <div class="route-label">Route 3</div>
+    <div class="route-card-title">Cloud cluster</div>
+    <div class="route-card-env">CLUSTER_MODE=cloud</div>
+    <div class="route-card-when">Your Kubernetes cluster lives in the cloud (AKS / EKS / GKE) and your VM is already logged in to it. ACE runs on the VM and drives the remote cluster.</div>
+    <a href="/setup/route-3-cloud-aks.html" class="route-card-link">Setup guide →</a>
+  </div>
+</div>
 
-`CLUSTER_MODE=auto` (the default) probes for an existing cluster first and creates one if none is found.
+`CLUSTER_MODE=auto` (the default) probes for an existing cluster first and creates a kind cluster if none is found.
 
 ---
 
@@ -147,16 +223,18 @@ AZURE_OPENAI_API_KEY=sk-...
 AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ```
 
-Everything else — MongoDB passwords, Langfuse keys, JWT secrets — is auto-generated. Full reference: [Configuration & Ports →](./configuration.md)
+Everything else — MongoDB passwords, Langfuse keys, JWT secrets — is auto-generated.
+
+Full reference: [Configuration & Ports →](/setup/configuration.html)
 
 ---
 
-## After the stack is up
+## After the Stack Is Up
 
 Follow the experiment guide to run your first certification:
 
-- **[Run your first experiment →](./running-an-experiment.md)** — UI walkthrough from login to report
-- **[Managing & restarting services →](./managing-services.md)** — day-to-day commands
+- **[Run your first experiment →](/setup/running-an-experiment.html)** — UI walkthrough from login to report
+- **[Managing & restarting services →](/setup/managing-services.html)** — day-to-day commands
 
 ### Useful commands
 
@@ -169,7 +247,10 @@ docker compose down                                        # stop (keep data)
 docker compose down -v                                     # stop + wipe all data
 ```
 
-> `docker compose restart` does **not** reload `.env`. Use `--force-recreate` when you change env vars.
+<div class="callout callout-warning">
+<span class="callout-title">⚠ Restart vs recreate</span>
+<code>docker compose restart</code> does <strong>not</strong> reload <code>.env</code>. Use <code>--force-recreate</code> when you change env vars.
+</div>
 
 ---
 
@@ -178,7 +259,7 @@ docker compose down -v                                     # stop + wipe all dat
 | Symptom | Fix |
 |---|---|
 | `cluster-init` exits non-zero | `docker compose logs cluster-init` — usually Docker socket permissions or missing kind config |
-| UI at :2001 shows blank | GraphQL not ready yet — wait 30s, then check `docker compose logs graphql` |
+| UI at :2001 shows blank | GraphQL not ready yet — wait 30 s, then check `docker compose logs graphql` |
 | Langfuse key errors | `docker compose restart langfuse-worker langfuse-server` — auto-provisioning runs on first boot only |
 | LiteLLM 401 errors | Check `AZURE_OPENAI_API_KEY` in `.env`, then `docker compose up -d --force-recreate litellm` |
 

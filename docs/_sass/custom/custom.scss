@@ -23,3 +23,269 @@
   padding-left: 2rem !important;
   padding-right: 2rem !important;
 }
+
+
+// ─── Callout / alert boxes ────────────────────────────────────────────────────
+
+.callout {
+  border-radius: 6px;
+  padding: .9rem 1.2rem;
+  margin: 1.1rem 0;
+  line-height: 1.65;
+  font-size: .92rem;
+}
+.callout p { margin: 0; }
+.callout p + p { margin-top: .4rem; }
+.callout code {
+  background: rgba(0,0,0,.07);
+  border-radius: 3px;
+  padding: .05em .3em;
+  font-size: .87em;
+}
+.callout a { font-weight: 500; }
+
+.callout-info    { background: #eff6ff; border-left: 4px solid #3b82f6; }
+.callout-success { background: #f0fdf4; border-left: 4px solid #22c55e; }
+.callout-warning { background: #fffbeb; border-left: 4px solid #f59e0b; }
+.callout-danger  { background: #fef2f2; border-left: 4px solid #ef4444; }
+.callout-tip     { background: #f5f3ff; border-left: 4px solid #8b5cf6; }
+
+.callout-title {
+  font-weight: 700;
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: .4rem;
+  display: block;
+}
+
+
+// ─── Service grid cards ───────────────────────────────────────────────────────
+
+.svc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: .85rem;
+  margin: 1.2rem 0;
+}
+
+.svc-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: .9rem 1rem;
+}
+
+.svc-card-name {
+  font-weight: 700;
+  font-size: .95rem;
+  color: #1e293b;
+  margin-bottom: .22rem;
+}
+
+.svc-card-desc {
+  font-size: .81rem;
+  color: #475569;
+  line-height: 1.45;
+  margin-bottom: .5rem;
+}
+
+.svc-card-port {
+  display: inline-block;
+  font-family: monospace;
+  font-size: .78rem;
+  background: #e2e8f0;
+  color: #334155;
+  border-radius: 4px;
+  padding: .1rem .42rem;
+  text-decoration: none;
+}
+
+a.svc-card-port {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+a.svc-card-port:hover {
+  background: #bfdbfe;
+  text-decoration: none;
+}
+
+
+// ─── Route selection cards ────────────────────────────────────────────────────
+
+.route-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0;
+}
+
+.route-card {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1.15rem 1.2rem;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.route-card:hover {
+  border-color: #93c5fd;
+  box-shadow: 0 2px 8px rgba(59,130,246,.12);
+}
+
+.route-label {
+  display: inline-block;
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  background: #dbeafe;
+  color: #1e40af;
+  border-radius: 4px;
+  padding: .15rem .5rem;
+  margin-bottom: .55rem;
+}
+
+.route-card-title {
+  font-weight: 700;
+  font-size: .98rem;
+  color: #0f172a;
+  margin-bottom: .3rem;
+}
+
+.route-card-env {
+  font-family: monospace;
+  font-size: .78rem;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: .12rem .4rem;
+  color: #334155;
+  margin-bottom: .45rem;
+  display: inline-block;
+}
+
+.route-card-when {
+  font-size: .82rem;
+  color: #475569;
+  line-height: 1.45;
+  margin-bottom: .65rem;
+}
+
+.route-card-link {
+  font-size: .82rem;
+  font-weight: 600;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.route-card-link:hover { text-decoration: underline; }
+
+
+// ─── Quick-start numbered steps ───────────────────────────────────────────────
+
+.qs-steps { margin: 1rem 0 1.5rem; }
+
+.qs-step {
+  display: flex;
+  gap: .85rem;
+  margin-bottom: .8rem;
+  align-items: flex-start;
+}
+
+.qs-num {
+  flex-shrink: 0;
+  width: 1.85rem;
+  height: 1.85rem;
+  border-radius: 50%;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 700;
+  font-size: .8rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: .15rem;
+}
+
+.qs-body {
+  flex: 1;
+  font-size: .9rem;
+  line-height: 1.5;
+}
+
+.qs-body strong {
+  display: block;
+  margin-bottom: .25rem;
+  font-size: .93rem;
+  color: #1e293b;
+}
+
+.qs-body pre {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  padding: .45rem .75rem;
+  font-size: .82rem;
+  margin: 0;
+  overflow-x: auto;
+}
+
+.qs-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+
+// ─── Horizontal pill tags ─────────────────────────────────────────────────────
+
+.pill {
+  display: inline-block;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  border-radius: 999px;
+  padding: .15rem .6rem;
+  margin-right: .3rem;
+}
+
+.pill-blue   { background: #dbeafe; color: #1e40af; }
+.pill-green  { background: #dcfce7; color: #166534; }
+.pill-amber  { background: #fef3c7; color: #92400e; }
+.pill-gray   { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+
+
+// ─── Step section headers (running-an-experiment style) ───────────────────────
+
+.step-section {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  margin-top: 2rem;
+  margin-bottom: .5rem;
+  padding-bottom: .4rem;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.step-circle {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: #1d4ed8;
+  color: #fff;
+  font-weight: 700;
+  font-size: .85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-section-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0;
+}

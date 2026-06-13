@@ -26,7 +26,7 @@ LITELLM_MODE=local
 COMPOSE_PROFILES=mongo,langfuse,litellm
 ```
 
-Fill in the `AZURE_OPENAI_*` keys (see [configuration.md](/setup/configuration.html#required-secrets)). Langfuse keys are auto-provisioned on first boot.
+Fill in the `AZURE_OPENAI_*` keys (see [configuration.md]({{ "/setup/configuration.html" | relative_url }}#required-secrets)). Langfuse keys are auto-provisioned on first boot.
 
 <div class="callout callout-tip">
 <code>CLUSTER_MODE=auto</code> behaves the same on a clean machine: it probes for a cluster, finds none, and creates kind. Use <code>fresh</code> to force creation every time.
@@ -94,7 +94,7 @@ kubectl --context kind-agentcert create clusterrolebinding argo-chaos-admin \
 
 ## 5. Next: Install Infra and Run an Experiment
 
-A fresh cluster has **no chaos infrastructure yet**. Follow **[running-an-experiment.md](/setup/running-an-experiment.html)** to:
+A fresh cluster has **no chaos infrastructure yet**. Follow **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})** to:
 create an environment → enable chaos → **download & apply the infra YAML** → create and run an experiment → read results and the certification.
 
 ---
@@ -110,4 +110,4 @@ kind stores etcd inside the node container with no external volume — deleting 
 
 - **Port 8080:** the kind config maps host `8080→80` for ingress. If 8080 is busy, edit `hostPort` in `local-personal-workspace/kind-agentcert.yaml` (e.g. to `8088`) before first start.
 - **Testing fresh without touching an existing cluster:** run the fresh stack in an isolated project using `compose/fresh.override.yml` (separate kind name + container names + volumes). See the override file's header for the exact command.
-- **UFW:** if your host firewall is active, in-cluster pods need ports opened from the kind subnet — see [running-an-experiment.md](/setup/running-an-experiment.html#networking-checklist-pods--host).
+- **UFW:** if your host firewall is active, in-cluster pods need ports opened from the kind subnet — see [running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }}#networking-checklist-pods--host).

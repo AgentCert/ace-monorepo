@@ -86,7 +86,7 @@ Open **[http://localhost:2001](http://localhost:2001)** and log in (`admin` / `l
 
 ## 5. Next: Run an Experiment
 
-Your cluster may already have the chaos infrastructure installed. If not, follow **[running-an-experiment.md](/setup/running-an-experiment.html)** to create an environment, enable chaos, apply the infra YAML, and run an experiment.
+Your cluster may already have the chaos infrastructure installed. If not, follow **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})** to create an environment, enable chaos, apply the infra YAML, and run an experiment.
 
 ---
 
@@ -98,7 +98,7 @@ If graphql logs <code>unable to load in-cluster configuration, KUBERNETES_SERVIC
 </div>
 
 - **minikube/k3s gateway IP:** the `172.26.0.1` references assume the kind network gateway. For other clusters, find the right host IP (`docker network inspect <net> | grep Gateway`, or your host LAN IP) and update the `172.26.0.1` values in `.env`.
-- **Switching back from a fresh test:** if you ran [route 2](/setup/route-2-fresh-kind.html) in the isolated `acefresh` project, stop it and restart your originals:
+- **Switching back from a fresh test:** if you ran [route 2]({{ "/setup/route-2-fresh-kind.html" | relative_url }}) in the isolated `acefresh` project, stop it and restart your originals:
   ```bash
   docker compose -p acefresh -f docker-compose.yml -f compose/fresh.override.yml down
   docker start agentcert-control-plane agentcert-mongo litellm-proxy \

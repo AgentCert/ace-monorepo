@@ -137,39 +137,98 @@ One `docker compose up -d` starts the full platform:
 
 ACE composes four subsystems. Understanding how they connect makes debugging and extending the platform straightforward.
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                  ACE Control Plane                        │
-│  Web UI :2001  ←→  GraphQL :8081  ←→  Auth :3000         │
-│                         │                                 │
-│                   MongoDB :27017                          │
-└─────────────────────┬────────────────────────────────────┘
-                      │  Argo Workflow + Helm
-                      ▼
-┌──────────────────────────────────────────────────────────┐
-│         Kubernetes Cluster (kind / AKS / your own)        │
-│                                                           │
-│  SockShop (SUT)    Flash ITOps Agent    Chaos Faults      │
-│  + Prometheus   ◀▶ + agent-sidecar  ←  (LitmusChaos)     │
-│  + Grafana         + MCP servers                          │
-└─────────────────────┬────────────────────────────────────┘
-                      │ LLM calls (OTEL traced)
-                      ▼
-               LiteLLM :14000  (Azure OpenAI proxy)
-                      │ trace spans
-                      ▼
-               Langfuse :4000  (every call recorded)
-                      │
-                      ▼
-┌──────────────────────────────────────────────────────────┐
-│  Certifier :8000  — 4-phase pipeline                      │
-│                                                           │
-│  Phase 0 · Fault Bucketing     → classify trace events   │
-│  Phase 1 · Metrics Extraction  → TTD, TTR, scores ×30    │
-│  Phase 2 · Statistical Agg     → mean, P95, CI           │
-│  Phase 3 · Certification       → 12-section report + PDF │
-└──────────────────────────────────────────────────────────┘
-```
+<div class="arch-diagram">
+
+  <div class="arch-box arch-box-cp">
+    <div class="arch-box-title">ACE Control Plane</div>
+    <div class="arch-services">
+      <div class="arch-svc">Web UI <span class="arch-svc-port">:2001</span></div>
+      <span class="arch-arrow-h">⟷</span>
+      <div class="arch-svc">GraphQL API <span class="arch-svc-port">:8081</span></div>
+      <span class="arch-arrow-h">⟷</span>
+      <div class="arch-svc">Auth <span class="arch-svc-port">:3000 / :3030</span></div>
+    </div>
+    <div class="arch-services" style="margin-top:.4rem;">
+      <div class="arch-svc">MongoDB <span class="arch-svc-port">:27017</span></div>
+    </div>
+  </div>
+
+  <div class="arch-connector">
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-label">Argo Workflow + Helm install</div>
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-arrow">▼</div>
+  </div>
+
+  <div class="arch-box arch-box-k8s">
+    <div class="arch-box-title">Kubernetes Cluster — kind / AKS / your own</div>
+    <div class="arch-services">
+      <div class="arch-svc">SockShop (SUT)<span class="arch-svc-note">Prometheus · Grafana</span></div>
+      <span class="arch-arrow-h">⟷</span>
+      <div class="arch-svc">Flash ITOps Agent<span class="arch-svc-note">agent-sidecar · MCP servers</span></div>
+      <span class="arch-arrow-h">←</span>
+      <div class="arch-svc">Chaos Faults<span class="arch-svc-note">LitmusChaos operator</span></div>
+    </div>
+  </div>
+
+  <div class="arch-connector">
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-label">LLM calls · OTEL traced</div>
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-arrow">▼</div>
+  </div>
+
+  <div class="arch-single">
+    <div class="arch-pill arch-pill-amber">
+      LiteLLM proxy
+      <span class="arch-pill-port">:14000</span>
+      <span class="arch-pill-note">Azure OpenAI · Gemini · OpenRouter</span>
+    </div>
+  </div>
+
+  <div class="arch-connector">
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-label">trace spans</div>
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-arrow">▼</div>
+  </div>
+
+  <div class="arch-single">
+    <div class="arch-pill arch-pill-blue">
+      Langfuse
+      <span class="arch-pill-port">:4000</span>
+      <span class="arch-pill-note">trace store · every agent decision recorded</span>
+    </div>
+  </div>
+
+  <div class="arch-connector">
+    <div class="arch-connector-line"></div>
+    <div class="arch-connector-arrow">▼</div>
+  </div>
+
+  <div class="arch-box arch-box-cert">
+    <div class="arch-box-title">Certifier — 4-phase pipeline · :8000</div>
+    <div class="arch-phases">
+      <div class="arch-phase">
+        <span class="arch-phase-num">Phase 0 · </span>Fault Bucketing
+        <span class="arch-phase-desc">LLM classifies trace events into per-fault windows</span>
+      </div>
+      <div class="arch-phase">
+        <span class="arch-phase-num">Phase 1 · </span>Metrics Extraction
+        <span class="arch-phase-desc">TTD · TTR · hallucination score · PII rate  ×30 runs</span>
+      </div>
+      <div class="arch-phase">
+        <span class="arch-phase-num">Phase 2 · </span>Statistical Aggregation
+        <span class="arch-phase-desc">mean · P95 · confidence intervals across all runs</span>
+      </div>
+      <div class="arch-phase">
+        <span class="arch-phase-num">Phase 3 · </span>Certification
+        <span class="arch-phase-desc">12-section report · pass/fail verdict → PDF</span>
+      </div>
+    </div>
+  </div>
+
+</div>
 
 **One experiment run, step by step:**
 
@@ -191,21 +250,21 @@ Set `CLUSTER_MODE` in `.env` to match your situation:
     <div class="route-card-title">Existing cluster</div>
     <div class="route-card-env">CLUSTER_MODE=local</div>
     <div class="route-card-when">You already have a working kind / minikube / k3s cluster and a valid kubeconfig. Lightest path — only the ACE control plane starts.</div>
-    <a href="/setup/route-1-existing-cluster.html" class="route-card-link">Setup guide →</a>
+    <a href="{{ "/setup/route-1-existing-cluster.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
   <div class="route-card">
     <div class="route-label">Route 2</div>
     <div class="route-card-title">Fresh machine</div>
     <div class="route-card-env">CLUSTER_MODE=fresh</div>
     <div class="route-card-when">Clean machine with Docker but no Kubernetes yet. <code>cluster-init</code> creates a local kind cluster for you. The true one-command path.</div>
-    <a href="/setup/route-2-fresh-kind.html" class="route-card-link">Setup guide →</a>
+    <a href="{{ "/setup/route-2-fresh-kind.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
   <div class="route-card">
     <div class="route-label">Route 3</div>
     <div class="route-card-title">Cloud cluster</div>
     <div class="route-card-env">CLUSTER_MODE=cloud</div>
     <div class="route-card-when">Your Kubernetes cluster lives in the cloud (AKS / EKS / GKE) and your VM is already logged in to it. ACE runs on the VM and drives the remote cluster.</div>
-    <a href="/setup/route-3-cloud-aks.html" class="route-card-link">Setup guide →</a>
+    <a href="{{ "/setup/route-3-cloud-aks.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
 </div>
 
@@ -225,7 +284,7 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4o
 
 Everything else — MongoDB passwords, Langfuse keys, JWT secrets — is auto-generated.
 
-Full reference: [Configuration & Ports →](/setup/configuration.html)
+Full reference: [Configuration & Ports →]({{ "/setup/configuration.html" | relative_url }})
 
 ---
 
@@ -233,8 +292,8 @@ Full reference: [Configuration & Ports →](/setup/configuration.html)
 
 Follow the experiment guide to run your first certification:
 
-- **[Run your first experiment →](/setup/running-an-experiment.html)** — UI walkthrough from login to report
-- **[Managing & restarting services →](/setup/managing-services.html)** — day-to-day commands
+- **[Run your first experiment →]({{ "/setup/running-an-experiment.html" | relative_url }})** — UI walkthrough from login to report
+- **[Managing & restarting services →]({{ "/setup/managing-services.html" | relative_url }})** — day-to-day commands
 
 ### Useful commands
 

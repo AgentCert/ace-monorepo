@@ -22,7 +22,7 @@ These live in the **"Docker Compose one-command bring-up"** block at the bottom 
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CLUSTER_MODE` | `auto` | How Kubernetes is sourced: `auto`, `local`, `cloud`, `fresh`/`kind`. See the [routes](/setup/README.html#choose-your-kubernetes-route). |
+| `CLUSTER_MODE` | `auto` | How Kubernetes is sourced: `auto`, `local`, `cloud`, `fresh`/`kind`. See the [routes]({{ "/setup/README.html" | relative_url }}#choose-your-kubernetes-route). |
 | `KIND_CLUSTER_NAME` | `agentcert` | Name of the kind cluster created/reused (routes 2 & auto). |
 | `HOST_KUBE_DIR` | `~/.kube` | Host kube directory mounted into the stack. Use an **absolute** path if set. |
 | `HOST_PUBLIC_IP` | _(empty)_ | Only for `CLUSTER_MODE=cloud` — the VM address in-cluster pods call back to. |
@@ -249,4 +249,4 @@ The gateway is assigned by Docker based on how many networks already exist on yo
   </div>
 </div>
 
-If your host firewall (UFW) is active, in-cluster pods also need the port opened **from the kind subnet** — see [running-an-experiment.md](/setup/running-an-experiment.html#networking-checklist-pods--host).
+If your host firewall (UFW) is active, in-cluster pods also need the port opened **from the kind subnet** — see [running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }}#networking-checklist-pods--host).

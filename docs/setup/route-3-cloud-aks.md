@@ -13,7 +13,7 @@ Your Kubernetes cluster lives in the cloud and your VM is already logged in to i
 
 <div class="callout callout-info">
 <span class="callout-title">Status</span>
-The <code>cloud</code> code path reuses your existing kubeconfig exactly like <a href="/setup/route-1-existing-cluster.html">route 1</a>, with two cloud-specific concerns: <strong>exec-auth</strong> (the kubeconfig may call a cloud CLI) and <strong>call-backs</strong> (remote pods must reach your VM). Both are covered below.
+The <code>cloud</code> code path reuses your existing kubeconfig exactly like <a href="{{ "/setup/route-1-existing-cluster.html" | relative_url }}">route 1</a>, with two cloud-specific concerns: <strong>exec-auth</strong> (the kubeconfig may call a cloud CLI) and <strong>call-backs</strong> (remote pods must reach your VM). Both are covered below.
 </div>
 
 ---
@@ -98,7 +98,7 @@ Remote pods initiate connections <strong>back</strong> to your VM (subscriber ca
 3. The services bind `0.0.0.0` (they do by default on host networking).
 
 <div class="callout callout-info">
-If the VM is <strong>not</strong> reachable from the cloud (e.g. a laptop behind NAT), the experiment can still be <em>launched</em>, but the subscriber can't report back and traces won't arrive. Use <a href="/setup/route-2-fresh-kind.html">route 1/2</a> with a local cluster, or run ACE inside the cloud network.
+If the VM is <strong>not</strong> reachable from the cloud (e.g. a laptop behind NAT), the experiment can still be <em>launched</em>, but the subscriber can't report back and traces won't arrive. Use <a href="{{ "/setup/route-2-fresh-kind.html" | relative_url }}">route 1/2</a> with a local cluster, or run ACE inside the cloud network.
 </div>
 
 ---
@@ -120,7 +120,7 @@ docker exec -u 65534 agentcert-graphql kubectl --kubeconfig=/kube/config get nod
 
 ## 5. Next: Install Infra and Run an Experiment
 
-Continue with **[running-an-experiment.md](/setup/running-an-experiment.html)**. The flow is identical, but the infra YAML is applied to your **cloud** cluster:
+Continue with **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**. The flow is identical, but the infra YAML is applied to your **cloud** cluster:
 
 ```bash
 kubectl --context <cluster> apply -f <url-shown-in-the-ui>

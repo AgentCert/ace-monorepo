@@ -44,8 +44,7 @@ aux_links:
 aux_links_new_tab: true
 
 # Footer
-back_to_top: true
-back_to_top_text: "Back to top"
+back_to_top: false
 footer_content: >-
   ACE — Agent Certification Engine · Released under the MIT License.
 last_edit_timestamp: false

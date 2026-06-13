@@ -289,3 +289,187 @@ a.svc-card-port:hover {
   color: #0f172a;
   margin: 0;
 }
+
+
+// ─── Architecture diagram (Setup > System Architecture) ───────────────────────
+
+.arch-diagram {
+  max-width: 660px;
+  margin: 1.5rem auto;
+  font-size: .88rem;
+}
+
+// Layered section boxes
+.arch-box {
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+}
+
+.arch-box-title {
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin-bottom: .6rem;
+  text-align: center;
+}
+
+.arch-box-cp {
+  background: #eef2ff;
+  border: 1.5px solid #a5b4fc;
+}
+.arch-box-cp .arch-box-title { color: #3730a3; }
+
+.arch-box-k8s {
+  background: #ecfdf5;
+  border: 1.5px solid #6ee7b7;
+}
+.arch-box-k8s .arch-box-title { color: #065f46; }
+
+.arch-box-cert {
+  background: #faf5ff;
+  border: 1.5px solid #c4b5fd;
+}
+.arch-box-cert .arch-box-title { color: #5b21b6; }
+
+// Service chips row inside a box
+.arch-services {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.arch-svc {
+  background: rgba(255,255,255,.75);
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 6px;
+  padding: .3rem .65rem;
+  font-size: .8rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.arch-svc-port {
+  font-family: monospace;
+  font-size: .74rem;
+  color: #6b7280;
+}
+
+.arch-svc-note {
+  font-size: .7rem;
+  color: #6b7280;
+  display: block;
+}
+
+.arch-arrow-h {
+  color: #94a3b8;
+  font-size: .95rem;
+  flex-shrink: 0;
+}
+
+// Vertical connector between layers
+.arch-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: .15rem 0;
+  gap: 0;
+}
+
+.arch-connector-line {
+  width: 2px;
+  height: 18px;
+  background: linear-gradient(to bottom, #cbd5e1, #cbd5e1);
+}
+
+.arch-connector-label {
+  font-size: .7rem;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  padding: .12rem .55rem;
+  white-space: nowrap;
+  margin: .18rem 0;
+}
+
+.arch-connector-arrow {
+  color: #94a3b8;
+  font-size: .75rem;
+  line-height: 1;
+  margin-top: .1rem;
+}
+
+// Single-service pill row (LiteLLM, Langfuse)
+.arch-single {
+  display: flex;
+  justify-content: center;
+}
+
+.arch-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .45rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  padding: .5rem 1.1rem;
+  font-weight: 600;
+  font-size: .85rem;
+  background: #fff;
+}
+
+.arch-pill-port {
+  font-family: monospace;
+  font-size: .76rem;
+  color: #6b7280;
+  font-weight: 400;
+}
+
+.arch-pill-note {
+  font-size: .72rem;
+  font-weight: 400;
+  color: #64748b;
+}
+
+.arch-pill-amber {
+  border-color: #fbbf24;
+  background: #fffbeb;
+}
+.arch-pill-amber .arch-pill-note { color: #92400e; }
+
+.arch-pill-blue {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+.arch-pill-blue .arch-pill-note { color: #1e40af; }
+
+// 4-phase grid inside certifier box
+.arch-phases {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .4rem;
+  margin-top: .55rem;
+}
+
+.arch-phase {
+  background: rgba(255,255,255,.65);
+  border: 1px solid rgba(139,92,246,.18);
+  border-radius: 6px;
+  padding: .35rem .6rem;
+  font-size: .78rem;
+  line-height: 1.35;
+}
+
+.arch-phase-num {
+  font-weight: 700;
+  color: #6d28d9;
+}
+
+.arch-phase-desc {
+  display: block;
+  font-size: .7rem;
+  color: #6b7280;
+  margin-top: .1rem;
+}

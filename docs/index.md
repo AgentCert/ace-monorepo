@@ -17,7 +17,7 @@ description: >-
 <h1 style="color:#fff;font-size:2.55rem;font-weight:800;line-height:1.18;margin:0 0 1.1rem 0;padding:0;border:none;">Your AI agent works in the demo.<br>Does it work when production breaks?</h1>
 <p style="font-size:1.08rem;opacity:.88;line-height:1.68;margin:0 0 2rem 0;max-width:580px;">AI agents are making real decisions in real infrastructure. The question every stakeholder is now asking — your board, your customers, your risk team — is the one most teams still can't answer with evidence: <em>is it actually safe to ship?</em></p>
 <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;">
-<a href="/setup/README.html" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get certified →</a>
+<a href="{{ "/setup/README.html" | relative_url }}" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get certified →</a>
 <a href="https://arxiv.org/abs/2512.04123" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">Read the research ↗</a>
 <a href="https://github.com/AgentCert/ace-monorepo" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">GitHub ↗</a>
 </div>
@@ -248,35 +248,32 @@ cd ace-monorepo
 docker compose up -d        # entire platform comes up</code></pre>
 <p style="color:#6b7280;font-size:.9rem;margin:0 0 1.4rem 0;">Open <strong style="color:#374151;">http://localhost:2001</strong> — log in with <code style="background:#f1f5f9;padding:.1rem .4rem;border-radius:4px;">admin / litmus</code>, connect your agent, run your first experiment. First certification report in under an hour.</p>
 <div style="display:flex;gap:.75rem;flex-wrap:wrap;">
-<a href="/setup/README.html" style="background:#4338ca;color:#fff;padding:.65rem 1.3rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.92rem;display:inline-block;">Full onboarding guide →</a>
-<a href="/setup/running-an-experiment.html" style="background:#fff;color:#374151;padding:.65rem 1.3rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.92rem;border:1.5px solid #d1d5db;display:inline-block;">Run your first experiment →</a>
+<a href="{{ "/setup/README.html" | relative_url }}" style="background:#4338ca;color:#fff;padding:.65rem 1.3rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.92rem;display:inline-block;">Full onboarding guide →</a>
+<a href="{{ "/setup/running-an-experiment.html" | relative_url }}" style="background:#fff;color:#374151;padding:.65rem 1.3rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.92rem;border:1.5px solid #d1d5db;display:inline-block;">Run your first experiment →</a>
 </div>
 </div>
 
 <!-- ══════════════════════════════════════════════════ GO DEEPER ═══ -->
 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin:0 0 2rem;">
-<a href="/architecture.html" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;transition:border-color .2s;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
+<a href="{{ "/architecture.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;transition:border-color .2s;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
 <p style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6d28d9;margin:0 0 .3rem 0;">Architecture</p>
 <p style="font-weight:600;color:#111827;margin:0 0 .3rem 0;font-size:.97rem;">How the platform fits together</p>
 <p style="font-size:.85rem;color:#6b7280;margin:0;">Control plane, chaos engine, certifier — and how they connect.</p>
 </a>
-<a href="/Methodologies/01-Introduction.html" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
+<a href="{{ "/Methodologies/01-Introduction.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
 <p style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6d28d9;margin:0 0 .3rem 0;">Deep Dive</p>
 <p style="font-weight:600;color:#111827;margin:0 0 .3rem 0;font-size:.97rem;">The science behind certification</p>
 <p style="font-size:.85rem;color:#6b7280;margin:0;">Experiment design, statistical framework, the 12-section report standard.</p>
 </a>
-<a href="/api.html" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
+<a href="{{ "/api.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
 <p style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6d28d9;margin:0 0 .3rem 0;">API Reference</p>
 <p style="font-weight:600;color:#111827;margin:0 0 .3rem 0;font-size:.97rem;">Integrate with your CI/CD pipeline</p>
 <p style="font-size:.85rem;color:#6b7280;margin:0;">Connect certification runs to your deployment workflow.</p>
 </a>
-<a href="/testing.html" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
+<a href="{{ "/testing.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
 <p style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6d28d9;margin:0 0 .3rem 0;">Testing & Coverage</p>
 <p style="font-weight:600;color:#111827;margin:0 0 .3rem 0;font-size:.97rem;">Run the test suites</p>
 <p style="font-size:.85rem;color:#6b7280;margin:0;">Unit, integration, and coverage reports for all platform components.</p>
 </a>
 </div>
 
----
-
-<sub>ACE — Agent Certification Engine · MIT Licensed · Infosys × Microsoft · [GitHub](https://github.com/AgentCert/ace-monorepo) · [Slack](https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw) · Extends [AIOpsLab](https://github.com/microsoft/AIOpsLab)</sub>

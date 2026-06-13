@@ -13,33 +13,41 @@ The certifier is a four-phase analytical pipeline. It takes a raw Langfuse trace
 
 ## The Four Phases
 
-```
-Raw Langfuse Trace (JSON)
-         │
-         ▼
-┌─────────────────────┐
-│  Phase 0            │  LLM classifies interleaved events into
-│  Fault Bucketing    │  per-fault lifecycle buckets (3-pass algorithm)
-└──────────┬──────────┘
-           │  one bucket file per active fault
-           ▼
-┌─────────────────────┐
-│  Phase 1            │  LLM extracts quantitative (TTD, TTM, tokens)
-│  Metrics Extraction │  and qualitative metrics per fault bucket
-└──────────┬──────────┘
-           │  repeated for each of N runs
-           ▼
-┌─────────────────────┐
-│  Phase 2            │  Pure-Python stats per fault category
-│  Aggregation        │  + LLM Council narrative synthesis
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  Phase 3            │  5 concurrent LLM builders produce
-│  Certification      │  a validated 12-section report → JSON + PDF
-└─────────────────────┘
-```
+<div class="flow-pipeline">
+  <div class="flow-input-node">Raw Langfuse Trace (JSON)</div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 0</span>
+    <div>
+      <div class="flow-phase-title">Fault Bucketing</div>
+      <div class="flow-phase-desc">LLM classifies interleaved events into per-fault lifecycle buckets (3-pass algorithm)</div>
+    </div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-note">one bucket file per active fault</div><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 1</span>
+    <div>
+      <div class="flow-phase-title">Metrics Extraction</div>
+      <div class="flow-phase-desc">LLM extracts quantitative (TTD, TTM, tokens) and qualitative metrics per fault bucket</div>
+    </div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-note">repeated for each of N runs</div><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 2</span>
+    <div>
+      <div class="flow-phase-title">Aggregation</div>
+      <div class="flow-phase-desc">Pure-Python stats per fault category + LLM Council narrative synthesis</div>
+    </div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 3</span>
+    <div>
+      <div class="flow-phase-title">Certification</div>
+      <div class="flow-phase-desc">5 concurrent LLM builders produce a validated 12-section report → JSON + PDF</div>
+    </div>
+  </div>
+</div>
 
 ---
 

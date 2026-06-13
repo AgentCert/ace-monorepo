@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentCert — Pipeline Animation</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#e8ecf2;overflow:hidden;height:100vh;display:flex;align-items:center;justify-content:center}
+
+.slide{width:1480px;height:830px;background:#f8fafc;border-radius:20px;position:relative;overflow:hidden;box-shadow:0 8px 60px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.04)}
+.slide::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;background:linear-gradient(90deg,#3b82f6,#8b5cf6,#ec4899,#f59e0b);z-index:20}
+
+/* ── HEADER ── */
+.hdr{position:absolute;top:18px;left:38px;display:flex;align-items:center;gap:14px;z-index:10}
+.hdr-logo{width:42px;height:42px;background:linear-gradient(135deg,#6366f1,#8b5cf6);border-radius:13px;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(99,102,241,.25)}
+.hdr-logo svg{width:22px;height:22px}
+.hdr h1{font-size:22px;font-weight:800;color:#1e1b4b;letter-spacing:-.5px}
+.hdr h1 span{background:linear-gradient(90deg,#6366f1,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hdr-sub{font-size:10px;color:#64748b;margin-top:1px;font-weight:500}
+
+/* ── PHASE BANNER ── */
+.ph{position:absolute;top:20px;left:50%;transform:translateX(-50%);padding:6px 24px;border-radius:20px;font-size:10.5px;font-weight:700;letter-spacing:1px;text-transform:uppercase;z-index:11;transition:all .5s}
+.ph.sim{background:#eff6ff;border:1px solid #bfdbfe;color:#2563eb}
+.ph.crt{background:#f5f3ff;border:1px solid #ddd6fe;color:#7c3aed}
+
+/* ── RUN COUNTER ── */
+.rctr{position:absolute;top:14px;right:38px;text-align:center;z-index:10}
+.rctr .rn{font-size:40px;font-weight:900;color:#1e293b;line-height:1;transition:color .3s}
+.rctr .rn.gn{color:#059669}
+.rctr .ro{font-size:13px;color:#64748b;font-weight:500}
+.rctr .rl{font-size:8px;color:#64748b;text-transform:uppercase;letter-spacing:.7px;margin-top:2px}
+.rbar{width:120px;height:5px;border-radius:3px;background:#f1f5f9;margin-top:5px;overflow:hidden}
+.rbar-f{height:100%;border-radius:3px;background:linear-gradient(90deg,#3b82f6,#8b5cf6);transition:width .12s;width:0%}
+
+/* ── DIVIDER ── */
+.dvd{position:absolute;left:250px;right:260px;top:545px;height:2px;background:linear-gradient(90deg,transparent 0%,#cbd5e1 20%,#c4b5fd 50%,#cbd5e1 80%,transparent 100%);z-index:3}
+.dvd-t{position:absolute;left:250px;top:527px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#334155;z-index:3}
+.dvd-b{position:absolute;left:250px;top:552px;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#6d28d9;z-index:3}
+
+/* ── CARD ── */
+.cd{position:absolute;border-radius:16px;padding:16px 18px;transition:all .45s cubic-bezier(.4,0,.2,1);border:1.5px solid #cbd5e1;background:#ffffff;z-index:5;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+.cd .iw{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.cd .ic{width:36px;height:36px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .4s}
+.cd .ic svg{width:19px;height:19px}
+.cd .nm{font-size:14px;font-weight:800;color:#0f172a;transition:color .3s}
+.cd .sb{font-size:9.5px;color:#475569;line-height:1.35;margin-top:2px}
+
+.cd.act{border-color:var(--ac);box-shadow:0 0 0 3px var(--g2),0 8px 25px var(--g1);transform:scale(1.03)}
+.cd.act .nm{color:#0f172a}
+.cd.act .ic{box-shadow:0 0 14px var(--g1)}
+.cd.dn{border-color:#6ee7b7;opacity:.6;background:#ecfdf5}
+.cd.dn .nm{color:#047857}
+.cd.dn .ic{background:#d1fae5!important}
+
+/* ── STEP NUMBER ── */
+.sn{position:absolute;top:-10px;left:-10px;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:#fff;z-index:7;transition:all .4s;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.12)}
+.cd.act .sn{transform:scale(1.15);box-shadow:0 2px 12px var(--g1)}
+.cd.dn .sn{background:#059669!important;box-shadow:0 2px 6px rgba(5,150,105,.2)}
+
+/* ── POSITIONS ── */
+.cd1{left:48px;top:98px;width:188px;--ac:#3b82f6;--g1:rgba(59,130,246,.18);--g2:rgba(59,130,246,.08)}
+.cd1 .ic{background:#eff6ff}.cd1 .sn{background:#3b82f6}
+
+.cd2{left:335px;top:98px;width:210px;--ac:#ef4444;--g1:rgba(239,68,68,.18);--g2:rgba(239,68,68,.08)}
+.cd2 .ic{background:#fef2f2}.cd2 .sn{background:#ef4444}
+
+.cd3{left:650px;top:78px;width:248px;height:145px;--ac:#10b981;--g1:rgba(16,185,129,.18);--g2:rgba(16,185,129,.08)}
+.cd3 .ic{background:#ecfdf5}.cd3 .sn{background:#10b981}
+
+.cd-lf{left:330px;top:300px;width:220px;--ac:#f97316;--g1:rgba(249,115,22,.18);--g2:rgba(249,115,22,.08)}
+.cd-lf .ic{background:#fff7ed}
+
+.cd4{left:650px;top:290px;width:275px;height:130px;--ac:#0891b2;--g1:rgba(8,145,178,.18);--g2:rgba(8,145,178,.08)}
+.cd4 .ic{background:#ecfeff}.cd4 .sn{background:#0891b2}
+
+.cd5{left:48px;top:300px;width:200px;--ac:#7c3aed;--g1:rgba(124,58,237,.18);--g2:rgba(124,58,237,.08)}
+.cd5 .ic{background:#f5f3ff}.cd5 .sn{background:#7c3aed}
+
+.cd6{left:48px;top:438px;width:185px;--ac:#059669;--g1:rgba(5,150,105,.18);--g2:rgba(5,150,105,.08)}
+.cd6 .ic{background:#ecfdf5}.cd6 .sn{background:#059669}
+
+.cd8{left:265px;top:585px;width:340px;height:120px;--ac:#7c3aed;--g1:rgba(124,58,237,.18);--g2:rgba(124,58,237,.08)}
+.cd8 .ic{background:#f5f3ff}
+
+.cd9{left:680px;top:600px;width:180px;--ac:#d97706;--g1:rgba(217,119,6,.18);--g2:rgba(217,119,6,.08)}
+.cd9 .ic{background:#fffbeb}
+
+/* ── CATEGORIES ── */
+.cats{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+.cat{display:flex;align-items:center;gap:5px;font-size:9px;color:#475569;padding:3px 8px;border-radius:5px;background:#f1f5f9;transition:all .3s;font-weight:500}
+.cat .dt{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.cat.on{color:#0f172a;background:#dbeafe;font-weight:700}
+
+/* ── FAULT QUEUE ── */
+.fq{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+.fi{display:flex;align-items:center;gap:4px;font-size:9px;color:#475569;padding:2px 6px;border-radius:4px;transition:all .3s;font-weight:500}
+.fi.inj{color:#dc2626;background:#fef2f2;font-weight:600}
+.fi.ok{color:#047857;opacity:.6}
+
+/* ── PODS ── */
+.pods{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.pod{width:43px;height:20px;border-radius:5px;background:#ecfdf5;border:1px solid #86efac;display:flex;align-items:center;justify-content:center;font-size:7.5px;color:#047857;font-weight:600;transition:all .25s}
+.pod.fault{background:#fef2f2!important;border-color:#fecaca!important;color:#dc2626!important;animation:shk .2s ease 2}
+@keyframes shk{0%,100%{transform:translateX(0)}25%{transform:translateX(-2px)}75%{transform:translateX(2px)}}
+
+/* ── PIPE LABEL ── */
+.pl{position:absolute;font-size:9px;font-weight:700;padding:3px 9px;border-radius:5px;z-index:8;pointer-events:none;opacity:.4;transition:opacity .3s}
+.pl.on{opacity:1}
+
+/* ── MCP BADGE ── */
+.mcp{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:5px;background:#ecfeff;border:1px solid #a5f3fc;font-size:8px;font-weight:700;color:#0891b2;margin-top:4px}
+
+/* ── SUB BADGES ── */
+.subs{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
+.sub{padding:3px 8px;border-radius:5px;font-size:8px;font-weight:600;transition:all .25s}
+.s-lf{background:#fff7ed;border:1px solid #fed7aa;color:#ea580c}
+.s-ll{background:#eef2ff;border:1px solid #c7d2fe;color:#4f46e5}
+.s-sc{background:#fffbeb;border:1px solid #fde68a;color:#d97706}
+.sub.pulse{animation:sp .5s ease}
+@keyframes sp{50%{transform:scale(1.06)}}
+
+/* ── B+E STEPS ── */
+.be{display:flex;gap:4px;margin-top:6px}
+.bes{flex:1;height:6px;border-radius:3px;background:#f1f5f9;overflow:hidden}
+.bes .bf{height:100%;width:0%;border-radius:3px;background:linear-gradient(90deg,#7c3aed,#a78bfa);transition:width .4s}
+.bes.dn .bf{width:100%}
+.bel{display:flex;margin-top:3px}
+.bel span{flex:1;font-size:9px;color:#64748b;text-align:center;transition:color .3s;font-weight:500}
+.bel span.on{color:#6d28d9;font-weight:700}
+
+/* ── MONGO COUNT ── */
+.mc{font-size:22px;font-weight:900;color:#059669;text-align:center;margin-top:4px}
+.mc .mco{font-size:10px;color:#64748b;font-weight:500}
+
+/* ── AHC STEPS ── */
+.ahc{display:flex;gap:6px;margin-top:8px}
+.ah{flex:1;text-align:center;padding:6px 4px;border-radius:8px;background:#f8fafc;border:1px solid #e2e8f0;transition:all .4s;position:relative}
+.ah .an{font-size:10px;font-weight:700;color:#475569;transition:color .3s}
+.ah .ab{height:4px;border-radius:2px;background:#f1f5f9;margin-top:4px;overflow:hidden}
+.ah .af{height:100%;width:0%;border-radius:2px;transition:width .5s}
+.ah.a-on{border-color:var(--sc2,#7c3aed);background:#f5f3ff}
+.ah.a-on .an{color:#1e293b}
+.ah.a-dn .af{width:100%}
+.ah.a-dn .an{color:#059669}
+.ah .sn-i{position:absolute;top:-8px;left:-8px;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:900;color:#fff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.opt{font-size:6px;color:#d97706;background:#fffbeb;padding:1px 4px;border-radius:3px;margin-left:2px;vertical-align:super;border:1px solid #fde68a}
+
+/* ── SVG ── */
+.conns{position:absolute;inset:0;z-index:2;pointer-events:none}
+.cl{fill:none;stroke:#cbd5e1;stroke-width:2;stroke-dasharray:6 5}
+.cl.on{stroke:var(--lc);stroke-dasharray:none;stroke-width:3;filter:drop-shadow(0 0 4px var(--lc))}
+.arrow{fill:#cbd5e1;transition:fill .3s}
+.arrow.on{fill:var(--ac2)}
+
+/* ── DOT ── */
+.dd{position:absolute;width:7px;height:7px;border-radius:50%;z-index:8;pointer-events:none;opacity:0}
+
+/* ── LOGS ── */
+.logs{position:absolute;left:500px;top:215px;width:140px;font-family:'Cascadia Code','Courier New',monospace;font-size:7.5px;line-height:1.4;opacity:0;transition:opacity .3s;z-index:6;pointer-events:none;background:#fefce8;border:1px solid #fef08a;border-radius:8px;padding:6px 8px}
+.logs.show{opacity:1}
+.ll{opacity:0;transform:translateX(-3px);animation:li .2s forwards}
+.ll.e{color:#dc2626}.ll.w{color:#d97706}.ll.i{color:#16a34a}
+@keyframes li{to{opacity:1;transform:translateX(0)}}
+
+/* ── STEP BAR ── */
+.sbar{position:absolute;bottom:18px;left:38px;right:38px;display:flex;align-items:center;gap:12px;z-index:10;background:#ffffff;border-radius:12px;padding:10px 18px;border:1px solid #cbd5e1;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+.sdots{display:flex;gap:6px}
+.sd{width:9px;height:9px;border-radius:50%;background:#cbd5e1;transition:all .3s}
+.sd.a{background:#6366f1;box-shadow:0 0 7px rgba(99,102,241,.35);transform:scale(1.15)}
+.sd.d{background:#059669}
+.stxt{font-size:11px;color:#334155;font-weight:500}
+.stxt strong{color:#0f172a}
+
+/* ── CERT CARD ── */
+.cc{position:absolute;right:14px;top:70px;width:360px;background:#ffffff;border:1.5px solid #fde68a;border-radius:18px;padding:24px;z-index:20;opacity:0;transform:scale(.85) translateY(14px);transition:all .55s cubic-bezier(.34,1.56,.64,1);pointer-events:none;box-shadow:0 20px 60px rgba(0,0,0,.1),0 4px 12px rgba(0,0,0,.04)}
+.cc.show{opacity:1;transform:scale(1) translateY(0)}
+.cc::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;border-radius:18px 18px 0 0;background:linear-gradient(90deg,#10b981,#3b82f6,#8b5cf6,#f59e0b)}
+.cc-bd{display:inline-flex;align-items:center;gap:6px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:16px;padding:4px 14px;font-size:10px;font-weight:700;color:#059669;margin-bottom:10px}
+.cc-ck{width:16px;height:16px;background:#059669;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.cc-ck svg{width:9px;height:9px}
+.cc-t{font-size:16px;font-weight:800;color:#0f172a;margin-bottom:3px}
+.cc-su{font-size:10px;color:#334155;margin-bottom:8px;line-height:1.5}
+.cc-meta{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.cc-mt{padding:3px 8px;border-radius:5px;font-size:7.5px;font-weight:600}
+.cc-g{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.cc-si{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:7px 10px}
+.cc-sl{font-size:7.5px;color:#475569;text-transform:uppercase;letter-spacing:.3px;font-weight:600}
+.cc-sv{font-size:16px;font-weight:800;margin-top:2px}
+.cc-sv.g{color:#059669}.cc-sv.b{color:#2563eb}.cc-sv.am{color:#d97706}.cc-sv.r{color:#dc2626}.cc-sv.p{color:#7c3aed}
+.cc-ft{margin-top:10px;padding-top:8px;border-top:1px solid #e2e8f0}
+.cc-fl{font-size:8px;color:#334155;text-transform:uppercase;letter-spacing:.4px;font-weight:700;margin-bottom:5px}
+.cc-fc{display:flex;gap:5px}
+.cc-fb{padding:3px 8px;border-radius:5px;font-size:8px;font-weight:600;display:flex;align-items:center;gap:4px}
+.cc-fb .fc-d{width:5px;height:5px;border-radius:50%}
+
+/* ── RIGHT PANEL ── */
+.rp{position:absolute;right:24px;top:88px;width:225px;z-index:6;transition:opacity .35s}
+.rc{background:#ffffff;border:1px solid #cbd5e1;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.rc h3{font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.pi{font-size:9px;color:#475569;line-height:1.8;transition:color .3s;font-weight:500}
+.pi.on{color:#0f172a;font-weight:700}
+.pi .pd{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px;vertical-align:middle;transition:background .3s}
+</style>
+</head>
+<body>
+<div class="slide">
+
+  <!-- Header -->
+  <div class="hdr">
+    <div class="hdr-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+    <div><h1>AgentCert <span>Workflow</span></h1><div class="hdr-sub">OTEL &bull; Langfuse &bull; LiteLLM &bull; MCP &bull; MongoDB</div></div>
+  </div>
+
+  <div class="ph sim" id="ph">SIMULATION PHASE &mdash; RUNS 1-30</div>
+
+  <div class="rctr">
+    <div><span class="rn" id="rN">0</span><span class="ro"> / 30</span></div>
+    <div class="rl">simulations</div>
+    <div class="rbar"><div class="rbar-f" id="rBF"></div></div>
+  </div>
+
+  <!-- SVG Connections -->
+  <svg class="conns" viewBox="0 0 1480 830">
+    <!-- 1->2 -->
+    <path class="cl" id="L1" d="M236,150 L335,150" style="--lc:#3b82f6"/>
+    <polygon class="arrow" id="A1" points="332,144 342,150 332,156" style="--ac2:#3b82f6"/>
+    <!-- 2->3 -->
+    <path class="cl" id="L2" d="M545,150 L650,150" style="--lc:#ef4444"/>
+    <polygon class="arrow" id="A2" points="647,144 657,150 647,156" style="--ac2:#ef4444"/>
+    <!-- 2->Langfuse -->
+    <path class="cl" id="L3" d="M440,200 L440,300" style="--lc:#a78bfa"/>
+    <polygon class="arrow" id="A3" points="434,296 440,306 446,296" style="--ac2:#a78bfa"/>
+    <!-- 3->4 MCP -->
+    <path class="cl" id="L4" d="M774,223 L774,290" style="--lc:#0891b2"/>
+    <polygon class="arrow" id="A4" points="768,286 774,296 780,286" style="--ac2:#0891b2"/>
+    <!-- 4->Langfuse -->
+    <path class="cl" id="L5" d="M650,355 L550,340" style="--lc:#f97316"/>
+    <polygon class="arrow" id="A5" points="554,334 545,340 554,346" style="--ac2:#f97316"/>
+    <!-- Langfuse->5 Certifier -->
+    <path class="cl" id="L6" d="M330,345 L248,345" style="--lc:#7c3aed"/>
+    <polygon class="arrow" id="A6" points="254,339 245,345 254,351" style="--ac2:#7c3aed"/>
+    <!-- 5->6 -->
+    <path class="cl" id="L7" d="M148,400 L140,438" style="--lc:#059669"/>
+    <polygon class="arrow" id="A7" points="134,434 140,444 146,434" style="--ac2:#059669"/>
+    <!-- 6->Agg -->
+    <path class="cl" id="L8" d="M233,478 Q280,550 310,585" style="--lc:#059669"/>
+    <polygon class="arrow" id="A8" points="304,579 310,589 316,579" style="--ac2:#059669"/>
+    <!-- Langfuse->Agg -->
+    <path class="cl" id="L9" d="M440,385 Q440,500 400,585" style="--lc:#f97316"/>
+    <polygon class="arrow" id="A9" points="394,579 400,589 406,579" style="--ac2:#f97316"/>
+    <!-- Agg->Certificate -->
+    <path class="cl" id="L10" d="M605,650 L680,645" style="--lc:#7c3aed"/>
+    <polygon class="arrow" id="A10" points="676,639 686,645 676,651" style="--ac2:#7c3aed"/>
+  </svg>
+
+  <!-- Pipe labels -->
+  <div class="pl" id="pL1" style="left:264px;top:128px;color:#2563eb;background:#eff6ff;border:1px solid #bfdbfe">select</div>
+  <div class="pl" id="pL2" style="left:575px;top:128px;color:#dc2626;background:#fef2f2;border:1px solid #fecaca">inject</div>
+  <div class="pl" id="pL3" style="left:448px;top:240px;color:#7c3aed;background:#f5f3ff;border:1px solid #ddd6fe">exp details</div>
+  <div class="pl" id="pL4" style="left:783px;top:248px;color:#0891b2;background:#ecfeff;border:1px solid #a5f3fc">MCP</div>
+  <div class="pl" id="pL5" style="left:568px;top:322px;color:#ea580c;font-style:italic;font-weight:600;font-size:7.5px;background:#fff7ed;padding:2px 7px;border-radius:4px">stores &larr;</div>
+  <div class="pl" id="pL6" style="left:260px;top:322px;color:#7c3aed;font-style:italic;font-weight:600;font-size:7.5px;background:#f5f3ff;padding:2px 7px;border-radius:4px">pull &larr;</div>
+
+  <!-- Divider -->
+  <div class="dvd"></div>
+  <div class="dvd-t">&#9650; Per-run pipeline: Inject &rarr; MCP Trace &rarr; Bucketing + Extraction &times; 30</div>
+  <div class="dvd-b">&#9660; Post-30: Aggregation &rarr; Hypothesis Framework &rarr; Certification</div>
+
+  <!-- 1 FAULT LIBRARY -->
+  <div class="cd cd1" id="c1">
+    <div class="sn">1</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+      <div class="nm">Fault Library</div>
+    </div>
+    <div class="cats">
+      <div class="cat" id="ct0"><div class="dt" style="background:#ef4444"></div>Application</div>
+      <div class="cat" id="ct1"><div class="dt" style="background:#3b82f6"></div>Network</div>
+      <div class="cat" id="ct2"><div class="dt" style="background:#f59e0b"></div>Resource</div>
+    </div>
+  </div>
+
+  <!-- 2 CHAOS CENTER -->
+  <div class="cd cd2" id="c2">
+    <div class="sn">2</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div><div class="nm">Chaos Center</div><div class="sb">Inject faults + exp details &rarr; Langfuse</div></div>
+    </div>
+    <div class="fq" id="fQ">
+      <div class="fi" id="fi0"><span style="color:#ef4444">&#9679;</span> container-kill</div>
+      <div class="fi" id="fi1"><span style="color:#3b82f6">&#9679;</span> pod-dns-error</div>
+      <div class="fi" id="fi2"><span style="color:#f59e0b">&#9679;</span> disk-fill</div>
+    </div>
+  </div>
+
+  <!-- 3 SOCKSHOP -->
+  <div class="cd cd3" id="c3">
+    <div class="sn">3</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+      <div><div class="nm">SockShop App</div><div class="sb">K8s &bull; OTEL instrumented</div></div>
+    </div>
+    <div class="pods">
+      <div class="pod" id="p0">front</div><div class="pod" id="p1">cart</div><div class="pod" id="p2">order</div>
+      <div class="pod" id="p3">user</div><div class="pod" id="p4">pay</div><div class="pod" id="p5">ship</div>
+      <div class="pod" id="p6">catal</div><div class="pod" id="p7">DB</div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="logs" id="logB"></div>
+
+  <!-- LANGFUSE -->
+  <div class="cd cd-lf" id="cLf">
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4"/></svg></div>
+      <div><div class="nm">Langfuse</div><div class="sb">Trace &amp; experiment store<br>&harr; Chaos Center, ITOps, Certifier</div></div>
+    </div>
+  </div>
+
+  <!-- 4 ITOPS AGENT -->
+  <div class="cd cd4" id="c4">
+    <div class="sn">4</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="3"/><path d="M7 11V8a5 5 0 0110 0v3"/></svg></div>
+      <div><div class="nm">ITOps Agent</div><div class="sb">SockShop &harr; ITOps via MCP</div></div>
+    </div>
+    <div class="mcp">&#9670; MCP &mdash; K8s Trace Pull from SockShop</div>
+    <div class="subs">
+      <div class="sub s-lf" id="sLf">Langfuse Store</div>
+      <div class="sub s-ll" id="sLl">LiteLLM Proxy</div>
+      <div class="sub s-sc" id="sSc">Sidecar (exp_id)</div>
+    </div>
+  </div>
+
+  <!-- 5 CERTIFIER B+E -->
+  <div class="cd cd5" id="c5">
+    <div class="sn">5</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+      <div><div class="nm">Certifier</div><div class="sb">Per-run processing</div></div>
+    </div>
+    <div class="be">
+      <div class="bes" id="be1"><div class="bf"></div></div>
+      <div class="bes" id="be2"><div class="bf"></div></div>
+    </div>
+    <div class="bel"><span id="bl1">Bucketing</span><span id="bl2">Extraction</span></div>
+  </div>
+
+  <!-- 6 MONGODB -->
+  <div class="cd cd6" id="c6">
+    <div class="sn">6</div>
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></div>
+      <div class="nm">MongoDB</div>
+    </div>
+    <div class="mc"><span id="mgN">0</span> <span class="mco">/ 30</span></div>
+  </div>
+
+  <!-- 7-8-9 CERTIFIER AGG -->
+  <div class="cd cd8" id="c8">
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+      <div><div class="nm">Certifier &mdash; Post 30 Runs</div><div class="sb">Final pipeline (MongoDB + Langfuse data)</div></div>
+    </div>
+    <div class="ahc">
+      <div class="ah" id="ah1">
+        <div class="sn-i" style="background:#7c3aed">7</div>
+        <div class="an">Aggregation</div><div class="ab"><div class="af" style="background:#7c3aed"></div></div>
+      </div>
+      <div class="ah" id="ah2">
+        <div class="sn-i" style="background:#d97706">8</div>
+        <div class="an">Hypothesis<span class="opt">optional</span></div><div class="ab"><div class="af" style="background:#d97706"></div></div>
+      </div>
+      <div class="ah" id="ah3">
+        <div class="sn-i" style="background:#059669">9</div>
+        <div class="an">Certification</div><div class="ab"><div class="af" style="background:#059669"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CERTIFICATE -->
+  <div class="cd cd9" id="c9">
+    <div class="iw">
+      <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg></div>
+      <div><div class="nm">Certificate</div><div class="sb">Report &amp; JSON output</div></div>
+    </div>
+  </div>
+
+  <!-- Cert card overlay -->
+  <div class="cc" id="cC">
+    <div class="cc-bd"><div class="cc-ck"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></div>CERTIFIED</div>
+    <div class="cc-t">SockShop Agent Certification Report</div>
+    <div class="cc-su">ITOps Agent &bull; Resilience &amp; Safety Evaluation</div>
+    <div class="cc-meta">
+      <div class="cc-mt" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">30 Runs</div>
+      <div class="cc-mt" style="background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe">3 Fault Categories</div>
+      <div class="cc-mt" style="background:#ecfdf5;color:#059669;border:1px solid #a7f3d0">OTEL Traced</div>
+      <div class="cc-mt" style="background:#fff7ed;color:#ea580c;border:1px solid #fed7aa">Langfuse Observed</div>
+      <div class="cc-mt" style="background:#fefce8;color:#a16207;border:1px solid #fde68a">Hypothesis Tested</div>
+    </div>
+    <div class="cc-g">
+      <div class="cc-si"><div class="cc-sl">Mitigation Rate</div><div class="cc-sv g">100%</div></div>
+      <div class="cc-si"><div class="cc-sl">Safety (RAI)</div><div class="cc-sv g">1.00</div></div>
+      <div class="cc-si"><div class="cc-sl">Reasoning</div><div class="cc-sv b">8.48</div></div>
+      <div class="cc-si"><div class="cc-sl">Detection</div><div class="cc-sv am">13.3%</div></div>
+      <div class="cc-si"><div class="cc-sl">Hallucination</div><div class="cc-sv g">0.00</div></div>
+      <div class="cc-si"><div class="cc-sl">Security</div><div class="cc-sv g">1.00</div></div>
+    </div>
+    <div class="cc-ft">
+      <div class="cc-fl">Fault Categories Tested</div>
+      <div class="cc-fc">
+        <div class="cc-fb" style="background:#fef2f2;color:#dc2626;border:1px solid #fecaca"><div class="fc-d" style="background:#ef4444"></div>Application (10)</div>
+        <div class="cc-fb" style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe"><div class="fc-d" style="background:#3b82f6"></div>Network (10)</div>
+        <div class="cc-fb" style="background:#fffbeb;color:#a16207;border:1px solid #fde68a"><div class="fc-d" style="background:#f59e0b"></div>Resource (10)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="rp" id="rP">
+    <div class="rc">
+      <h3>Pipeline Steps</h3>
+      <div class="pi" id="pp1"><span class="pd" style="background:#94a3b8"></span>&#9312; Fault selected</div>
+      <div class="pi" id="pp2"><span class="pd" style="background:#94a3b8"></span>&#9313; Injected + exp &rarr; Langfuse</div>
+      <div class="pi" id="pp3"><span class="pd" style="background:#94a3b8"></span>&#9314; SockShop OTEL traces</div>
+      <div class="pi" id="pp4"><span class="pd" style="background:#94a3b8"></span>&#9315; MCP: SockShop &rarr; ITOps</div>
+      <div class="pi" id="pp5"><span class="pd" style="background:#94a3b8"></span>&nbsp;&nbsp; LiteLLM + Sidecar</div>
+      <div class="pi" id="pp6"><span class="pd" style="background:#94a3b8"></span>&nbsp;&nbsp; ITOps &rarr; Langfuse</div>
+      <div class="pi" id="pp7"><span class="pd" style="background:#94a3b8"></span>&#9316; Langfuse &rarr; B+E</div>
+      <div class="pi" id="pp8"><span class="pd" style="background:#94a3b8"></span>&#9317; Stored in MongoDB</div>
+    </div>
+    <div class="rc">
+      <h3>Current Fault</h3>
+      <div id="cF" style="font-size:13px;font-weight:800;color:#1e293b;margin-top:4px">&mdash;</div>
+      <div id="cCa" style="font-size:10px;color:#475569;margin-top:2px;font-weight:500">&mdash;</div>
+    </div>
+    <div class="rc">
+      <h3>Experiment</h3>
+      <div id="eI" style="font-size:10px;color:#334155;line-height:1.5;font-weight:500">exp_id: &mdash;<br>run_id: &mdash;</div>
+    </div>
+  </div>
+
+  <!-- Step bar -->
+  <div class="sbar">
+    <div class="sdots"><div class="sd" id="s0"></div><div class="sd" id="s1"></div><div class="sd" id="s2"></div><div class="sd" id="s3"></div><div class="sd" id="s4"></div><div class="sd" id="s5"></div><div class="sd" id="s6"></div><div class="sd" id="s7"></div><div class="sd" id="s8"></div></div>
+    <div class="stxt" id="sT">Initializing pipeline...</div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s),S=$('.slide');
+const fN=['container-kill','pod-dns-error','disk-fill'],fCt=['Application','Network','Resource'],fCo=['#dc2626','#2563eb','#d97706'];
+const fP=[[0,1,2],[3,4],[5,6,7]];
+const LI=['L1','L2','L3','L4','L5','L6','L7','L8','L9','L10'];
+const AI=['A1','A2','A3','A4','A5','A6','A7','A8','A9','A10'];
+const PL=['pL1','pL2','pL3','pL4','pL5','pL6'];
+
+const DP=[
+  {x1:236,y1:150,x2:335,y2:150,c:'#3b82f6'},
+  {x1:545,y1:150,x2:650,y2:150,c:'#ef4444'},
+  {x1:440,y1:200,x2:440,y2:300,c:'#a78bfa'},
+  {x1:774,y1:223,x2:774,y2:290,c:'#0891b2'},
+  {x1:650,y1:355,x2:550,y2:340,c:'#f97316'},
+  {x1:330,y1:345,x2:248,y2:345,c:'#7c3aed'},
+  {x1:148,y1:400,x2:140,y2:438,c:'#059669'},
+  {x1:233,y1:478,x2:310,y2:585,c:'#059669'},
+  {x1:440,y1:385,x2:400,y2:585,c:'#f97316'},
+  {x1:605,y1:650,x2:680,y2:645,c:'#7c3aed'},
+];
+
+let runCount=0;
+
+function setS(n,t){for(let i=0;i<9;i++)$(`#s${i}`).className='sd'+(i<n?' d':i===n?' a':'');$('#sT').innerHTML=t}
+function act(id){$(`#${id}`).classList.add('act')}
+function dea(id){$(`#${id}`).classList.remove('act','dn')}
+function don(id){$(`#${id}`).classList.remove('act');$(`#${id}`).classList.add('dn')}
+function lon(i){$(`#${LI[i]}`).classList.add('on');$(`#${AI[i]}`).classList.add('on')}
+function lof(i){$(`#${LI[i]}`).classList.remove('on');$(`#${AI[i]}`).classList.remove('on')}
+function pon(n){const e=$(`#pp${n}`);e.classList.add('on');e.querySelector('.pd').style.background='#059669'}
+function pof(n){const e=$(`#pp${n}`);e.classList.remove('on');e.querySelector('.pd').style.background='#94a3b8'}
+
+function dots(pi,n,dur){
+  const p=DP[pi];
+  for(let i=0;i<n;i++){
+    setTimeout(()=>{
+      const d=document.createElement('div');
+      d.className='dd';
+      d.style.cssText=`background:${p.c};box-shadow:0 0 6px ${p.c};left:${p.x1}px;top:${p.y1}px`;
+      S.appendChild(d);
+      requestAnimationFrame(()=>d.animate([
+        {left:p.x1+'px',top:p.y1+'px',opacity:.2,transform:'scale(.5)'},
+        {left:(p.x1+p.x2)/2+'px',top:(p.y1+p.y2)/2+'px',opacity:1,transform:'scale(1.3)'},
+        {left:p.x2+'px',top:p.y2+'px',opacity:.1,transform:'scale(.4)'}
+      ],{duration:dur,easing:'ease-in-out',fill:'forwards'}));
+      setTimeout(()=>d.remove(),dur+30);
+    },i*dur/n*.45);
+  }
+}
+
+function showLogs(fi){
+  const el=$('#logB');el.innerHTML='';el.classList.add('show');
+  [{t:`[INFO] fault: ${fN[fi]}`,c:'i'},{t:'[WARN] health fail',c:'w'},{t:'[ERR]  CrashLoop',c:'e'},{t:'[INFO] OTEL span',c:'i'},{t:'[INFO] trace sent',c:'i'}]
+  .forEach((l,i)=>setTimeout(()=>{const d=document.createElement('div');d.className=`ll ${l.c}`;d.textContent=l.t;el.appendChild(d)},i*140));
+}
+
+function setRun(n){runCount=n;$('#rN').textContent=n;$('#rN').className='rn'+(n>=30?' gn':'');$('#rBF').style.width=(n/30*100)+'%';$('#mgN').textContent=n}
+
+function resetAll(){
+  for(const id of['c1','c2','c3','c4','c5','c6','cLf','c8','c9'])dea(id);
+  for(let i=0;i<10;i++)lof(i);
+  ['be1','be2'].forEach(b=>$(`#${b}`).classList.remove('dn'));
+  ['bl1','bl2'].forEach(b=>$(`#${b}`).classList.remove('on'));
+  for(let i=0;i<3;i++){$(`#ct${i}`).classList.remove('on');$(`#fi${i}`).className='fi'}
+  $$('.pod').forEach(p=>p.classList.remove('fault'));
+  $('#logB').classList.remove('show');$('#cC').classList.remove('show');
+  ['ah1','ah2','ah3'].forEach(a=>{$(`#${a}`).className='ah';$(`#${a}`).querySelector('.af').style.width='0%'});
+  for(let i=1;i<=8;i++)pof(i);
+  $$('.sub').forEach(s=>s.classList.remove('pulse'));
+  PL.forEach(p=>$(`#${p}`).classList.remove('on'));
+  $('#rP').style.opacity='1';
+}
+
+const W=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function simRun(fi,rid,spd=1){
+  const d=ms=>W(ms/spd);
+  $('#cF').textContent=fN[fi];$('#cF').style.color=fCo[fi];
+  $('#cCa').textContent=fCt[fi]+' Fault';
+  $('#eI').innerHTML=`exp_id: EXP-001<br>run_id: RUN-${String(rid).padStart(3,'0')}`;
+
+  // 1 Fault Library
+  setS(0,`<strong>&#9312; Select</strong> &mdash; ${fCt[fi]}: <strong>${fN[fi]}</strong>`);
+  act('c1');$(`#ct${fi}`).classList.add('on');
+  lon(0);$('#pL1').classList.add('on');dots(0,3,400/spd);pon(1);
+  await d(450);
+
+  // 2 Chaos Center -> SockShop + -> Langfuse
+  don('c1');act('c2');$(`#fi${fi}`).classList.add('inj');
+  setS(1,`<strong>&#9313; Inject</strong> &mdash; ${fN[fi]} + exp details &rarr; Langfuse`);
+  lon(1);$('#pL2').classList.add('on');dots(1,4,400/spd);pon(2);
+  lon(2);$('#pL3').classList.add('on');dots(2,3,500/spd);
+  act('cLf');
+  await d(400);
+  fP[fi].forEach(p=>$(`#p${p}`).classList.add('fault'));
+  await d(350);
+
+  // 3 SockShop -> 4 ITOps via MCP
+  don('c2');$(`#fi${fi}`).classList.remove('inj');$(`#fi${fi}`).classList.add('ok');
+  act('c3');
+  setS(2,`<strong>&#9314;&rarr;&#9315; MCP</strong> &mdash; ITOps pulls K8s traces from SockShop`);
+  lon(3);$('#pL4').classList.add('on');dots(3,5,400/spd);pon(3);pon(4);
+  if(spd<=1)showLogs(fi);
+  await d(500);
+  fP[fi].forEach(p=>$(`#p${p}`).classList.remove('fault'));
+
+  // 4 ITOps processing + stores to Langfuse
+  don('c3');act('c4');
+  setS(3,`<strong>&#9315; Analyze</strong> &mdash; LiteLLM + Sidecar + store &rarr; Langfuse`);
+  await d(200);
+  $('#sLl').classList.add('pulse');pon(5);
+  await d(200);
+  $('#sSc').classList.add('pulse');
+  await d(200);
+  $('#sLf').classList.add('pulse');
+  lon(4);$('#pL5').classList.add('on');dots(4,4,350/spd);pon(6);
+  await d(350);
+  $$('.sub').forEach(s=>s.classList.remove('pulse'));
+  $('#logB').classList.remove('show');
+
+  // 5 Certifier B+E (pulls from Langfuse)
+  don('c4');act('cLf');
+  setS(4,`<strong>&#9316; Bucketing + Extraction</strong> &mdash; Pulling from Langfuse`);pon(7);
+  await d(250);
+  lon(5);$('#pL6').classList.add('on');dots(5,5,500/spd);
+  don('cLf');act('c5');
+  await d(300);
+  $('#be1').classList.add('dn');$('#bl1').classList.add('on');
+  await d(300);
+  $('#be2').classList.add('dn');$('#bl2').classList.add('on');
+  await d(280);
+
+  // 6 MongoDB
+  don('c5');act('c6');
+  lon(6);dots(6,3,300/spd);
+  setS(5,`<strong>&#9317; Store</strong> &mdash; MongoDB (${rid}/30)`);pon(8);setRun(rid);
+  await d(400);don('c6');
+
+  // Cleanup
+  for(let i=0;i<10;i++)lof(i);
+  ['be1','be2'].forEach(b=>$(`#${b}`).classList.remove('dn'));
+  ['bl1','bl2'].forEach(b=>$(`#${b}`).classList.remove('on'));
+  for(let i=0;i<3;i++){$(`#ct${i}`).classList.remove('on');$(`#fi${i}`).className='fi'}
+  for(let i=1;i<=8;i++)pof(i);
+  PL.forEach(p=>$(`#${p}`).classList.remove('on'));
+}
+
+async function ff(s,e){
+  setS(5,`<strong>Fast-forward</strong> &mdash; Runs ${s} &rarr; ${e}`);
+  const ids=['c1','c2','c3','c4','c5','c6'];
+  for(let r=s;r<=e;r++){
+    const fi=(r-1)%3;setRun(r);
+    const ci=ids[r%ids.length];$(`#${ci}`).classList.add('act');
+    dots(r%7,2,120);
+    $('#cF').textContent=fN[fi];$('#cF').style.color=fCo[fi];
+    await W(90);$(`#${ci}`).classList.remove('act');
+  }
+}
+
+async function certPhase(){
+  $('#ph').className='ph crt';$('#ph').textContent='CERTIFICATION PHASE';
+
+  act('c6');act('cLf');
+  lon(7);lon(8);
+  setS(6,`<strong>&#9318; Aggregation</strong> &mdash; Reading 30 runs from MongoDB + Langfuse`);
+  dots(7,6,900);dots(8,5,1000);
+  await W(1200);
+  don('c6');don('cLf');act('c8');
+
+  const a1=$('#ah1');a1.classList.add('a-on');a1.querySelector('.af').style.width='100%';
+  await W(1500);a1.classList.remove('a-on');a1.classList.add('a-dn');
+
+  setS(7,`<strong>&#9319; Hypothesis Framework</strong> &mdash; Statistical testing (optional)`);
+  const a2=$('#ah2');a2.classList.add('a-on');a2.querySelector('.af').style.width='100%';
+  await W(1500);a2.classList.remove('a-on');a2.classList.add('a-dn');
+
+  setS(8,`<strong>&#9320; Certification</strong> &mdash; Generating final report`);
+  const a3=$('#ah3');a3.classList.add('a-on');a3.querySelector('.af').style.width='100%';
+  lon(9);dots(9,5,600);
+  await W(1200);a3.classList.remove('a-on');a3.classList.add('a-dn');
+
+  don('c8');act('c9');
+  setS(8,`<strong>Complete!</strong> &mdash; SockShop certified &#10003; 30 runs, 3 faults, 9 steps`);
+  await W(400);
+  $('#rP').style.opacity='0.05';$('#cC').classList.add('show');
+  await W(5000);
+  $('#cC').classList.remove('show');$('#rP').style.opacity='1';
+}
+
+async function main(){
+  resetAll();setRun(0);
+  $('#ph').className='ph sim';$('#ph').textContent='SIMULATION PHASE \u2014 RUNS 1-30';
+
+  await simRun(0,1);await W(250);
+  await simRun(1,2);await W(250);
+  await simRun(2,3);await W(200);
+
+  await ff(4,30);await W(400);
+
+  act('c6');setS(5,`<strong>30/30 Complete!</strong> &mdash; All results stored in MongoDB`);
+  await W(1500);
+
+  await certPhase();await W(700);
+
+  resetAll();setRun(0);
+  $('#ph').className='ph sim';$('#ph').textContent='SIMULATION PHASE \u2014 RUNS 1-30';
+  for(let t=5;t>=1;t--){setS(-1,`<strong>Restarting</strong> in <strong>${t}s</strong>`);await W(1000)}
+  main();
+}
+
+setTimeout(main,500);
+</script>
+</body>
+</html>

@@ -270,6 +270,20 @@ services:
       retries: 3
       start_period: 40s
 
+  # ── Certifier workspace init (one-shot, runs as root) ───────────────────────
+  # The certifier runs as uid 1000 (agentcert) and cannot create directories
+  # inside a host-mounted volume owned by root. This service pre-creates the
+  # workspace tree and chowns it to uid 1000 before the certifier starts.
+  workspace-init:
+    image: python:3.11-slim
+    container_name: ace-workspace-init
+    user: root
+    command: >
+      bash -c "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"
+    volumes:
+      - ./certifier/workspace:/ws
+    restart: "no"
+
   # ── Certifier API (inlined from certifier/docker-compose.yml) ───────────────
   # Defined here rather than `include`d so the mongo dependency + Langfuse
   # override below don't require Compose 2.21+'s included-service merging.
@@ -282,6 +296,8 @@ services:
     container_name: certifier_app
     restart: unless-stopped
     depends_on:
+      workspace-init:
+        condition: service_completed_successfully
       mongo-init:
         condition: service_completed_successfully
         required: false

@@ -1,8 +1,8 @@
 ---
-title: "2 · Experiment Design"
-parent: "Deep Dive"
+title: "Experiment Design"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 2
-nav_fold: true
 ---
 
 # Experiment Design
@@ -45,14 +45,47 @@ The agent may perform differently across fault categories even when the symptoms
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [2.0 Experiment Assumptions](02-Experiment-Design/2.0-Experiment-Assumptions) | Pre-conditions that must hold for results to be valid |
-| [2.1 Experimentation Principles](02-Experiment-Design/2.1-Experimentation-Principles) | Why 30 runs, why clean baselines, why controlled injection timing |
-| [2.2 Global Methods and Standards](02-Experiment-Design/2.2-Global-Methods-and-Standards) | Statistical methods, confidence levels, and reporting conventions |
-| [2.3 Fault Taxonomy](02-Experiment-Design/2.3-Fault-Taxonomy) | Full reference of fault types, categories, and LitmusChaos mappings |
-| [2.4 Fault Configuration Schema](02-Experiment-Design/2.4-Fault-Configuration-Schema) | JSON schema for writing a fault configuration file |
-| [2.5 Trace Collection and Preprocessing](02-Experiment-Design/2.5-Trace-Collection-and-Preprocessing) | How Langfuse captures agent behaviour and what the pipeline expects |
-| [2.6 Certification Scenarios](02-Experiment-Design/2.6-Certification-Scenarios) | The three certification scenarios based on data completeness |
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.0</span> Experiment Assumptions</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.0-Experiment-Assumptions.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.1</span> Experimentation Principles</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.1-Experimentation-Principles.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.2</span> Global Methods and Standards</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.2-Global-Methods-and-Standards.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.3</span> Fault Taxonomy</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.3-Fault-Taxonomy.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.4</span> Fault Configuration Schema</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.4-Fault-Configuration-Schema.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.5</span> Trace Collection and Preprocessing</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.5-Trace-Collection-and-Preprocessing.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">2.6</span> Certification Scenarios</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 02-Experiment-Design/2.6-Certification-Scenarios.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

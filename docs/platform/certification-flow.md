@@ -1,8 +1,8 @@
 ---
 title: "Certification Flow"
-parent: "5 · Certification"
+parent: "Control Plane"
 grand_parent: "Deep Dive"
-nav_order: 2
+nav_order: 9
 ---
 
 # Mongo Collection Architecture for Poller-Based Certificate Workflow

@@ -473,3 +473,225 @@ a.svc-card-port:hover {
   color: #6b7280;
   margin-top: .1rem;
 }
+
+
+// ─── Deep Dive: chapter sequence cards ────────────────────────────────────────
+
+.chapter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: .9rem;
+  margin: 1.2rem 0;
+}
+
+.chapter-card {
+  display: flex;
+  gap: .9rem;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color .15s, box-shadow .15s;
+  align-items: flex-start;
+}
+
+.chapter-card:hover {
+  border-color: #a78bfa;
+  box-shadow: 0 2px 8px rgba(139,92,246,.12);
+  text-decoration: none;
+  color: inherit;
+}
+
+.chapter-num {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: #6d28d9;
+  color: #fff;
+  font-weight: 700;
+  font-size: .82rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: .05rem;
+}
+
+.chapter-body { flex: 1; }
+
+.chapter-title {
+  font-weight: 700;
+  font-size: .95rem;
+  color: #0f172a;
+  margin-bottom: .2rem;
+}
+
+.chapter-desc {
+  font-size: .82rem;
+  color: #475569;
+  line-height: 1.45;
+}
+
+
+// ─── Deep Dive: topic cards ───────────────────────────────────────────────────
+
+.topic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: .85rem;
+  margin: 1.2rem 0;
+}
+
+.topic-card {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.topic-card:hover {
+  border-color: #6ee7b7;
+  box-shadow: 0 2px 8px rgba(16,185,129,.1);
+}
+
+.topic-card-title {
+  font-weight: 700;
+  font-size: .93rem;
+  color: #0f172a;
+  margin-bottom: .25rem;
+}
+
+.topic-card-desc {
+  font-size: .81rem;
+  color: #475569;
+  line-height: 1.45;
+  margin-bottom: .55rem;
+}
+
+.topic-card-link {
+  font-size: .82rem;
+  font-weight: 600;
+  color: #059669;
+  text-decoration: none;
+}
+
+.topic-card-link:hover { text-decoration: underline; }
+
+
+// ─── Deep Dive: section badge labels ──────────────────────────────────────────
+
+.dd-badge {
+  display: inline-block;
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: .15rem .5rem;
+  margin-bottom: .6rem;
+}
+
+.dd-badge-methodology { background: #ede9fe; color: #5b21b6; }
+.dd-badge-platform    { background: #dcfce7; color: #166534; }
+
+
+// ─── Deep Dive: collapsible section nav (within a chapter) ───────────────────
+
+.section-tag {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-size: .72rem;
+  font-weight: 700;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: .14rem .44rem;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.section-details {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  margin-bottom: .5rem;
+  overflow: hidden;
+  transition: border-color .15s;
+}
+
+.section-details[open] {
+  border-color: #93c5fd;
+}
+
+.section-summary {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .7rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  background: #f8fafc;
+  font-size: .92rem;
+  font-weight: 600;
+  color: #0f172a;
+  list-style: none;
+}
+
+.section-summary::-webkit-details-marker { display: none; }
+.section-summary::marker               { display: none; }
+
+.section-summary:hover { background: #f1f5f9; }
+
+.section-details[open] > .section-summary {
+  background: #eff6ff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.section-summary::after {
+  content: "+";
+  margin-left: auto;
+  color: #94a3b8;
+  font-size: .95rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.section-details[open] > .section-summary::after {
+  content: "−";
+  color: #3b82f6;
+}
+
+.section-details-body {
+  padding: .85rem 1.1rem 1rem;
+  font-size: .86rem;
+  color: #475569;
+  line-height: 1.6;
+}
+
+// Scale down headings inside expanded sections
+.section-details-body h1 {
+  font-size: 1.05rem; font-weight: 700; color: #0f172a;
+  margin-top: .5rem; margin-bottom: .4rem; border-bottom: 1px solid #e2e8f0; padding-bottom: .25rem;
+}
+.section-details-body h2 {
+  font-size: .96rem; font-weight: 700; color: #1e293b;
+  margin-top: .85rem; margin-bottom: .3rem;
+}
+.section-details-body h3 {
+  font-size: .88rem; font-weight: 600; color: #334155;
+  margin-top: .7rem; margin-bottom: .25rem;
+}
+.section-details-body h4 {
+  font-size: .84rem; font-weight: 600; color: #475569;
+  margin-top: .6rem; margin-bottom: .2rem;
+}
+
+// Tables, code, links
+.section-details-body table { font-size: .8rem; }
+.section-details-body pre   { font-size: .77rem; overflow-x: auto; }
+.section-details-body code  { font-size: .82rem; }
+.section-details-body a     { color: #2563eb; text-decoration: none; }
+.section-details-body a:hover { text-decoration: underline; }
+.section-details-body p { margin-top: .4rem; margin-bottom: .4rem; }
+.section-details-body ul,
+.section-details-body ol { margin-top: .3rem; margin-bottom: .3rem; padding-left: 1.4rem; }

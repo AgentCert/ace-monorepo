@@ -1,8 +1,8 @@
 ---
 title: "Certifier Architecture"
-parent: "5 · Certification"
+parent: "Control Plane"
 grand_parent: "Deep Dive"
-nav_order: 1
+nav_order: 8
 ---
 
 # Architecture — AgentCert Certifier

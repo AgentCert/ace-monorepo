@@ -1,8 +1,8 @@
 ---
-title: "6 · Observations"
-parent: "Deep Dive"
+title: "Observations"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 6
-nav_fold: true
 ---
 
 # Observations
@@ -47,11 +47,35 @@ This is one of the strongest arguments for statistical certification: a single r
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [6.1 TTD Observation](06-Observations/6.1-TTD-Observation) | Time-to-detect and time-to-mitigate findings across real datasets |
-| [6.2 PII Observation](06-Observations/6.2-PII-Observation) | PII exposure patterns under fault conditions |
-| [6.3 Hallucination Observation](06-Observations/6.3-Hallucination-Observation) | Hallucination behaviour under uncertainty |
-| [6.4 Fault Bucketing and Detection Findings](06-Observations/6.4-Fault-Bucketing-And-Detection-Findings) | What the bucketing algorithm surfaces that manual review misses |
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">6.1</span> TTD &amp; TTM Observations</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 06-Observations/6.1-TTD-Observation.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">6.2</span> PII Observations</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 06-Observations/6.2-PII-Observation.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">6.3</span> Hallucination Observations</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 06-Observations/6.3-Hallucination-Observation.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">6.4</span> Fault Bucketing &amp; Detection Findings</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 06-Observations/6.4-Fault-Bucketing-And-Detection-Findings.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">6.5</span> Hypothesis Validation Report</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 06-Observations/6.5-Hypothesis-Validation-Report.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

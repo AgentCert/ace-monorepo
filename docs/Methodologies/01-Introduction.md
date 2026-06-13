@@ -1,8 +1,8 @@
 ---
-title: "1 · Introduction"
-parent: "Deep Dive"
+title: "Introduction"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 1
-nav_fold: true
 ---
 
 # Introduction to AgentCert
@@ -37,12 +37,23 @@ The platform has three components working together:
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [1.1 Why AgentCert](01-Introduction/1.1-Why-AgentCert) | The problem in detail and why traditional testing falls short |
-| [1.2 High-Level Workflow](01-Introduction/1.2-High-Level-Workflow) | End-to-end flow from fault definition to certification report |
-| [1.3 Certifier Assumptions](01-Introduction/1.3-Certifier-Assumptions) | What the pipeline assumes about your agent, environment, and traces |
-
-Start with [1.1](01-Introduction/1.1-Why-AgentCert) if you are new to the platform. If you want the workflow picture first, jump to [1.2](01-Introduction/1.2-High-Level-Workflow).
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">1.1</span> Why AgentCert</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 01-Introduction/1.1-Why-AgentCert.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">1.2</span> High-Level Workflow</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 01-Introduction/1.2-High-Level-Workflow.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">1.3</span> Certifier Assumptions</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 01-Introduction/1.3-Certifier-Assumptions.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

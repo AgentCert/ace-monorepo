@@ -1,8 +1,8 @@
 ---
-title: "5 · Certification"
-parent: "Deep Dive"
+title: "Certification"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 5
-nav_fold: true
 ---
 
 # Certification
@@ -66,11 +66,29 @@ The report adapts to the data available:
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [5.0 Certification Overview](05-Certification/5.0-Certification-Overview) | How the cert builder works and what each part of the report contains |
-| [5.1 Report Builder Architecture](05-Certification/5.1-Report-Builder-Architecture) | Internal architecture of Phase 3: builders, concurrency, and schema validation |
-| [5.2 Report Sections Reference](05-Certification/5.2-Report-Sections-Reference) | What goes into each of the 12 sections |
-| [5.3 Certification Scenarios](05-Certification/5.3-Certification-Scenarios) | Full / provisional / preliminary — which scenario applies and why |
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">5.0</span> Certification Overview</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 05-Certification/5.0-Certification-Overview.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">5.1</span> Report Builder Architecture</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 05-Certification/5.1-Report-Builder-Architecture.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">5.2</span> Report Sections Reference</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 05-Certification/5.2-Report-Sections-Reference.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">5.3</span> Certification Scenarios</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 05-Certification/5.3-Certification-Scenarios.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

@@ -1,8 +1,8 @@
 ---
-title: "4 · Pipeline"
-parent: "Deep Dive"
+title: "Pipeline"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 4
-nav_fold: true
 ---
 
 # Pipeline Architecture
@@ -57,14 +57,35 @@ Each phase is designed around a specific principle.
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [4.0 Architecture Overview](04-Pipeline/4.0-Architecture-Overview) | Full end-to-end flow with phase internals, output files, and design rationale |
-| [4.1 Fault Bucketing](04-Pipeline/4.1-Fault-Bucketing) | Phase 0 deep-dive: the 3-pass classification algorithm |
-| [4.2 Metrics Extraction](04-Pipeline/4.2-Metrics-Extraction) | Phase 1: quantitative and qualitative extraction passes |
-| [4.3 Aggregation and LLM Council](04-Pipeline/4.3-Aggregation-and-LLM-Council) | Phase 2: deterministic stats and narrative synthesis |
-| [4.4 Hypothesis Framework](04-Pipeline/4.4-Hypothesis-Framework) | Statistical hypothesis testing that activates at N ≥ 30 runs |
-
-Start with [4.0 Architecture Overview](04-Pipeline/4.0-Architecture-Overview) for the complete flow diagram and output file layout.
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">4.0</span> Architecture Overview</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 04-Pipeline/4.0-Architecture-Overview.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">4.1</span> Fault Bucketing</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 04-Pipeline/4.1-Fault-Bucketing.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">4.2</span> Metrics Extraction</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 04-Pipeline/4.2-Metrics-Extraction.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">4.3</span> Aggregation and LLM Council</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 04-Pipeline/4.3-Aggregation-and-LLM-Council.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">4.4</span> Hypothesis Framework</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 04-Pipeline/4.4-Hypothesis-Framework.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

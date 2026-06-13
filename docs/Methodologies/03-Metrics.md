@@ -1,8 +1,8 @@
 ---
-title: "3 · Metrics"
-parent: "Deep Dive"
+title: "Metrics"
+parent: "Certification Methodology"
+grand_parent: "Deep Dive"
 nav_order: 3
-nav_fold: true
 ---
 
 # Metrics
@@ -51,8 +51,11 @@ This multi-run aggregation is what transforms a collection of observations into 
 
 ---
 
-## What This Chapter Covers
+## What This Section Covers
 
-| Section | Contents |
-|---|---|
-| [3.0 Metrics Reference](03-Metrics/3.0-Metrics-Reference) | Complete reference for every metric: definition, extraction method, formula, and rubric |
+<details class="section-details" markdown="1">
+<summary class="section-summary"><span class="section-tag">3.0</span> Metrics Reference</summary>
+<div class="section-details-body" markdown="1">
+{% capture _s %}{% include_relative 03-Metrics/3.0-Metrics-Reference.md %}{% endcapture %}{% assign _p = _s | split: "---" %}{% assign _b = _p | slice: 2, 100 | join: "---" %}{{ _b | lstrip }}
+</div>
+</details>

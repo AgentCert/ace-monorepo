@@ -1,6 +1,6 @@
 ---
 title: "4 · Pipeline"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 4
 nav_fold: true
 ---

@@ -1,6 +1,6 @@
 ---
 title: "2 · Experiment Design"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 2
 nav_fold: true
 ---

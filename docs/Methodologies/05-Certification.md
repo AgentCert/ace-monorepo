@@ -1,6 +1,6 @@
 ---
 title: "5 · Certification"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 5
 nav_fold: true
 ---

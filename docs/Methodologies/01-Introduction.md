@@ -1,6 +1,6 @@
 ---
 title: "1 · Introduction"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 1
 nav_fold: true
 ---

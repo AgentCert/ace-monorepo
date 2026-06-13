@@ -1,6 +1,6 @@
 ---
 title: "6 · Observations"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 6
 nav_fold: true
 ---

@@ -35,8 +35,10 @@ search:
   previews: 3
 heading_anchors: true
 
-# Top-right auxiliary link
+# Top-right auxiliary links
 aux_links:
+  "Slack ↗":
+    - "https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw"
   "GitHub ↗":
     - "https://github.com/AgentCert/ace-monorepo"
 aux_links_new_tab: true

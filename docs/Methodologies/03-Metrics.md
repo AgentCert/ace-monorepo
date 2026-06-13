@@ -1,6 +1,6 @@
 ---
 title: "3 · Metrics"
-parent: "Methodology"
+parent: "Deep Dive"
 nav_order: 3
 nav_fold: true
 ---

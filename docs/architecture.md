@@ -1,6 +1,8 @@
 ---
-title: "Architecture"
-nav_order: 3
+title: "Certifier Architecture"
+parent: "5 · Certification"
+grand_parent: "Deep Dive"
+nav_order: 1
 ---
 
 # Architecture — AgentCert Certifier

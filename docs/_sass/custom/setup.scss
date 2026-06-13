@@ -1,2 +1,3 @@
-// 10rem ≈ 160 px (fits "Architecture" comfortably). Theme default is 16.5rem.
-$nav-width: 10rem;
+// 15rem ≈ 240 px — prevents long items like "Experiment Design" wrapping.
+// Theme default is 16.5rem (264 px).
+$nav-width: 15rem;

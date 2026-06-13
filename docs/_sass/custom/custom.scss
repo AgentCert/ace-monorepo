@@ -1,8 +1,25 @@
-// just-the-docs puts max-width: $content-width (~800px) on .main, which leaves
-// a lot of dead whitespace on the right on wide screens. Remove it so the content
-// fills everything to the right of the sidebar.
-.main,
+// ─── Layout override ─────────────────────────────────────────────────────────
+// just-the-docs may not pick up $nav-width from setup.scss for the rendered
+// CSS rules even though it uses it for breakpoints. Force both sides with
+// !important so the content fills everything right of the sidebar.
+
+.side-bar {
+  width: 15rem !important;
+  min-width: 15rem !important;
+}
+
+.main {
+  margin-left: 15rem !important;
+  max-width: none !important;
+}
+
+.main-header {
+  max-width: none !important;
+}
+
 .main-content,
 .main-content-wrap {
-  max-width: none;
+  max-width: none !important;
+  padding-left: 2rem !important;
+  padding-right: 2rem !important;
 }

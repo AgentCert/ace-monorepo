@@ -45,100 +45,109 @@ binds: an agent + an app + a fault studio + a schedule.
 
 ## The runtime flow
 
-```
-                           ┌──────────────────────────┐
-                           │       AgentCert UI       │     operator clicks Run
-                           └────────────┬─────────────┘
-                                        │
-                                        ▼
-                           ┌──────────────────────────┐
-                           │     GraphQL API          │
-                           │  chaos_experiment_run/   │
-                           └────────────┬─────────────┘
-                                        │   1. Mongo: experiment_run.Status = QUEUED
-                                        │   2. Build Argo Workflow from
-                                        │      (agent + app + active fault selections)
-                                        │   3. Call observability.TraceExperimentExecution
-                                        │      → Langfuse: new trace, root span open
-                                        ▼
-                           ┌──────────────────────────┐
-                           │   Subscriber pod         │     dispatched via gRPC
-                           │   (target cluster)       │
-                           └────────────┬─────────────┘
-                                        │
-                                        ▼
-              ┌─────────────────────────────────────────────────┐
-              │  Argo Workflow step 1: install-app              │
-              │    agentcert/agentcert-install-app:latest       │
-              │    helm upgrade --install <chart> -n <ns>       │
-              └────────────────────┬────────────────────────────┘
-                                   ▼
-              ┌─────────────────────────────────────────────────┐
-              │  Argo Workflow step 2: install-agent            │
-              │    agentcert/agentcert-install-agent:latest     │
-              │    helm upgrade --install <chart> -n <ns> \     │
-              │      --set agent.config.AGENT_ID=<UUID> \       │
-              │      --set agent.config.MCP_URLS=... \          │
-              │      --set agent.config.OPENAI_BASE_URL=... \   │
-              │      --set agent.config.LANGFUSE_*              │
-              └────────────────────┬────────────────────────────┘
-                                   ▼
-              ┌─────────────────────────────────────────────────┐
-              │  Argo Workflow step 3: load-test (optional)     │
-              └────────────────────┬────────────────────────────┘
-                                   ▼
-              ┌─────────────────────────────────────────────────┐
-              │  Argo Workflow step 4: chaos faults             │
-              │    parallel or sequential per fault studio      │
-              │    each spawns a ChaosEngine → ChaosResult      │
-              └────────────────────┬────────────────────────────┘
-                                   │
-                ┌──────────────────┼──────────────────┐
-                ▼                  ▼                  ▼
-   ┌───────────────────┐  ┌───────────────────┐  ┌───────────────────────────┐
-   │ flash-agent       │  │  LitmusChaos      │  │  Subscriber callbacks     │
-   │ (scan/watch loop) │  │  operator runs    │  │  → GraphQL Update         │
-   │ + agent-sidecar   │  │  the fault        │  │  → observability.        │
-   │                   │  │                   │  │    EmitFaultSpanAt-       │
-   │ LLM calls flow:   │  │  ChaosResult      │  │    Injection(...)         │
-   │ agent →           │  │  status updates   │  │                           │
-   │   sidecar:4001 →  │  │  late-arriving    │  │                           │
-   │   LiteLLM:4000 →  │  │  (deterministic   │  │                           │
-   │   Azure/OpenAI    │  │   ID upserts in   │  │                           │
-   │                   │  │   Langfuse)       │  │                           │
-   │ Trace metadata    │  │                   │  │                           │
-   │ injected by side- │  │                   │  │                           │
-   │ car: trace_id =   │  │                   │  │                           │
-   │ NOTIFY_ID         │  │                   │  │                           │
-   └────────┬──────────┘  └───────────────────┘  └───────────────────────────┘
-            │
-            ▼
-   Langfuse stores:
-     • root span (the experiment)
-     • child spans per fault
-     • LLM call spans (from LiteLLM)
-                                   │
-                                   ▼  Argo workflow ends
-                           ┌──────────────────────────┐
-                           │   Subscriber callback    │
-                           │   → CompleteExperiment-  │
-                           │     Execution(...)       │
-                           └────────────┬─────────────┘
-                                        │  Status = COMPLETED / FAILED
-                                        │  ClearEmittedFaults(traceID)
-                                        │  ClearWorkflowNodeStates(traceID)
-                                        ▼
-                           ┌──────────────────────────┐
-                           │  Operator triggers       │
-                           │  certifier:              │
-                           │  POST /api/v1/           │
-                           │  aggregation-            │
-                           │  certification           │
-                           └────────────┬─────────────┘
-                                        │  reads Langfuse traces for the run
-                                        ▼
-                          [12-section HTML + PDF report]
-```
+<div class="flow-pipeline">
+
+  <div class="flow-step-box">
+    <div class="flow-step-header"><span class="flow-step-num">1</span><span class="flow-step-title">AgentCert UI</span></div>
+    <div class="flow-step-body">Operator clicks <strong>Run</strong> on a Benchmark Project or Experiment in the web UI.</div>
+    <div class="flow-step-output">→ GraphQL mutation to chaos_experiment_run/</div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header"><span class="flow-step-num">2</span><span class="flow-step-title">GraphQL API — chaos_experiment_run/</span></div>
+    <div class="flow-step-body">
+      1. Mongo: <code>experiment_run.Status = QUEUED</code><br>
+      2. Build Argo Workflow from (agent + app + active fault selections)<br>
+      3. Call <code>observability.TraceExperimentExecution</code> → Langfuse: new trace, root span open
+    </div>
+    <div class="flow-step-output">→ Argo Workflow dispatched to Subscriber via gRPC</div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-note">dispatched via gRPC</div><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header"><span class="flow-step-num">3</span><span class="flow-step-title">Subscriber pod (target cluster)</span></div>
+    <div class="flow-step-body">Receives the Argo Workflow definition, submits it to the in-cluster Argo controller. Stages 1–4 per-namespace manifests must already be installed.</div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-env" style="max-width:580px">
+    <div class="flow-env-label">Argo Workflow</div>
+    <div class="flow-step-box" style="margin-bottom:.5rem;max-width:100%">
+      <div class="flow-step-header"><span class="flow-step-num">4a</span><span class="flow-step-title">install-app</span></div>
+      <div class="flow-step-body"><code>agentcert/agentcert-install-app:latest</code> · <code>helm upgrade --install &lt;chart&gt; -n &lt;ns&gt;</code></div>
+    </div>
+    <div class="flow-step-box" style="margin-bottom:.5rem;max-width:100%">
+      <div class="flow-step-header"><span class="flow-step-num">4b</span><span class="flow-step-title">install-agent</span></div>
+      <div class="flow-step-body"><code>agentcert/agentcert-install-agent:latest</code> · sets <code>AGENT_ID</code>, <code>MCP_URLS</code>, <code>OPENAI_BASE_URL</code>, <code>LANGFUSE_*</code> via Helm</div>
+    </div>
+    <div class="flow-step-box" style="margin-bottom:.5rem;max-width:100%">
+      <div class="flow-step-header"><span class="flow-step-num">4c</span><span class="flow-step-title">load-test <span style="font-size:.74rem;font-weight:400;color:#64748b">(optional)</span></span></div>
+      <div class="flow-step-body">Generates background traffic so the agent has meaningful signals to observe.</div>
+    </div>
+    <div class="flow-step-box" style="max-width:100%">
+      <div class="flow-step-header"><span class="flow-step-num">4d</span><span class="flow-step-title">chaos faults</span></div>
+      <div class="flow-step-body">Parallel or sequential per fault studio definition. Each spawns a <code>ChaosEngine</code> → <code>ChaosResult</code>.</div>
+    </div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-note">faults live — three things happen in parallel</div><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-fork">
+    <div class="flow-fork-branch">
+      <div class="flow-phase-box">
+        <span class="flow-phase-badge" style="background:#7c3aed">Agent</span>
+        <div>
+          <div class="flow-phase-title">flash-agent + agent-sidecar</div>
+          <ul class="flow-phase-list">
+            <li>Scan/watch loop — no fault visibility</li>
+            <li>LLM calls: agent → sidecar :4001 → LiteLLM :4000 → Azure/OpenAI</li>
+            <li>Sidecar injects <code>trace_id = NOTIFY_ID</code> on every call</li>
+            <li>Langfuse receives: root span, child spans per fault, LLM call spans</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+    <div class="flow-fork-branch">
+      <div class="flow-phase-box">
+        <span class="flow-phase-badge" style="background:#dc2626">Fault</span>
+        <div>
+          <div class="flow-phase-title">LitmusChaos operator</div>
+          <div class="flow-phase-desc">Runs the fault per <code>ChaosEngine</code>. <code>ChaosResult</code> status updates arrive late (deterministic ID upserts in Langfuse).</div>
+        </div>
+      </div>
+    </div>
+    <div class="flow-fork-branch">
+      <div class="flow-phase-box">
+        <span class="flow-phase-badge" style="background:#0369a1">Events</span>
+        <div>
+          <div class="flow-phase-title">Subscriber callbacks</div>
+          <ul class="flow-phase-list">
+            <li>→ GraphQL <code>Update</code></li>
+            <li>→ <code>observability.EmitFaultSpanAtInjection</code></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-note">Argo workflow ends</div><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header"><span class="flow-step-num">5</span><span class="flow-step-title">Subscriber callback — CompleteExperimentExecution</span></div>
+    <div class="flow-step-body">
+      Status = <code>COMPLETED / FAILED</code><br>
+      <code>ClearEmittedFaults(traceID)</code> · <code>ClearWorkflowNodeStates(traceID)</code>
+    </div>
+    <div class="flow-step-output">→ run row updated in Mongo, Langfuse root span closed</div>
+  </div>
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header"><span class="flow-step-num">6</span><span class="flow-step-title">Operator triggers certifier</span></div>
+    <div class="flow-step-body"><code>POST /api/v1/aggregation-certification</code> — reads Langfuse traces for the run, runs Phase 0–3 pipeline</div>
+    <div class="flow-step-output">→ 12-section HTML + PDF certification report</div>
+  </div>
+
+</div>
 
 ---
 

@@ -18,59 +18,100 @@ multi-cluster production deployment.
 
 ## Component map
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────┐
-│                         AgentCert Control Plane                                    │
-│                                                                                    │
-│  ┌──────────────┐    ┌──────────────────────┐    ┌────────────────────┐           │
-│  │  Web (React) │    │    GraphQL API        │    │  Authentication    │          │
-│  │  :2001 HTTPS │◀──▶│    :8080  (Go 1.24)   │◀──▶│  :3000 REST        │          │
-│  │              │    │                       │    │  :3030 gRPC (Go)   │          │
-│  └──────────────┘    │  - agent_registry     │    └────────┬───────────┘          │
-│                      │  - apps_registry      │             │                       │
-│                      │  - fault_studio       │      ┌──────▼──────┐               │
-│                      │  - chaoshub /         │      │   Dex OIDC   │              │
-│                      │    agenthub / apphub  │      │   :5556      │              │
-│                      │  - observability      │      └─────────────┘               │
-│                      │    (LangfuseTracer)   │                                     │
-│                      │  - chaos_experiment*  │      ┌──────────────┐              │
-│                      └───────────┬───────────┘      │  MongoDB rs0 │              │
-│                                  │                  │  :27017      │              │
-│                                  └─────────────────▶│              │              │
-│                                                     └──────────────┘              │
-└────────────────────────────────────────────────────────────────────────────────────┘
-                                  │
-                                  │ Argo Workflow templates + helm installer images
-                                  ▼
-┌────────────────────────────────────────────────────────────────────────────────────┐
-│                      Kubernetes target cluster (one per registered infra)          │
-│                                                                                    │
-│   ┌────────────────────┐     ┌──────────────────────────────┐                     │
-│   │  Subscriber pod    │     │  Argo controller +           │                     │
-│   │  (chaoscenter/     │◀───▶│  LitmusChaos operator         │                     │
-│   │   subscriber)      │     │  ChaosExperiment / Engine     │                     │
-│   └─────────┬──────────┘     └──────────────────────────────┘                     │
-│             │ installs target app + agent + faults                                │
-│             ▼                                                                      │
-│   ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐          │
-│   │  Sock Shop (SUT)   │  │ Flash agent +       │  │  Chaos faults      │         │
-│   │  + Prom + Grafana  │  │ agent-sidecar       │  │  (pod-delete, …)   │         │
-│   │  + MCP servers     │◀▶│ (under test)        │  │                    │         │
-│   └────────────────────┘  └─────────┬──────────┘  └────────────────────┘          │
-│                                     │ OpenAI calls (with injected identity)        │
-│                                     ▼                                              │
-│                          ┌────────────────────┐                                    │
-│                          │  LiteLLM proxy     │                                    │
-│                          │  :4000             │                                    │
-│                          └─────────┬──────────┘                                    │
-│                                    │ trace spans                                   │
-└────────────────────────────────────┼───────────────────────────────────────────────┘
-                                     ▼
-                            ┌────────────────────┐         ┌──────────────────────┐
-                            │     Langfuse       │ ──────▶ │     certifier        │
-                            │  (trace store)     │         │  (12-section report) │
-                            └────────────────────┘         └──────────────────────┘
-```
+<div class="flow-pipeline">
+
+  <div class="flow-env">
+    <div class="flow-env-label">AgentCert Control Plane</div>
+    <div class="flow-pod-row">
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Web (React)</div>
+        <div class="flow-pod-body">:2001 HTTPS · SPA bundled with nginx</div>
+      </div>
+      <div class="flow-pod-box" style="flex:2">
+        <div class="flow-pod-title">GraphQL API <span style="font-weight:400;font-size:.75rem;color:#94a3b8">:8080 · Go 1.24</span></div>
+        <div class="flow-pod-body">agent_registry · apps_registry · fault_studio<br>chaoshub / agenthub / apphub<br>observability (LangfuseTracer) · chaos_experiment*</div>
+      </div>
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Authentication <span style="font-weight:400;font-size:.75rem;color:#94a3b8">Go</span></div>
+        <div class="flow-pod-body">:3000 REST · :3030 gRPC<br>JWT · project membership<br>→ Dex OIDC :5556</div>
+      </div>
+    </div>
+    <div class="flow-pod-row">
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">MongoDB rs0</div>
+        <div class="flow-pod-body">:27017 · sole persistence layer — users, projects, agents, apps, fault studios, experiments, runs</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-note">Argo Workflow templates + helm installer images</div>
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-env">
+    <div class="flow-env-label">Kubernetes Target Cluster (one per registered infra)</div>
+    <div class="flow-pod-row">
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Subscriber pod</div>
+        <div class="flow-pod-body">chaoscenter/subscriber · talks home over gRPC · dispatches Argo workflows · reports run status</div>
+      </div>
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Argo + LitmusChaos</div>
+        <div class="flow-pod-body">Argo Workflows controller · LitmusChaos operator · ChaosExperiment / ChaosEngine</div>
+      </div>
+    </div>
+    <div class="flow-pod-row">
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Sock Shop (SUT)</div>
+        <div class="flow-pod-body">Target app + Prometheus + Grafana + MCP servers</div>
+      </div>
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Flash agent + sidecar</div>
+        <div class="flow-pod-body">Agent under test · sidecar injects <code>trace_id = NOTIFY_ID</code> on every LLM call</div>
+      </div>
+      <div class="flow-pod-box">
+        <div class="flow-pod-title">Chaos faults</div>
+        <div class="flow-pod-body">pod-delete, network-loss, cpu-hog, … injected by LitmusChaos</div>
+      </div>
+    </div>
+    <div class="flow-component-box">
+      <div class="flow-component-title">LiteLLM proxy <span style="font-weight:400;font-size:.75rem;color:#64748b">:4000</span></div>
+      <div class="flow-pod-body">Agent LLM calls routed here → Azure OpenAI / OpenAI / Gemini. Reports trace spans directly to Langfuse.</div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-note">trace spans</div>
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge" style="background:#0f766e">Langfuse</span>
+    <div>
+      <div class="flow-phase-title">Trace Store</div>
+      <div class="flow-phase-desc">Root span per run · child spans per fault · LLM call spans from LiteLLM · fault config events from OTEL</div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 0–3</span>
+    <div>
+      <div class="flow-phase-title">Certifier</div>
+      <div class="flow-phase-desc">POST /api/v1/aggregation-certification · runs 4-phase pipeline on the traces → 12-section HTML + PDF report</div>
+    </div>
+  </div>
+
+</div>
 
 ---
 

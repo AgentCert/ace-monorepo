@@ -46,17 +46,24 @@ See the [Setup guide →](setup/README.md) for the full walkthrough.
 
 ## What to contribute
 
-### Fault scenarios (highest impact)
-The fault library is what makes ACE general. Adding a scenario for your cloud provider, agent framework, or domain expands what every user can certify against. Scenarios live in `chaos-charts` and `litmus-go`.
-
-### Domain certifiers
-The SRE certifier is the first. Healthcare, finance, legal, DevSec — each domain has different failure modes and different evidence requirements. A domain certifier is a Python module that plugs into the Phase 0–3 pipeline.
-
-### Agent adapters
-ACE currently ships with the Flash ITOps agent. Adapters for AutoGen, LangChain, Semantic Kernel, or your own agent framework let more teams use the platform without forking.
-
-### Bug fixes and improvements
-Open an issue first for anything non-trivial so the approach can be agreed before work starts. For obvious bugs, a PR with a clear description is fine.
+<div class="topic-grid">
+  <div class="topic-card">
+    <div class="topic-card-title">Fault Scenarios <span style="font-size:.72rem;background:#fef3c7;color:#92400e;border-radius:4px;padding:.1rem .4rem;font-weight:700;vertical-align:middle;margin-left:.35rem">highest impact</span></div>
+    <div class="topic-card-desc">The fault library is what makes ACE general. Adding a scenario for your cloud provider, agent framework, or domain expands what every user can certify against. Scenarios live in <code>chaos-charts</code> and <code>litmus-go</code>.</div>
+  </div>
+  <div class="topic-card">
+    <div class="topic-card-title">Domain Certifiers</div>
+    <div class="topic-card-desc">The SRE certifier is the first. Healthcare, finance, legal, DevSec — each domain has different failure modes and evidence requirements. A domain certifier is a Python module that plugs into the Phase 0–3 pipeline.</div>
+  </div>
+  <div class="topic-card">
+    <div class="topic-card-title">Agent Adapters</div>
+    <div class="topic-card-desc">ACE currently ships with the Flash ITOps agent. Adapters for AutoGen, LangChain, Semantic Kernel, or your own agent framework let more teams use the platform without forking.</div>
+  </div>
+  <div class="topic-card">
+    <div class="topic-card-title">Bug Fixes &amp; Improvements</div>
+    <div class="topic-card-desc">Open an issue first for anything non-trivial so the approach can be agreed before work starts. For obvious bugs, a PR with a clear description is fine.</div>
+  </div>
+</div>
 
 ---
 

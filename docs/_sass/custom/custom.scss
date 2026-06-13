@@ -579,6 +579,63 @@ a.svc-card-port:hover {
 .topic-card-link:hover { text-decoration: underline; }
 
 
+// ─── Callout icon/body helpers + modifier-class variants ─────────────────────
+
+.callout-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+  margin-top: .05rem;
+}
+
+.callout-body { flex: 1; color: inherit; }
+
+.callout-body p { margin: 0; }
+
+.callout-body strong { font-weight: 700; }
+
+.callout.info {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.callout.tip {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.callout.warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+// ─── Submodule table and checklist helpers ────────────────────────────────────
+
+.contrib-rule-row {
+  display: flex;
+  gap: .5rem;
+  align-items: baseline;
+  padding: .3rem 0;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: .84rem;
+  &:last-child { border-bottom: none; }
+}
+
+.contrib-rule-badge {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-size: .72rem;
+  font-weight: 700;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  padding: .12rem .4rem;
+  color: #475569;
+  white-space: nowrap;
+}
+
 // ─── Deep Dive: section badge labels ──────────────────────────────────────────
 
 .dd-badge {

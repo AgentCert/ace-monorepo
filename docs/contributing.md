@@ -134,4 +134,4 @@ Never commit secrets. `.env` is gitignored for a reason. Redact keys and tokens 
 
 ---
 
-By contributing you agree your changes are licensed under the [MIT License](https://github.com/AgentCert/ace-monorepo/blob/main/LICENSE).
+By contributing you agree your changes are licensed under the [Apache License 2.0](https://github.com/AgentCert/ace-monorepo/blob/main/LICENSE).

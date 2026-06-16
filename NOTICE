@@ -1,0 +1,43 @@
+# NOTICE
+
+## ACE Monorepo
+
+Copyright 2026 AgentCert Authors
+
+ACE (Agent Certification Engine) is licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+## Submodules
+
+This repository contains submodules. Each submodule carries its own LICENSE and
+NOTICE file. The AgentCert submodule is a fork of LitmusChaos ChaosCenter v3.0.0
+(https://github.com/litmuschaos/litmus), which is licensed under the Apache
+License, Version 2.0.
+
+    Copyright 2016-2024 LitmusChaos Authors
+
+Please refer to each submodule's NOTICE for full attribution details.
+
+---
+
+## Third-party dependencies
+
+This project uses third-party software. Each dependency is subject to its own
+license terms. Key runtime dependencies include:
+
+| Dependency          | License        | Source                                     |
+|---------------------|----------------|--------------------------------------------|
+| Argo Workflows      | Apache 2.0     | https://github.com/argoproj/argo-workflows |
+| MongoDB Go Driver   | Apache 2.0     | https://github.com/mongodb/mongo-go-driver |
+| gqlgen              | MIT            | https://github.com/99designs/gqlgen        |
+| Langfuse Go SDK     | MIT            | https://github.com/langfuse/langfuse-go    |
+| LiteLLM             | MIT            | https://github.com/BerriAI/litellm         |
+| React               | MIT            | https://github.com/facebook/react          |
+| Dex                 | Apache 2.0     | https://github.com/dexidp/dex             |
+
+For a full dependency manifest, see the relevant go.mod and package.json files
+within each service directory.

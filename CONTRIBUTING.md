@@ -265,4 +265,4 @@ Before raising a PR, the `submodule-pointer-auditor` and `secret-scanner` agents
 
 ---
 
-By contributing, you agree that your contributions are licensed under the [MIT License](./LICENSE).
+By contributing, you agree that your contributions are licensed under the [Apache License 2.0](./LICENSE).

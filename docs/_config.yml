@@ -46,7 +46,7 @@ aux_links_new_tab: true
 # Footer
 back_to_top: false
 footer_content: >-
-  ACE — Agent Certification Engine · Released under the MIT License.
+  ACE — Agent Certification Engine · Released under the Apache License 2.0.
 last_edit_timestamp: false
 
 # Keep build output and tooling out of the source.

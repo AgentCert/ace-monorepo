@@ -10,7 +10,7 @@ description: >-
 <div style="background:linear-gradient(135deg,#4338ca 0%,#6d28d9 55%,#9333ea 100%);color:#fff;padding:3.5rem 3rem 3.2rem;border-radius:18px;margin:0 0 2.5rem;box-shadow:0 24px 60px rgba(79,70,229,.22);">
 <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin:0 0 1.1rem 0;align-items:center;">
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Infosys × Microsoft</span>
-<span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Open Source · MIT</span>
+<span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Open Source · Apache 2.0</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Inspired by AIOpsLab</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Built on LitmusChaos · LFN</span>
 </div>

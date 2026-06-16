@@ -6,7 +6,7 @@
 #### Agent Certification Engine
 
 <p>
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.24+-00ADD8.svg?logo=go&logoColor=white">
   <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-326CE5.svg?logo=kubernetes&logoColor=white">
   <img alt="Docker Compose" src="https://img.shields.io/badge/Docker%20Compose-one--command-2496ED.svg?logo=docker&logoColor=white">
@@ -510,4 +510,4 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup, branching, commit, issue, an
 
 ## License
 
-Released under the [MIT License](./LICENSE).
+Released under the [Apache License 2.0](./LICENSE).

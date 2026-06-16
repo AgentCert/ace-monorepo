@@ -9,7 +9,6 @@ description: >-
 <!-- ═══════════════════════════════════════════════════════ HERO ═══ -->
 <div style="background:linear-gradient(135deg,#4338ca 0%,#6d28d9 55%,#9333ea 100%);color:#fff;padding:3.5rem 3rem 3.2rem;border-radius:18px;margin:0 0 2.5rem;box-shadow:0 24px 60px rgba(79,70,229,.22);">
 <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin:0 0 1.1rem 0;align-items:center;">
-<span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Infosys × Microsoft</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Open Source · Apache 2.0</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Inspired by AIOpsLab</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Built on LitmusChaos · LFN</span>
@@ -128,7 +127,7 @@ description: >-
 <div style="font-size:1.4rem;flex-shrink:0;">🔬</div>
 <div>
 <p style="font-size:.8rem;font-weight:700;color:#1d4ed8;letter-spacing:.08em;text-transform:uppercase;margin:0 0 .3rem;">Origin</p>
-<p style="font-size:.9rem;color:#1e3a5f;margin:0;line-height:1.6;"><strong>ACE is a joint Infosys × Microsoft open source project.</strong> It is inspired by <a href="https://github.com/microsoft/AIOpsLab" style="color:#1d4ed8;"><strong>AIOpsLab</strong></a> — Microsoft Research's open benchmark framework for AI-powered IT operations. AIOpsLab defined the problem space: how do you evaluate AI agents against realistic production failures? ACE answers it with chaos engineering, statistical rigour, and a formal certification report.</p>
+<p style="font-size:.9rem;color:#1e3a5f;margin:0;line-height:1.6;"><strong>ACE is an open source project.</strong> It is inspired by <a href="https://github.com/microsoft/AIOpsLab" style="color:#1d4ed8;"><strong>AIOpsLab</strong></a> — Microsoft Research's open benchmark framework for AI-powered IT operations. AIOpsLab defined the problem space: how do you evaluate AI agents against realistic production failures? ACE answers it with chaos engineering, statistical rigour, and a formal certification report.</p>
 <p style="font-size:.9rem;color:#1e3a5f;margin:.6rem 0 0;line-height:1.6;">The chaos engineering layer is built on <a href="https://litmuschaos.io" style="color:#1d4ed8;"><strong>LitmusChaos</strong></a> — a <strong>Linux Foundation Networking (LFN)</strong> project — extended with agentic scenario support: trace-correlated fault injection, agent health scheduling, and the statistical certification pipeline that turns raw Langfuse traces into a formal report.</p>
 </div>
 </div>
@@ -205,14 +204,10 @@ description: >-
 <!-- ═══════════════════════════════════════════════ COLLABORATE ═══ -->
 <div style="background:linear-gradient(135deg,#1e1b4b 0%,#312e81 100%);color:#fff;padding:2.5rem 2.8rem;border-radius:16px;margin:0 0 2.8rem;box-shadow:0 16px 48px rgba(30,27,75,.22);">
 <div style="display:flex;gap:.7rem;margin:0 0 1rem;flex-wrap:wrap;">
-<span style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:.2rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Infosys</span>
-<span style="opacity:.5;font-size:1rem;line-height:1.6;">×</span>
-<span style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:.2rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Microsoft</span>
-<span style="opacity:.5;font-size:1rem;line-height:1.6;">·</span>
 <span style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:.2rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Extends AIOpsLab</span>
 </div>
 <h2 style="color:#fff;font-size:1.45rem;font-weight:700;margin:0 0 .7rem 0;padding:0;border:none;">Open to build on. Designed for collaboration.</h2>
-<p style="opacity:.85;line-height:1.7;margin:0 0 1.5rem 0;font-size:.97rem;max-width:680px;">ACE is an open source project jointly developed by <strong style="color:#c4b5fd;">Infosys</strong> and <strong style="color:#c4b5fd;">Microsoft</strong>, extending Microsoft Research's <a href="https://github.com/microsoft/AIOpsLab" style="color:#a5b4fc;font-weight:600;">AIOpsLab</a> with chaos engineering, statistical certification, and a formal report standard. The most important thing it can become is the open benchmark for AI agent reliability across every domain — and that requires contributors from every domain.</p>
+<p style="opacity:.85;line-height:1.7;margin:0 0 1.5rem 0;font-size:.97rem;max-width:680px;">ACE is an open source project extending Microsoft Research's <a href="https://github.com/microsoft/AIOpsLab" style="color:#a5b4fc;font-weight:600;">AIOpsLab</a> with chaos engineering, statistical certification, and a formal report standard. The most important thing it can become is the open benchmark for AI agent reliability across every domain — and that requires contributors from every domain.</p>
 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;">
 <div style="background:rgba(255,255,255,.08);border-radius:10px;padding:1.2rem 1.3rem;">
 <p style="font-size:.75rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#a5b4fc;margin:0 0 .4rem 0;">Extend AIOpsLab fault scenarios</p>

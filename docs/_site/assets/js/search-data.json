@@ -6616,7 +6616,7 @@
   },"945": {
     "doc": "Contributing",
     "title": "Security",
-    "content": "Never commit secrets.env is gitignored for a reason. Redact keys and tokens from issues, PRs, and log pastes. Report vulnerabilities privately to the maintainers rather than in a public issue. By contributing you agree your changes are licensed under the MIT License. ",
+    "content": "Never commit secrets.env is gitignored for a reason. Redact keys and tokens from issues, PRs, and log pastes. Report vulnerabilities privately to the maintainers rather than in a public issue. By contributing you agree your changes are licensed under the Apache License 2.0. ",
     "url": "/contributing.html#security",
     
     "relUrl": "/contributing.html#security"
@@ -6868,7 +6868,7 @@
   },"981": {
     "doc": "Home",
     "title": "Home",
-    "content": "Infosys × Microsoft Open Source · MIT Inspired by AIOpsLab Built on LitmusChaos · LFN ",
+    "content": "Infosys × Microsoft Open Source · Apache 2.0 Inspired by AIOpsLab Built on LitmusChaos · LFN ",
     "url": "/",
     
     "relUrl": "/"

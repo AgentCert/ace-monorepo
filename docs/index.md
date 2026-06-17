@@ -16,8 +16,8 @@ description: >-
 <h1 style="color:#fff;font-size:2.55rem;font-weight:800;line-height:1.18;margin:0 0 1.1rem 0;padding:0;border:none;">Your AI agent works in the demo.<br>Does it work when production breaks?</h1>
 <p style="font-size:1.08rem;opacity:.88;line-height:1.68;margin:0 0 2rem 0;max-width:580px;">AI agents are making real decisions in real infrastructure. The question every stakeholder is now asking — your board, your customers, your risk team — is the one most teams still can't answer with evidence: <em>is it actually safe to ship?</em></p>
 <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;">
-<a href="{{ "/setup/README.html" | relative_url }}" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get started →</a>
-<a href="https://github.com/AgentCert/ace-monorepo" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">GitHub ↗</a>
+<a href="{{ "/setup/README.html" | relative_url }}" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get started</a>
+<a href="https://github.com/AgentCert/ace-monorepo" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">GitHub</a>
 </div>
 </div>
 

@@ -58,9 +58,16 @@ services:
       # World-readable kubeconfig copy for non-root app containers.
       - kubeconfig:/shared
       - .:/repo:ro
-      # For CLUSTER_MODE=cloud with exec-auth kubeconfigs, mount the cloud cred
-      # dir + CLI via a docker-compose.override.yml (see README). Not mounted by
-      # default so a clean host doesn't get empty root-owned ~/.azure dirs.
+      # Cloud provider credential dirs — needed when the kubeconfig uses exec-auth
+      # (AKS/EKS/GKE without static certs).  Each defaults to an empty named
+      # volume so non-cloud hosts get no spurious root-owned dirs on disk.
+      # Set the matching *_CONFIG_DIR var in .env to your real cred directory:
+      #   AZURE_CONFIG_DIR=${HOME}/.azure   (AKS — az aks get-credentials)
+      #   AWS_CONFIG_DIR=${HOME}/.aws       (EKS — aws eks update-kubeconfig)
+      #   GCLOUD_CONFIG_DIR=${HOME}/.config/gcloud  (GKE — gcloud container clusters get-credentials)
+      - ${AZURE_CONFIG_DIR:-empty-azure-creds}:/root/.azure:ro
+      - ${AWS_CONFIG_DIR:-empty-aws-creds}:/root/.aws:ro
+      - ${GCLOUD_CONFIG_DIR:-empty-gcloud-creds}:/root/.config/gcloud:ro
     restart: "no"
 
   # ── MongoDB (replSet rs0 + keyFile + root auth) ─────────────────────────────
@@ -232,6 +239,12 @@ services:
     image: agentcert/agentcert-web:latest
     container_name: agentcert-web
     network_mode: host
+    # Run as root so nginx can read the bind-mounted nginx.conf regardless of
+    # host file permissions (git does not preserve permissions beyond the
+    # executable bit, so clones on other VMs may produce a file not readable
+    # by UID 65534). The non-root USER in the Dockerfile is for OpenShift
+    # production images; root is fine for local compose.
+    user: "0"
     depends_on:
       graphql:
         condition: service_started
@@ -336,4 +349,12 @@ volumes:
   litellm-data:
     driver: local
   kubeconfig:
+    driver: local
+  # Fallback empty volumes for cloud cred dirs on non-cloud hosts.
+  # Overridden by *_CONFIG_DIR bind-mounts when CLUSTER_MODE=cloud.
+  empty-azure-creds:
+    driver: local
+  empty-aws-creds:
+    driver: local
+  empty-gcloud-creds:
     driver: local

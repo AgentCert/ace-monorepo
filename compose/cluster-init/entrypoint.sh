@@ -96,8 +96,12 @@ case "${CLUSTER_MODE}" in
     cloud)
         if ! context_works; then
             err "CLUSTER_MODE=cloud but the mounted kubeconfig does not work."
-            err "If it uses exec-auth (az/aws/gcloud), mount the cloud CLI + cred dir,"
-            err "or generate a token-based kubeconfig. Tried: ${KUBECONFIG}"
+            err "Tried: ${KUBECONFIG}"
+            err "If it uses exec-auth (az/aws/gcloud), make sure you are logged in on the host"
+            err "  Azure: az login  then re-run setup.sh (auto-sets AZURE_CONFIG_DIR)"
+            err "  AWS:   aws sso login  then re-run setup.sh (auto-sets AWS_CONFIG_DIR)"
+            err "  GCP:   gcloud auth login  then re-run setup.sh (auto-sets GCLOUD_CONFIG_DIR)"
+            err "Then: docker compose up -d"
             exit 1
         fi
         ok "Reusing cloud context ($(kubectl config current-context 2>/dev/null))."
@@ -121,15 +125,57 @@ fi
 ok "Kubernetes ready:"
 kubectl get nodes -o wide 2>/dev/null || kubectl cluster-info
 
-# Export a world-readable copy of the resolved kubeconfig so non-root app
-# containers (graphql runs as uid 65534) can read it — the host ~/.kube/config
-# is typically mode 600 and unreadable by that uid. cluster-init runs as root.
+# Export a world-readable kubeconfig to the shared volume for non-root app
+# containers (graphql runs as uid 65534).
+#
+# Cloud clusters (AKS/EKS/GKE) produce exec-auth kubeconfigs that require a
+# cloud CLI binary inside every container that uses them — graphql has none.
+# Instead, we mint a 48-hour ServiceAccount token here (cluster-init has all
+# auth plugins) and write a static token kubeconfig. Provider-agnostic: works
+# for Azure AD/kubelogin, AWS IAM, GKE, or any other exec-auth setup.
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-/shared/config}"
 if [[ -d "$(dirname "${KUBECONFIG_OUT}")" ]]; then
-    if cp "${KUBECONFIG}" "${KUBECONFIG_OUT}" && chmod 644 "${KUBECONFIG_OUT}"; then
-        ok "Wrote shared kubeconfig → ${KUBECONFIG_OUT} (0644)"
+    if grep -q "exec:" "${KUBECONFIG}" 2>/dev/null; then
+        log "exec-auth kubeconfig detected — minting a ServiceAccount token for shared kubeconfig."
+        # Create the ServiceAccount and binding (idempotent).
+        kubectl create serviceaccount ace-system -n kube-system \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl create clusterrolebinding ace-system-admin \
+            --clusterrole=cluster-admin \
+            --serviceaccount=kube-system:ace-system \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        # Mint a 48-hour token (no Secret needed; uses the TokenRequest API).
+        _token=$(kubectl create token ace-system -n kube-system --duration=48h)
+        _server=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+        _ca=$(kubectl config view --minify --raw \
+                -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+        cat > "${KUBECONFIG_OUT}" <<KUBECFG
+apiVersion: v1
+kind: Config
+clusters:
+- name: ace
+  cluster:
+    server: ${_server}
+    certificate-authority-data: ${_ca}
+users:
+- name: ace-system
+  user:
+    token: ${_token}
+contexts:
+- name: ace
+  context:
+    cluster: ace
+    user: ace-system
+current-context: ace
+KUBECFG
+        chmod 644 "${KUBECONFIG_OUT}"
+        ok "Wrote static token kubeconfig → ${KUBECONFIG_OUT} (token valid 48 h)"
     else
-        warn "Could not write shared kubeconfig to ${KUBECONFIG_OUT}"
+        if cp "${KUBECONFIG}" "${KUBECONFIG_OUT}" && chmod 644 "${KUBECONFIG_OUT}"; then
+            ok "Wrote shared kubeconfig → ${KUBECONFIG_OUT} (0644)"
+        else
+            warn "Could not write shared kubeconfig to ${KUBECONFIG_OUT}"
+        fi
     fi
 fi
 

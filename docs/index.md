@@ -40,7 +40,7 @@ description: >-
 <!-- ═══════════════════════════════════════════ MEASUREMENT GAP ═══ -->
 <div style="margin:0 0 2.8rem;">
 <h2 style="font-size:1.55rem;font-weight:700;margin:0 0 .9rem;">The industry has a measurement problem</h2>
-<p>A landmark study — <a href="https://arxiv.org/abs/2512.04123"><em>Measuring Agents in Production</em></a>, accepted as an <strong>oral presentation at ICML 2026</strong> — surveyed 86 organisations deploying AI agents across 26 industries. It found reliability to be the #1 unresolved challenge in production AI deployment — ahead of performance, cost, and latency.</p>
+<p>A recent study — <a href="https://arxiv.org/abs/2512.04123"><em>Measuring Agents in Production</em></a>, accepted as an <strong>oral presentation at ICML 2026</strong> — surveyed 86 systems practitioner deploying AI agents across 26 industries. It found reliability to be the #1 unresolved challenge in production AI deployment — ahead of performance, cost, and latency.</p>
 <div style="border-left:4px solid #6d28d9;padding:1rem 1.4rem;background:#faf5ff;border-radius:0 10px 10px 0;margin:1.2rem 0;">
 <p style="font-size:1.08rem;font-weight:700;color:#3730a3;margin:0 0 .3rem 0;">74% of teams still rely on human evaluation to know if their agent is working.</p>
 <p style="color:#5b21b6;margin:0;font-size:.9rem;">Human reviewers. Spot-checks. Gut feel. That is the current state of the art in AI agent safety validation across the industry.</p>

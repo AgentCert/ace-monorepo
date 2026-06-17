@@ -7315,25 +7315,46 @@ div.opaque {
   background-color: #fff;
 }
 
-.side-bar {
-  width: 15rem !important;
-  min-width: 15rem !important;
+@media (min-width: 50rem) {
+  .side-bar {
+    width: 15rem !important;
+    min-width: 15rem !important;
+  }
+  .main {
+    margin-left: 15rem !important;
+    max-width: none !important;
+  }
+  .main-header {
+    max-width: none !important;
+  }
+  .main-content,
+  .main-content-wrap {
+    max-width: none !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+  }
+}
+body {
+  overflow-x: hidden;
 }
 
-.main {
-  margin-left: 15rem !important;
-  max-width: none !important;
+.main-content pre,
+.main-content .highlight {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
 }
 
-.main-header {
-  max-width: none !important;
+.main-content table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
 }
 
-.main-content,
-.main-content-wrap {
-  max-width: none !important;
-  padding-left: 2rem !important;
-  padding-right: 2rem !important;
+.main-content img {
+  max-width: 100%;
+  height: auto;
 }
 
 .callout {
@@ -8473,6 +8494,59 @@ a.svc-card-port:hover {
   font-style: italic;
   text-align: center;
   margin: 0.1rem 0;
+}
+
+@media (max-width: 49.99rem) {
+  .svc-grid,
+  .route-grid,
+  .chapter-grid,
+  .topic-grid {
+    grid-template-columns: 1fr;
+  }
+  .arch-diagram {
+    max-width: 100%;
+    font-size: 0.82rem;
+  }
+  .flow-phase-box,
+  .flow-step-box,
+  .flow-data-node,
+  .flow-component-box,
+  .flow-env {
+    max-width: 100%;
+  }
+  .flow-fork {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .flow-fork-branch {
+    align-items: stretch;
+  }
+  .flow-fork-branch .flow-phase-box {
+    max-width: 100%;
+  }
+  .flow-pod-row {
+    flex-direction: column;
+  }
+  .arch-services {
+    justify-content: flex-start;
+  }
+  .step-section {
+    flex-wrap: wrap;
+  }
+  .qs-step {
+    gap: 0.6rem;
+  }
+  .section-summary {
+    flex-wrap: wrap;
+  }
+  .flow-routing-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .arch-phases {
+    grid-template-columns: 1fr;
+  }
 }
 
 /*# sourceMappingURL=just-the-docs-default.css.map */

@@ -2,26 +2,55 @@
 // just-the-docs may not pick up $nav-width from setup.scss for the rendered
 // CSS rules even though it uses it for breakpoints. Force both sides with
 // !important so the content fills everything right of the sidebar.
+// Scoped to ≥50rem so the theme's built-in mobile hamburger nav still works.
 
-.side-bar {
-  width: 15rem !important;
-  min-width: 15rem !important;
+@media (min-width: 50rem) {
+  .side-bar {
+    width: 15rem !important;
+    min-width: 15rem !important;
+  }
+
+  .main {
+    margin-left: 15rem !important;
+    max-width: none !important;
+  }
+
+  .main-header {
+    max-width: none !important;
+  }
+
+  .main-content,
+  .main-content-wrap {
+    max-width: none !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+  }
 }
 
-.main {
-  margin-left: 15rem !important;
-  max-width: none !important;
+// ─── Mobile base fixes ────────────────────────────────────────────────────────
+// Prevent content overflow and make tables/code scrollable on narrow screens.
+
+body {
+  overflow-x: hidden;
 }
 
-.main-header {
-  max-width: none !important;
+.main-content pre,
+.main-content .highlight {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
 }
 
-.main-content,
-.main-content-wrap {
-  max-width: none !important;
-  padding-left: 2rem !important;
-  padding-right: 2rem !important;
+.main-content table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+.main-content img {
+  max-width: 100%;
+  height: auto;
 }
 
 
@@ -1064,4 +1093,81 @@ a.svc-card-port:hover {
   font-style: italic;
   text-align: center;
   margin: .1rem 0;
+}
+
+
+// ─── Mobile responsive overrides (<50rem / ~800px) ───────────────────────────
+
+@media (max-width: 49.99rem) {
+
+  // Grids: collapse to single column
+  .svc-grid,
+  .route-grid,
+  .chapter-grid,
+  .topic-grid {
+    grid-template-columns: 1fr;
+  }
+
+  // Architecture diagram: full width, no fixed max
+  .arch-diagram {
+    max-width: 100%;
+    font-size: .82rem;
+  }
+
+  // Flow pipeline: constrain width
+  .flow-phase-box,
+  .flow-step-box,
+  .flow-data-node,
+  .flow-component-box,
+  .flow-env {
+    max-width: 100%;
+  }
+
+  // Fork/parallel branches: stack vertically
+  .flow-fork {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .flow-fork-branch {
+    align-items: stretch;
+    .flow-phase-box { max-width: 100%; }
+  }
+
+  // Pod rows: stack vertically
+  .flow-pod-row {
+    flex-direction: column;
+  }
+
+  // Arch service chips: allow wrapping (already flex-wrap, just ensure it)
+  .arch-services {
+    justify-content: flex-start;
+  }
+
+  // Step sections: allow icon + title to wrap
+  .step-section {
+    flex-wrap: wrap;
+  }
+
+  // Quick-start steps: tighten gap on small screens
+  .qs-step {
+    gap: .6rem;
+  }
+
+  // Section summary: allow title to wrap
+  .section-summary {
+    flex-wrap: wrap;
+  }
+
+  // Routing tables inside flow boxes: scrollable
+  .flow-routing-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  // Arch phases grid: single column
+  .arch-phases {
+    grid-template-columns: 1fr;
+  }
 }

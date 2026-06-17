@@ -46,6 +46,7 @@ RUN apk add --no-cache bash curl docker-cli jq unzip python3 py3-pip \
 # and cannot be installed cleanly in Alpine. For GKE clusters, use a
 # service-account-key kubeconfig (no exec plugin needed), or mount the host
 # gke-gcloud-auth-plugin binary via a docker-compose.override.yml volume.
-COPY --chmod=755 entrypoint.sh /entrypoint.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

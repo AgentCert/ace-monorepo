@@ -550,7 +550,7 @@ compose_up() {
         # `set -e` and abort before the success summary.
         bad="$( { cd "${REPO_ROOT}" && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}' 2>/dev/null \
             | grep -iE 'restarting|exited' \
-            | grep -viE 'cluster-init|mongo-init|mongo-keyfile'; } || true)"   # one-shots exit 0 on purpose
+            | grep -viE 'cluster-init|mongo-init|mongo-keyfile|workspace-init'; } || true)"   # one-shots exit 0 on purpose
         if [[ -n "$bad" ]]; then
             echo
             warn "These services started but are NOT staying up (crash-looping / exited):"

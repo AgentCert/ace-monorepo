@@ -249,7 +249,7 @@ docker compose up -d        # entire platform comes up</code></pre>
 
 <!-- ══════════════════════════════════════════════════ GO DEEPER ═══ -->
 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:1rem;margin:0 0 2rem;">
-<a href="{{ "/architecture.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;transition:border-color .2s;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
+<a href="{{ "/platform/architecture.html" | relative_url }}" style="background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:1.3rem 1.4rem;text-decoration:none;display:block;transition:border-color .2s;" onmouseover="this.style.borderColor='#6d28d9'" onmouseout="this.style.borderColor='#e5e7eb'">
 <p style="font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6d28d9;margin:0 0 .3rem 0;">Architecture</p>
 <p style="font-weight:600;color:#111827;margin:0 0 .3rem 0;font-size:.97rem;">How the platform fits together</p>
 <p style="font-size:.85rem;color:#6b7280;margin:0;">Control plane, chaos engine, certifier — and how they connect.</p>

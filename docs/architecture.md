@@ -11,37 +11,65 @@ nav_order: 8
 
 AgentCert is a **four-phase analytical pipeline** that consumes raw Langfuse traces from AI agents under Kubernetes fault injection and produces structured 12-section certification reports. The same pipeline logic is accessible via a **REST API** (async job model) and directly via **CLI commands**.
 
-```
-Raw Langfuse Trace (JSON)
-         │
-         ▼
-┌──────────────────────┐
-│  Phase 0             │  LLM classifies interleaved trace events into
-│  Fault Bucketing     │  per-fault lifecycle buckets
-│  fault_analyzer/     │
-└────────┬─────────────┘
-         │
-         ▼
-┌──────────────────────┐
-│  Phase 1             │  LLM extracts quantitative (TTD, TTR, tokens)
-│  Metrics Extraction  │  and qualitative metrics per fault bucket
-│  metrics_extractor/  │  → writes *_metrics.json + optionally MongoDB
-└────────┬─────────────┘
-         │  (repeated N times, one per agent run)
-         ▼
-┌──────────────────────┐
-│  Phase 2             │  Pure-Python statistical aggregation per fault
-│  Aggregation         │  category + LLM Council narrative synthesis
-│  aggregator/         │  → writes aggregation.json (CertificationScorecard)
-└────────┬─────────────┘
-         │
-         ▼
-┌──────────────────────┐
-│  Phase 3             │  Builds a validated 12-section CertificationReport
-│  Certification       │  with 5 concurrent LLM narrative builders
-│  cert_builder/       │  → writes certification.json
-└─────────────────────-┘
-```
+<div class="flow-pipeline">
+
+  <div class="flow-data-node">Raw Langfuse Trace (JSON)</div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 0</span>
+    <div>
+      <div class="flow-phase-title">Fault Bucketing</div>
+      <div class="flow-phase-desc">LLM classifies interleaved trace events into per-fault lifecycle buckets &middot; <code>fault_analyzer/</code></div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 1</span>
+    <div>
+      <div class="flow-phase-title">Metrics Extraction</div>
+      <div class="flow-phase-desc">LLM extracts quantitative (TTD, TTR, tokens) and qualitative metrics per fault bucket &middot; <code>metrics_extractor/</code> &middot; writes <code>*_metrics.json</code> + optionally MongoDB</div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-note">repeated N times, one per agent run</div>
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 2</span>
+    <div>
+      <div class="flow-phase-title">Aggregation</div>
+      <div class="flow-phase-desc">Pure-Python statistical aggregation per fault category + LLM Council narrative synthesis &middot; <code>aggregator/</code> &middot; writes <code>aggregation.json</code> (CertificationScorecard)</div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <div class="flow-arrow-line"></div>
+    <div class="flow-arrow-head"></div>
+  </div>
+
+  <div class="flow-phase-box">
+    <span class="flow-phase-badge">Phase 3</span>
+    <div>
+      <div class="flow-phase-title">Certification</div>
+      <div class="flow-phase-desc">Builds a validated 12-section CertificationReport with 5 concurrent LLM narrative builders &middot; <code>cert_builder/</code> &middot; writes <code>certification.json</code></div>
+    </div>
+  </div>
+
+</div>
 
 ---
 
@@ -111,62 +139,158 @@ On shutdown, the Motor connection pool is closed after in-flight background task
 
 ### Request flow — Phase 0+1
 
-```
-POST /api/v1/bucketing-extraction
-  │
-  ├─ 1. Duplicate guard: find_active_task(agent_id, experiment_id, run_id)
-  │       → 409 TASK_ALREADY_ACTIVE if found
-  │
-  ├─ 2. create_task() → pipeline_tasks (PENDING)
-  │
-  ├─ 3. Return 202 { task_id, poll_url }
-  │
-  └─ 4. background_tasks.add_task(run_task, ...)
-           │
-           ├─ set_started()           → pipeline_tasks (RUNNING / acquiring_trace)
-           ├─ TraceService.acquire_trace()   [file copy or Langfuse API]
-           ├─ update_stage()          → pipeline_tasks (running_pipeline)
-           ├─ [semaphore] BucketPipelineService.execute_pipeline()
-           │       Phase 0: FaultBucketingPipeline
-           │       Phase 1: TraceMetricsExtractor × N faults
-           │       [if storage_config.type ∈ {mongodb, hybrid}]
-           │         → MongoDBClient.insert_metrics() → agent_run_metrics
-           └─ set_completed() / set_failed()  → pipeline_tasks
-```
+<div class="flow-pipeline">
+
+  <div class="flow-input-node">POST /api/v1/bucketing-extraction</div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">1</span>
+      <span class="flow-step-title">Duplicate guard</span>
+    </div>
+    <div class="flow-step-body"><code>find_active_task(agent_id, experiment_id, run_id)</code> → <code>409 TASK_ALREADY_ACTIVE</code> if found</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">2</span>
+      <span class="flow-step-title">Create task</span>
+    </div>
+    <div class="flow-step-body"><code>create_task()</code> &rarr; <code>pipeline_tasks</code> (PENDING)</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">3</span>
+      <span class="flow-step-title">Accept — return immediately</span>
+    </div>
+    <div class="flow-step-body">Return <code>202 { task_id, poll_url }</code></div>
+    <div class="flow-step-output">client polls GET /tasks/{task_id}</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">4</span>
+      <span class="flow-step-title">Background pipeline</span>
+    </div>
+    <div class="flow-step-body">
+      <ul class="flow-phase-list">
+        <li><code>set_started()</code> &rarr; pipeline_tasks (RUNNING / acquiring_trace)</li>
+        <li><code>TraceService.acquire_trace()</code> — file copy or Langfuse API</li>
+        <li><code>update_stage()</code> &rarr; pipeline_tasks (running_pipeline)</li>
+        <li>[semaphore] <code>BucketPipelineService.execute_pipeline()</code>
+          <ul>
+            <li>Phase 0: FaultBucketingPipeline</li>
+            <li>Phase 1: TraceMetricsExtractor &times; N faults</li>
+            <li>if storage_config.type &isin; {mongodb, hybrid}: <code>MongoDBClient.insert_metrics()</code> &rarr; agent_run_metrics</li>
+          </ul>
+        </li>
+        <li><code>set_completed()</code> / <code>set_failed()</code></li>
+      </ul>
+    </div>
+    <div class="flow-step-output">pipeline_tasks &rarr; COMPLETED or FAILED</div>
+  </div>
+
+</div>
 
 ### Request flow — Phase 2+3
 
-```
-POST /api/v1/aggregation-certification
-  │
-  ├─ 1. Validate storage_config.type == "local"
-  ├─ 2. Derive metrics_dir if not supplied
-  ├─ 3. Pre-flight: _discover_and_validate() — count *metrics.json for agent_id
-  │       → 400 METRICS_NOT_FOUND if none
-  ├─ 4. Duplicate guard: find_active_task(agent_id, experiment_id)
-  │       → 409 TASK_ALREADY_ACTIVE if found
-  ├─ 5. create_task() → certification_tasks (PENDING)
-  ├─ 6. Return 202 { cert_task_id, poll_url }
-  └─ 7. background_tasks.add_task(run_cert_task, ...)
-           │
-           ├─ set_started()            → certification_tasks (RUNNING / fetching_metrics)
-           ├─ resolve_cert_output_dir()
-           ├─ [semaphore] CertPipelineService.execute_pipeline()
-           │       Phase 2: AggregationOrchestrator
-           │       Phase 3: CertificationPipeline (5 concurrent narrative builders)
-           ├─ update_stage()            → certification_tasks (storing_metadata)
-           ├─ _write_certification_metadata()   → certification_metadata (1 doc)
-           ├─ _write_aggregated_category_metadata() → aggregated_category_metadata (N docs)
-           └─ set_completed() / set_failed()   → certification_tasks
-```
+<div class="flow-pipeline">
+
+  <div class="flow-input-node">POST /api/v1/aggregation-certification</div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">1–3</span>
+      <span class="flow-step-title">Validate &amp; pre-flight</span>
+    </div>
+    <div class="flow-step-body">
+      <ul class="flow-phase-list">
+        <li>Validate <code>storage_config.type == "local"</code></li>
+        <li>Derive <code>metrics_dir</code> if not supplied</li>
+        <li><code>_discover_and_validate()</code> — count <code>*metrics.json</code> for agent_id &rarr; <code>400 METRICS_NOT_FOUND</code> if none</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">4–5</span>
+      <span class="flow-step-title">Duplicate guard &amp; create task</span>
+    </div>
+    <div class="flow-step-body">
+      <code>find_active_task(agent_id, experiment_id)</code> &rarr; <code>409 TASK_ALREADY_ACTIVE</code> if found<br>
+      <code>create_task()</code> &rarr; certification_tasks (PENDING)
+    </div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">6</span>
+      <span class="flow-step-title">Accept — return immediately</span>
+    </div>
+    <div class="flow-step-body">Return <code>202 { cert_task_id, poll_url }</code></div>
+    <div class="flow-step-output">client polls GET /cert-tasks/{cert_task_id}</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">7</span>
+      <span class="flow-step-title">Background pipeline</span>
+    </div>
+    <div class="flow-step-body">
+      <ul class="flow-phase-list">
+        <li><code>set_started()</code> &rarr; certification_tasks (RUNNING / fetching_metrics)</li>
+        <li><code>resolve_cert_output_dir()</code></li>
+        <li>[semaphore] <code>CertPipelineService.execute_pipeline()</code>
+          <ul>
+            <li>Phase 2: AggregationOrchestrator</li>
+            <li>Phase 3: CertificationPipeline (5 concurrent narrative builders)</li>
+          </ul>
+        </li>
+        <li><code>update_stage()</code> &rarr; certification_tasks (storing_metadata)</li>
+        <li><code>_write_certification_metadata()</code> &rarr; certification_metadata (1 doc)</li>
+        <li><code>_write_aggregated_category_metadata()</code> &rarr; aggregated_category_metadata (N docs)</li>
+        <li><code>set_completed()</code> / <code>set_failed()</code></li>
+      </ul>
+    </div>
+    <div class="flow-step-output">certification_tasks &rarr; COMPLETED or FAILED</div>
+  </div>
+
+</div>
 
 ### Task state machine
 
-```
-PENDING ──► RUNNING ──► COMPLETED
-   │            │
-   └────────────┴──► FAILED
-```
+<div style="display:flex;flex-direction:column;gap:.5rem;margin:1rem 0 1.2rem;">
+  <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;">
+    <span style="background:#f1f5f9;border:1.5px solid #e2e8f0;border-radius:8px;padding:.35rem .9rem;font-family:monospace;font-size:.82rem;font-weight:600;color:#475569;">PENDING</span>
+    <span style="color:#93c5fd;font-size:1.1rem;">&#10142;</span>
+    <span style="background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:8px;padding:.35rem .9rem;font-family:monospace;font-size:.82rem;font-weight:600;color:#1d4ed8;">RUNNING</span>
+    <span style="color:#93c5fd;font-size:1.1rem;">&#10142;</span>
+    <span style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:8px;padding:.35rem .9rem;font-family:monospace;font-size:.82rem;font-weight:600;color:#15803d;">COMPLETED</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;">
+    <span style="font-size:.78rem;color:#94a3b8;font-style:italic;">PENDING or RUNNING</span>
+    <span style="color:#f87171;font-size:1.1rem;">&#10142;</span>
+    <span style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:.35rem .9rem;font-family:monospace;font-size:.82rem;font-weight:600;color:#dc2626;">FAILED</span>
+  </div>
+</div>
 
 Each transition uses a **`status` filter in `update_one`** so concurrent writes cannot double-advance a task. `set_completed()` raises `ValueError` if the task is not currently `RUNNING` (double-write guard).
 
@@ -330,23 +454,64 @@ Per-module configs live in each module's `config/` subdirectory (JSON or YAML) a
 
 ## Data Flow — Files and MongoDB
 
-```
-                      Phase 0          Phase 1           Phase 2          Phase 3
-                  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌─────────────┐
-Trace JSON  ────► │ Fault       │─►│ Metrics      │─►│ Aggregation│─►│ Certification│
-                  │ Bucketing   │  │ Extraction   │  │            │  │             │
-                  └─────────────┘  └──────────────┘  └────────────┘  └─────────────┘
-                       │                 │                 │                │
-                  fault_buckets/   *_metrics.json    aggregation.json  certification.json
-                  *.json                │
-                               [if store=mongodb]
-                               agent_run_metrics ──────────────────────────────────────
-                                                                                       │
-                  pipeline_tasks (task lifecycle) ─────────────────────────────────────┤ MongoDB
-                  certification_tasks (task lifecycle) ──────────────────────────────── ┤
-                  certification_metadata (1 per run) ─────────────────────────────────── ┤
-                  aggregated_category_metadata (1 per category) ──────────────────────── ┘
-```
+<div class="flow-pipeline">
+
+  <div class="flow-data-node">Trace JSON</div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">P0</span>
+      <span class="flow-step-title">Fault Bucketing</span>
+    </div>
+    <div class="flow-step-body"><code>fault_analyzer/</code> — LLM classifies events into per-fault lifecycle buckets</div>
+    <div class="flow-step-output">&#8594; fault_buckets/*.json</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">P1</span>
+      <span class="flow-step-title">Metrics Extraction</span>
+    </div>
+    <div class="flow-step-body"><code>metrics_extractor/</code> — quantitative + qualitative LLM extraction per fault</div>
+    <div class="flow-step-output">&#8594; *_metrics.json &nbsp;&middot;&nbsp; [if store=mongodb] &#8594; agent_run_metrics</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">P2</span>
+      <span class="flow-step-title">Aggregation</span>
+    </div>
+    <div class="flow-step-body"><code>aggregator/</code> — deterministic stats per fault category + LLM Council narrative</div>
+    <div class="flow-step-output">&#8594; aggregation.json &nbsp;&middot;&nbsp; &#8594; aggregated_category_metadata (MongoDB)</div>
+  </div>
+
+  <div class="flow-arrow"><div class="flow-arrow-line"></div><div class="flow-arrow-head"></div></div>
+
+  <div class="flow-step-box">
+    <div class="flow-step-header">
+      <span class="flow-step-num">P3</span>
+      <span class="flow-step-title">Certification</span>
+    </div>
+    <div class="flow-step-body"><code>cert_builder/</code> — 5 concurrent narrative builders produce the 12-section report</div>
+    <div class="flow-step-output">&#8594; certification.json &nbsp;&middot;&nbsp; &#8594; certification_metadata (MongoDB)</div>
+  </div>
+
+</div>
+
+Task lifecycle collections written across all phases:
+
+| Collection | Written by |
+|---|---|
+| `pipeline_tasks` | Phase 0+1 request handler — task state throughout |
+| `certification_tasks` | Phase 2+3 request handler — task state throughout |
+| `certification_metadata` | Phase 2+3 on completion — 1 doc per run |
+| `aggregated_category_metadata` | Phase 2+3 on completion — 1 doc per fault category |
 
 See [docs/mongodb-storage.md](mongodb-storage.md) for full collection schemas and index definitions.
 

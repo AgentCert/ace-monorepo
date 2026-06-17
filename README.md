@@ -19,6 +19,34 @@
 
 ---
 
+<div align="center">
+
+## 🎉 LFN Open Source Summit Mumbai — Join Us! 🎉
+
+**We're live at the LFN Open Source Summit in Mumbai!**
+
+This is your chance to become a contributor to ACE — a cutting-edge platform for certifying autonomous AI agents. We're building the future of agent reliability, and **we want YOU** on the team.
+
+### 🚀 Take the Quiz, Become a Contributor
+
+👉 **[https://ace-woad-six.vercel.app/](https://ace-woad-six.vercel.app/)** 👈
+
+Complete the quiz and we'll invite you to contribute to this groundbreaking open-source project. Whether you're passionate about Kubernetes, AI/ML, chaos engineering, or building reliable systems — there's a place for you here.
+
+**Why join ACE?**
+
+***Work on a project that's shaping how we certify and trust AI agents***
+
+***Build your open-source portfolio with meaningful contributions***
+
+***Hands-on experience with Go, Python, TypeScript, Kubernetes, and more***
+
+⏰ **Limited Time Only — Link expires at 5 PM today!** ⏰
+
+</div>
+
+---
+
 ## Table of Contents
 
 - [About ACE](#about-ace)

@@ -11,13 +11,12 @@ description: >-
 <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin:0 0 1.1rem 0;align-items:center;">
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Open Source · Apache 2.0</span>
 <span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Inspired by AIOpsLab</span>
-<span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Built on LitmusChaos · LFN</span>
+<span style="background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:.25rem .7rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">Built on LitmusChaos</span>
 </div>
 <h1 style="color:#fff;font-size:2.55rem;font-weight:800;line-height:1.18;margin:0 0 1.1rem 0;padding:0;border:none;">Your AI agent works in the demo.<br>Does it work when production breaks?</h1>
 <p style="font-size:1.08rem;opacity:.88;line-height:1.68;margin:0 0 2rem 0;max-width:580px;">AI agents are making real decisions in real infrastructure. The question every stakeholder is now asking — your board, your customers, your risk team — is the one most teams still can't answer with evidence: <em>is it actually safe to ship?</em></p>
 <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;">
-<a href="{{ "/setup/README.html" | relative_url }}" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get certified →</a>
-<a href="https://arxiv.org/abs/2512.04123" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">Read the research ↗</a>
+<a href="{{ "/setup/README.html" | relative_url }}" style="background:#fff;color:#4338ca;padding:.68rem 1.45rem;border-radius:9px;font-weight:700;text-decoration:none;font-size:.95rem;display:inline-block;white-space:nowrap;">Get started →</a>
 <a href="https://github.com/AgentCert/ace-monorepo" style="background:rgba(255,255,255,.14);color:#fff;padding:.68rem 1.45rem;border-radius:9px;font-weight:600;text-decoration:none;font-size:.95rem;border:1.5px solid rgba(255,255,255,.35);display:inline-block;white-space:nowrap;">GitHub ↗</a>
 </div>
 </div>
@@ -128,7 +127,7 @@ description: >-
 <div>
 <p style="font-size:.8rem;font-weight:700;color:#1d4ed8;letter-spacing:.08em;text-transform:uppercase;margin:0 0 .3rem;">Origin</p>
 <p style="font-size:.9rem;color:#1e3a5f;margin:0;line-height:1.6;"><strong>ACE is an open source project.</strong> It is inspired by <a href="https://github.com/microsoft/AIOpsLab" style="color:#1d4ed8;"><strong>AIOpsLab</strong></a> — Microsoft Research's open benchmark framework for AI-powered IT operations. AIOpsLab defined the problem space: how do you evaluate AI agents against realistic production failures? ACE answers it with chaos engineering, statistical rigour, and a formal certification report.</p>
-<p style="font-size:.9rem;color:#1e3a5f;margin:.6rem 0 0;line-height:1.6;">The chaos engineering layer is built on <a href="https://litmuschaos.io" style="color:#1d4ed8;"><strong>LitmusChaos</strong></a> — a <strong>Linux Foundation Networking (LFN)</strong> project — extended with agentic scenario support: trace-correlated fault injection, agent health scheduling, and the statistical certification pipeline that turns raw Langfuse traces into a formal report.</p>
+<p style="font-size:.9rem;color:#1e3a5f;margin:.6rem 0 0;line-height:1.6;">The chaos engineering layer is built on <a href="https://litmuschaos.io" style="color:#1d4ed8;"><strong>LitmusChaos</strong></a> — a <strong>CNCF</strong> project — extended with agentic scenario support: trace-correlated fault injection, agent health scheduling, and the statistical certification pipeline that turns raw Langfuse traces into a formal report.</p>
 </div>
 </div>
 

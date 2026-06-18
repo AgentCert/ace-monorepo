@@ -68,6 +68,11 @@ services:
       - ${AZURE_CONFIG_DIR:-empty-azure-creds}:/root/.azure:ro
       - ${AWS_CONFIG_DIR:-empty-aws-creds}:/root/.aws:ro
       - ${GCLOUD_CONFIG_DIR:-empty-gcloud-creds}:/root/.config/gcloud:ro
+      # Mount the host /etc/hosts so pin_api_server_host() writes the private
+      # cluster DNS→IP entry onto the host.  graphql uses network_mode:host and
+      # therefore reads the same file — this is what makes the RBAC preflight
+      # resolve the privatelink hostname after cluster-init exits.
+      - /etc/hosts:/etc/hosts
     restart: "no"
 
   # ── MongoDB (replSet rs0 + keyFile + root auth) ─────────────────────────────

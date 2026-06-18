@@ -666,6 +666,20 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
     echo
 fi
 
+# --- charts world-readable (graphql runs as uid 65534) ----------------------
+# git clones on hosts with umask 0077 create directories as 700, which blocks
+# uid 65534 from traversing into the repo at all.  Fix: repo root needs o+x
+# (traversal) so the container can reach the bind-mounted files; the .env also
+# needs o+r so the container can re-read it via AGENTCERT_ENV_FILE; and the
+# charts subdirs need o+rX so ReadDir succeeds.  All idempotent.
+chmod o+x  "${REPO_ROOT}"          2>/dev/null && ok "Made repo root traversable for uid 65534 (graphql)" || true
+chmod o+r  "${ENV_FILE}"           2>/dev/null || true
+for _charts_dir in "${REPO_ROOT}/agent-charts/charts" "${REPO_ROOT}/app-charts/charts"; do
+    if [[ -d "${_charts_dir}" ]]; then
+        chmod -R o+rX "${_charts_dir}" 2>/dev/null && ok "Made ${_charts_dir} world-readable (uid 65534 / graphql)" || true
+    fi
+done
+
 read -rp "$(echo -e "Bring the stack up now with 'docker compose up -d'? ${DIM}[y/N]${NC}: ")" go
 if [[ "$go" =~ ^[Yy] ]]; then
     compose_up

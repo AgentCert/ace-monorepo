@@ -204,6 +204,11 @@ services:
       DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
       DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
       PRE_CLEANUP_WAIT_SECONDS: ${PRE_CLEANUP_WAIT_SECONDS:-0}
+      # On corporate networks the host has a custom CA bundle (SSL inspection
+      # proxy) that the ubi9 base image doesn't know about.  Go checks
+      # SSL_CERT_FILE before its compiled-in paths, so pointing it at the
+      # host-mounted bundle fixes git clone TLS failures inside the container.
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     volumes:
       # World-readable kubeconfig from cluster-init (kind apiserver reachable on
       # host net at 127.0.0.1:<port>).
@@ -211,6 +216,10 @@ services:
       # Mount the repo at its own absolute path so AGENT_CHARTS_ROOT /
       # APP_CHARTS_ROOT / AGENTCERT_ENV_FILE (all absolute in .env) resolve.
       - .:/srv/projects/ace-monorepo:ro
+      # Mount the host CA bundle so the ubi9 container trusts corporate/proxy
+      # CAs when git-cloning chaos-charts over HTTPS (go-git uses Go TLS, not
+      # the system git binary, so GIT_SSL_NO_VERIFY has no effect here).
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     restart: unless-stopped
 
   # ── AgentCert UI ────────────────────────────────────────────────────────────

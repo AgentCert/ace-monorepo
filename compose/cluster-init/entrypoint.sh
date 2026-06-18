@@ -34,6 +34,28 @@ context_works() {
     kubectl cluster-info >/dev/null 2>&1
 }
 
+# For private-link cloud clusters (AKS/EKS/GKE), the API server hostname only
+# resolves via cloud-internal DNS (e.g. Azure 168.63.129.16). Alpine's musl
+# resolver can fail intermittently when forwarding through systemd-resolved.
+# Pin the resolved IP into /etc/hosts immediately after a successful DNS lookup
+# so all subsequent kubectl calls bypass DNS entirely.
+pin_api_server_host() {
+    local server ip
+    server=$(kubectl config view --minify \
+        -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null \
+        | sed -e 's|https://||' -e 's|:[0-9]*$||')
+    [[ -z "${server}" ]] && return 0
+    # Already an IP — nothing to pin.
+    [[ "${server}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && return 0
+    # Already pinned — don't duplicate.
+    grep -q "${server}" /etc/hosts 2>/dev/null && return 0
+    ip=$(python3 -c "import socket; print(socket.gethostbyname('${server}'))" 2>/dev/null || true)
+    if [[ -n "${ip}" ]]; then
+        echo "${ip}  ${server}" >> /etc/hosts
+        ok "Pinned ${server} → ${ip} in /etc/hosts (private-link DNS workaround)"
+    fi
+}
+
 kind_cluster_exists() {
     kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"
 }
@@ -71,6 +93,16 @@ ensure_kind() {
     kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
 }
 
+# az CLI writes command logs to $AZURE_CONFIG_DIR/commands/. The host ~/.azure
+# is mounted read-only, so copy it to a writable /tmp location and redirect az
+# there. This keeps the host credentials untouched while letting az log freely.
+if [[ -d /root/.azure ]]; then
+    mkdir -p /tmp/azure-config
+    cp -r /root/.azure/. /tmp/azure-config/
+    export AZURE_CONFIG_DIR=/tmp/azure-config
+    log "Copied ~/.azure → /tmp/azure-config (writable) for az CLI logging."
+fi
+
 log "CLUSTER_MODE=${CLUSTER_MODE}  KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME}  KUBECONFIG=${KUBECONFIG}"
 
 case "${CLUSTER_MODE}" in
@@ -97,6 +129,9 @@ case "${CLUSTER_MODE}" in
         if ! context_works; then
             err "CLUSTER_MODE=cloud but the mounted kubeconfig does not work."
             err "Tried: ${KUBECONFIG}"
+            err "--- kubectl cluster-info output ---"
+            kubectl cluster-info 2>&1 || true
+            err "-----------------------------------"
             err "If it uses exec-auth (az/aws/gcloud), make sure you are logged in on the host"
             err "  Azure: az login  then re-run setup.sh (auto-sets AZURE_CONFIG_DIR)"
             err "  AWS:   aws sso login  then re-run setup.sh (auto-sets AWS_CONFIG_DIR)"
@@ -104,6 +139,7 @@ case "${CLUSTER_MODE}" in
             err "Then: docker compose up -d"
             exit 1
         fi
+        pin_api_server_host
         ok "Reusing cloud context ($(kubectl config current-context 2>/dev/null))."
         if [[ -z "${HOST_PUBLIC_IP}" ]]; then
             warn "HOST_PUBLIC_IP is empty — in-cluster subscriber pods will not be able"

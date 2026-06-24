@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # =============================================================================
-# Build & Push All Docker Images to Docker Hub
+# Build & Push All Docker Images
 # =============================================================================
-# Builds all AgentCert component images and pushes them to Docker Hub.
-# Reads DOCKERHUB_USERNAME and DOCKERHUB_TOKEN from the root .env file.
+# Builds all AgentCert component images and pushes them to IMAGE_REGISTRY.
+# Reads IMAGE_REGISTRY, REGISTRY_USERNAME, REGISTRY_PASSWORD from .env.
+# Falls back to DOCKERHUB_USERNAME / DOCKERHUB_TOKEN for backwards compatibility.
 #
 # Usage:
 #   ./scripts/build-and-push.sh [--env-file PATH]
@@ -64,31 +65,42 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Docker Hub login
+# Registry login
 # ---------------------------------------------------------------------------
-DH_USER="$(grep -m1 '^DOCKERHUB_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
-DH_TOKEN="$(grep -m1 '^DOCKERHUB_TOKEN=' "${ENV_FILE}" | cut -d= -f2-)"
+# PUSH_REGISTRY = where images are pushed (docker-remote is read-only proxy)
+# Falls back to docker.io if not set in .env
+PUSH_REGISTRY="$(grep -m1 '^PUSH_REGISTRY=' "${ENV_FILE}" | cut -d= -f2-)"
+PUSH_REGISTRY="${PUSH_REGISTRY:-docker.io}"
+IMAGE_REGISTRY="${PUSH_REGISTRY}"
 
-if [[ -z "${DH_USER}" || -z "${DH_TOKEN}" ]]; then
-    log_error "DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set in ${ENV_FILE}"
+# Generic credentials — fall back to legacy DOCKERHUB_ vars if not set:
+REGISTRY_USERNAME="$(grep -m1 '^REGISTRY_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
+REGISTRY_PASSWORD="$(grep -m1 '^REGISTRY_PASSWORD=' "${ENV_FILE}" | cut -d= -f2-)"
+if [[ -z "${REGISTRY_USERNAME}" ]]; then
+    REGISTRY_USERNAME="$(grep -m1 '^DOCKERHUB_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
+    REGISTRY_PASSWORD="$(grep -m1 '^DOCKERHUB_TOKEN=' "${ENV_FILE}" | cut -d= -f2-)"
+fi
+
+if [[ -z "${REGISTRY_USERNAME}" || -z "${REGISTRY_PASSWORD}" ]]; then
+    log_error "REGISTRY_USERNAME/REGISTRY_PASSWORD (or DOCKERHUB_USERNAME/DOCKERHUB_TOKEN) not set in ${ENV_FILE}"
     exit 1
 fi
 
-echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin || {
-    log_error "Docker Hub login failed"
+echo "${REGISTRY_PASSWORD}" | docker login "${IMAGE_REGISTRY}" -u "${REGISTRY_USERNAME}" --password-stdin || {
+    log_error "Registry login failed for ${IMAGE_REGISTRY}"
     exit 1
 }
-log_success "Logged in to Docker Hub as ${DH_USER}"
+log_success "Logged in to ${IMAGE_REGISTRY} as ${REGISTRY_USERNAME}"
 
 # ---------------------------------------------------------------------------
 # Image definitions: (name, context_dir, dockerfile)
 # ---------------------------------------------------------------------------
 declare -a IMAGES=(
-    "agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile"
-    "agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile"
-    "agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile"
-    "agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile"
-    "agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile"
+    "${IMAGE_REGISTRY}/agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile"
+    "${IMAGE_REGISTRY}/agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile"
+    "${IMAGE_REGISTRY}/agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile"
+    "${IMAGE_REGISTRY}/agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile"
+    "${IMAGE_REGISTRY}/agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile"
 )
 
 # ---------------------------------------------------------------------------
@@ -96,7 +108,7 @@ declare -a IMAGES=(
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${CYAN}======================================${NC}"
-echo -e "${CYAN}  Build & Push All Images${NC}"
+echo -e "${CYAN}  Build & Push All Images → ${IMAGE_REGISTRY}${NC}"
 echo -e "${CYAN}======================================${NC}"
 echo ""
 

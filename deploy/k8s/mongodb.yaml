@@ -1,0 +1,184 @@
+# =============================================================================
+# MongoDB — single-node replica set rs0
+#
+# Init container generates the keyFile on first boot (idempotent).
+# A separate Job (mongodb-rs-init) runs after the StatefulSet is ready and
+# calls rs.initiate() — safe to re-run because it checks rs.status() first.
+#
+# Connection string for other services:
+#   mongodb://<user>:<pass>@mongodb:27017/<db>?authSource=admin&directConnection=true
+# directConnection=true bypasses replica-set topology discovery (which
+# advertises localhost:27017) so the service-name mongodb resolves correctly.
+# =============================================================================
+
+# ── Headless service (required by StatefulSet) ──────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-headless
+  namespace: ace
+spec:
+  clusterIP: None
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+---
+# ── ClusterIP service (used by auth, graphql, certifier) ────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: ace
+spec:
+  selector:
+    app: mongodb
+  type: NodePort
+  ports:
+    - port: 27017
+      targetPort: 27017
+      nodePort: 32017
+---
+# ── StatefulSet ──────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: ace
+spec:
+  serviceName: mongodb-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      initContainers:
+        - name: keyfile-gen
+          image: mongo:5
+          command: [bash, -c]
+          args:
+            - |
+              if [ ! -s /keydata/keyfile ]; then
+                openssl rand -base64 756 > /keydata/keyfile
+                chmod 400 /keydata/keyfile
+                chown 999:999 /keydata/keyfile
+              fi
+          volumeMounts:
+            - name: mongo-keyfile
+              mountPath: /keydata
+      containers:
+        - name: mongodb
+          image: mongo:5
+          imagePullPolicy: IfNotPresent
+          # Use args (not command) so docker-entrypoint.sh runs and creates the admin user
+          args: [--replSet, rs0, --keyFile, /keydata/keyfile, --bind_ip_all]
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_PASSWORD
+                  optional: true
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+            - name: mongo-keyfile
+              mountPath: /keydata
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - |
+                  mongosh --quiet \
+                    -u "${MONGO_INITDB_ROOT_USERNAME:-admin}" \
+                    -p "${MONGO_INITDB_ROOT_PASSWORD:-1234}" \
+                    --authenticationDatabase admin \
+                    --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q 1
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        - name: mongo-keyfile
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+---
+# ── Replica-set init Job (idempotent) ────────────────────────────────────────
+# Waits for MongoDB to be ready, then calls rs.initiate() if not already done.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongodb-rs-init
+  namespace: ace
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: rs-init
+          image: mongo:5
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |
+              echo "Waiting for MongoDB to be ready..."
+              until mongosh --quiet \
+                --host mongodb:27017 \
+                -u "${MONGODB_USERNAME:-admin}" \
+                -p "${MONGODB_PASSWORD:-1234}" \
+                --authenticationDatabase admin \
+                --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q 1; do
+                echo "  still waiting..."; sleep 3
+              done
+              echo "MongoDB is up. Initialising replica set..."
+              mongosh --quiet \
+                --host mongodb:27017 \
+                -u "${MONGODB_USERNAME:-admin}" \
+                -p "${MONGODB_PASSWORD:-1234}" \
+                --authenticationDatabase admin \
+                --eval '
+                  try {
+                    if (rs.status().ok) {
+                      print("rs0 already initialized");
+                    }
+                  } catch (e) {
+                    rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb:27017"}]});
+                    print("rs0 initiated");
+                  }
+                '
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_PASSWORD
+                  optional: true

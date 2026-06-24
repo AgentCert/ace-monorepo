@@ -1,0 +1,494 @@
+# =============================================================================
+# Langfuse observability stack
+#
+# Services (all in namespace ace):
+#   postgres      — PostgreSQL 17 for Langfuse metadata
+#   redis         — Redis 7 for Langfuse queuing
+#   clickhouse    — ClickHouse for Langfuse traces
+#   minio         — MinIO S3-compatible storage (host :9090 via NodePort 32090)
+#   langfuse-web  — Langfuse UI/API          (host :4000 via NodePort 32400)
+#   langfuse-worker — background processor (internal only)
+#
+# All credentials default to the same values as the docker-compose setup and
+# are overridable via the ace-env Secret.
+# =============================================================================
+
+# ── Postgres ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-postgres-data
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_DB
+                  optional: true
+            - name: TZ
+              value: UTC
+            - name: PGTZ
+              value: UTC
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, postgres]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 20
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ace
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-redis-data
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+          imagePullPolicy: IfNotPresent
+          command: [redis-server]
+          args:
+            - --requirepass
+            - $(REDIS_AUTH)
+            - --maxmemory-policy
+            - noeviction
+          ports:
+            - containerPort: 6379
+          env:
+            - name: REDIS_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: REDIS_AUTH
+                  optional: true
+          readinessProbe:
+            exec:
+              command: [redis-cli, ping]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            failureThreshold: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-redis-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: ace
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+# ── ClickHouse ────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-clickhouse-data
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-clickhouse-logs
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      securityContext:
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8123   # HTTP
+            - containerPort: 9000   # native
+          env:
+            - name: CLICKHOUSE_DB
+              value: default
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: CLICKHOUSE_USER
+                  optional: true
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: CLICKHOUSE_PASSWORD
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8123
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 20
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: logs
+              mountPath: /var/log/clickhouse-server
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-clickhouse-data
+        - name: logs
+          persistentVolumeClaim:
+            claimName: langfuse-clickhouse-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: ace
+spec:
+  selector:
+    app: clickhouse
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+    - name: native
+      port: 9000
+      targetPort: 9000
+
+# ── MinIO ─────────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-minio-data
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio
+          imagePullPolicy: IfNotPresent
+          command: [sh]
+          args:
+            - -c
+            - mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data
+          ports:
+            - containerPort: 9000   # S3 API
+            - containerPort: 9001   # console (internal only)
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MINIO_ROOT_USER
+                  optional: true
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MINIO_ROOT_PASSWORD
+                  optional: true
+          readinessProbe:
+            exec:
+              command: [mc, ready, local]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: ace
+spec:
+  selector:
+    app: minio
+  type: NodePort
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000
+      nodePort: 32090
+    - name: console
+      port: 9001
+      targetPort: 9001
+
+# ── Langfuse shared env (anchored to avoid duplication) ──────────────────────
+# Both langfuse-web and langfuse-worker share a large env block; we inline it
+# in each deployment since K8s YAML does not support anchors across documents.
+
+# ── Langfuse Worker ───────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-worker
+  template:
+    metadata:
+      labels:
+        app: langfuse-worker
+    spec:
+      containers:
+        - name: langfuse-worker
+          image: langfuse/langfuse-worker:3
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: ace-env
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://clickhouse:9000"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://minio:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://minio:9000"
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENDPOINT
+              value: "http://minio:9000"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_DB
+                  optional: true
+
+# ── Langfuse Web ──────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-web
+  template:
+    metadata:
+      labels:
+        app: langfuse-web
+    spec:
+      containers:
+        - name: langfuse-web
+          image: langfuse/langfuse:3
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - secretRef:
+                name: ace-env
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_DB
+                  optional: true
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://clickhouse:9000"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://minio:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://minio:9000"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_EXTERNAL_ENDPOINT
+              value: "http://localhost:9090"
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENDPOINT
+              value: "http://minio:9000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: ace
+spec:
+  selector:
+    app: langfuse-web
+  type: NodePort
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 32400

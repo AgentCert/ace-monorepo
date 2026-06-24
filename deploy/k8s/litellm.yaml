@@ -1,0 +1,217 @@
+# =============================================================================
+# LiteLLM proxy gateway
+#   Container listens on :4000; exposed as :14000 inside the cluster and
+#   via NodePort 31400 → host :14000.
+#
+# litellm_config.yaml is stored as a ConfigMap (contents injected by setup.sh).
+# API keys and Langfuse credentials come from the ace-env Secret.
+# =============================================================================
+
+# Populated by setup.sh from agentcert-stack/litellm-setup/litellm_config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ace
+data:
+  litellm_config.yaml: |
+    # LiteLLM Proxy Configuration
+    # Purpose: Gateway for autonomous agents to access LLMs with Langfuse tracing
+
+    # Model definitions
+    model_list:
+      # Gemini 3 Flash
+      - model_name: gemini-3-flash
+        litellm_params:
+          model: gemini/gemini-3-flash-preview
+          api_base: https://generativelanguage.googleapis.com/v1beta
+          api_key: os.environ/GEMINI_API_KEY
+        model_info:
+          description: "Google's Gemini series model"
+          context_window: 1000000
+          max_output_tokens: 60000
+  
+      # Gemini 2.5 Flash
+      - model_name: gemini-2.5-flash
+        litellm_params:
+          model: gemini/gemini-2.5-flash
+          api_base: https://generativelanguage.googleapis.com/v1beta
+          api_key: os.environ/GEMINI_API_KEY
+        model_info:
+          description: "Google's Gemini series model"
+          context_window: 1000000
+          max_output_tokens: 60000
+
+      # Gemini 2.5 Flash Lite
+      - model_name: gemini-2.5-flash-lite
+        litellm_params:
+          model: gemini/gemini-2.5-flash-lite
+          api_base: https://generativelanguage.googleapis.com/v1beta
+          api_key: os.environ/GEMINI_API_KEY
+        model_info:
+          description: "Google's Gemini series model"
+          context_window: 1000000
+          max_output_tokens: 60000
+
+      # Azure OpenAI GPT-4o
+      # model_name = the alias agents request (AZURE_OPENAI_DEPLOYMENT in .env)
+      # LITELLM_AZURE_CHAT_MODEL = azure/<your-deployment-name> (set by setup.sh)
+      - model_name: os.environ/AZURE_OPENAI_DEPLOYMENT
+        litellm_params:
+          model: os.environ/LITELLM_AZURE_CHAT_MODEL
+          api_base: os.environ/AZURE_OPENAI_ENDPOINT
+          api_key: os.environ/AZURE_OPENAI_KEY
+          api_version: os.environ/AZURE_OPENAI_API_VERSION
+        model_info:
+          description: "Azure OpenAI GPT-4o"
+          context_window: 128000
+          max_output_tokens: 16384
+
+      # OpenRouter Free Tier
+      - model_name: auto-free
+        litellm_params:
+          model: openrouter/openrouter/free
+          api_base: https://openrouter.ai/api/v1
+          api_key: os.environ/OPENROUTER_API_KEY
+
+    # General proxy settings
+    general_settings:
+      # Master key for accessing the proxy
+      # Agents use THIS key
+      master_key: os.environ/LITELLM_MASTER_KEY
+
+      allow_requests_on_db_unavailable: True
+
+    # LiteLLM core settings
+    litellm_settings:
+      # Enable Langfuse tracing (clean generation-only spans)
+      callbacks: ["langfuse"]
+      success_callback: ["langfuse"]
+      failure_callback: ["langfuse"]
+  
+      # Request timeout (10 minutes)
+      request_timeout: 600
+  
+      # Enable detailed logging for debugging
+      set_verbose: true
+  
+      # Drop parameters not supported by target model
+      drop_params: true
+  
+      # Number of retries on failure
+      num_retries: 3
+  
+      # Timeout between retries
+      retry_after: 2
+
+      # Default model if none specified
+      default_model: "gemini-3-flash"
+
+    # Callback-specific settings
+    callback_settings:
+      langfuse:
+        # Langfuse keys are read from environment variables:
+        # - LANGFUSE_PUBLIC_KEY
+        # - LANGFUSE_SECRET_KEY  
+        # - LANGFUSE_HOST (defaults to https://cloud.langfuse.com)
+    
+        # Log complete request/response
+        log_raw_request_response: true
+    
+        # Include function call data
+        log_function_call: true
+
+    # Router settings (optional)
+    router_settings:
+      # Enable routing and fallbacks
+      enable_pre_call_checks: true
+  
+      # Timeout for model availability checks
+      allowed_fails: 3
+  
+      # Reset window for failures
+      window_size: 10
+
+      # Cooldown period for failed models
+      cooldown_time: 60
+  
+      # Routing strategy
+      routing_strategy: "simple-shuffle"
+  
+      # Timeout for health checks and requests (seconds)
+      timeout: 120
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-data
+  namespace: ace
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          image: litellm/litellm:v1.82.0-stable
+          imagePullPolicy: IfNotPresent
+          args: [--config, /app/config.yaml, --port, "4000", --detailed_debug]
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - secretRef:
+                name: ace-env
+          env:
+            # Langfuse is a K8s service in the same namespace
+            - name: LANGFUSE_HOST
+              value: "http://langfuse-web:3000"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: litellm_config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            tcpSocket:
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: litellm-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: ace
+spec:
+  selector:
+    app: litellm
+  type: NodePort
+  ports:
+    - port: 14000
+      targetPort: 4000
+      nodePort: 31400

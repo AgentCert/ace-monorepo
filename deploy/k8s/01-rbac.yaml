@@ -1,0 +1,21 @@
+# ServiceAccount used by the graphql pod so it can manage K8s resources
+# (ChaosEngine jobs, agent ServiceAccounts, etc.) without a static kubeconfig.
+# In-cluster config is auto-detected when KUBECONFIG is unset.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: graphql
+  namespace: ace
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ace-graphql-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: graphql
+    namespace: ace

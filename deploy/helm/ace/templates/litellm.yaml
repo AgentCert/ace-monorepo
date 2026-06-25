@@ -32,6 +32,8 @@ spec:
     metadata:
       labels:
         app: litellm
+      annotations:
+        checksum/config: {{ .Values.litellm.config | sha256sum }}
     spec:
       containers:
         - name: litellm

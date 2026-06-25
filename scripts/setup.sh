@@ -516,8 +516,12 @@ k8s_deploy() {
     # 1) Patch .env with K8s-specific service DNS names
     k8s_env_patch
 
-    # 2) Ensure kind cluster is up with the right port mappings
-    ensure_kind_cluster
+    # 2) Ensure kind cluster is up (skip when pointing at an external cluster)
+    if [[ "${CLUSTER_MODE}" != "local" ]]; then
+        ensure_kind_cluster
+    else
+        ok "CLUSTER_MODE=local — skipping kind cluster creation, using existing kubeconfig."
+    fi
 
     # 3) Verify kubectl is connected
     if ! kubectl cluster-info >/dev/null 2>&1; then

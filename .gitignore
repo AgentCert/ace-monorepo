@@ -49,3 +49,4 @@ temp/
 agent-charts/
 scripts/azure-build/start-agentcert-v2.sh
 local-personal-workspace/
+deploy/helm/ace/values-env.yaml

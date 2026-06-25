@@ -71,6 +71,8 @@ points at the cloud cluster, so no kind cluster creation is needed. The wizard:
 3. Applies all manifests in `deploy/k8s/` to your cloud cluster
 4. Waits for core services to become ready
 
+At the deploy prompt the wizard asks how to apply: press **`k`** for `kubectl apply` (default) or **`h`** for `helm upgrade --install`. The Helm path is convenient for cloud clusters where you want `helm history` and `helm rollback` for rollbacks without re-running the wizard. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for Helm day-to-day commands.
+
 ---
 
 ## 3. Expose the Browser UIs (LoadBalancer)

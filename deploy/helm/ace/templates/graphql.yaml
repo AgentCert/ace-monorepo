@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphql
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: graphql
+  template:
+    metadata:
+      labels:
+        app: graphql
+    spec:
+      serviceAccountName: graphql
+      initContainers:
+        - name: wait-for-mongodb
+          image: {{ .Values.images.mongodb }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          command: [bash, -c]
+          args:
+            - |
+              echo "Waiting for MongoDB RS to be initialized..."
+              until mongosh --quiet --host mongodb:27017 \
+                -u "${MONGODB_USERNAME:-admin}" \
+                -p "${MONGODB_PASSWORD:-1234}" \
+                --authenticationDatabase admin \
+                --eval "rs.status().ok" 2>/dev/null | grep -q 1; do
+                echo "  still waiting..."; sleep 5
+              done
+              echo "MongoDB RS ready."
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
+      containers:
+        - name: graphql
+          image: {{ .Values.images.graphql }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - containerPort: 8081
+            - containerPort: 8082
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretName }}
+          env:
+            - name: REST_PORT
+              value: "8081"
+            - name: GRPC_PORT
+              value: "8082"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
+            - name: DB_SERVER
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/?replicaSet=rs0&authSource=admin"
+            - name: LITMUS_AUTH_GRPC_ENDPOINT
+              value: "auth"
+            - name: LITMUS_AUTH_GRPC_PORT
+              value: "3030"
+            - name: CHAOS_CENTER_UI_ENDPOINT
+              value: "http://graphql.ace.svc.cluster.local:8081"
+            - name: ALLOWED_ORIGINS
+              value: "^(http://|https://|)litmuschaos.io(:[0-9]+|)?,^(http://|https://|)localhost(:[0-9]+|)?,^(http://|https://|ws://|wss://|)[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$,^[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$"
+            - name: OPENAI_BASE_URL
+              value: "http://litellm.ace.svc.cluster.local:14000/v1"
+            - name: CERTIFIER_BASE_URL
+              value: "http://certifier:8000"
+            - name: CERTIFICATE_PDF_BASE_URL
+              value: "http://certifier:8000"
+            - name: DEFAULT_AGENT_HUB_PATH
+              value: "{{ .Values.repo.hostPath }}/agent-charts"
+            - name: DEFAULT_APP_HUB_PATH
+              value: "{{ .Values.repo.hostPath }}/app-charts"
+            - name: AGENTCERT_ENV_FILE
+              value: ""
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/certs/ca-certificates.crt"
+            - name: LITMUS_CHAOS_OPERATOR_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: CHAOS_OPERATOR_IMAGE
+                  optional: true
+            - name: LITMUS_CHAOS_RUNNER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: CHAOS_RUNNER_IMAGE
+                  optional: true
+            - name: LITMUS_CHAOS_EXPORTER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: CHAOS_EXPORTER_IMAGE
+                  optional: true
+          volumeMounts:
+            - name: repo
+              mountPath: {{ .Values.repo.hostPath }}
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              readOnly: true
+      volumes:
+        - name: repo
+          hostPath:
+            path: {{ .Values.repo.hostPath }}
+            type: Directory
+        - name: ca-certs
+          hostPath:
+            path: /etc/ssl/certs/ca-certificates.crt
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graphql
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  selector:
+    app: graphql
+  type: NodePort
+  ports:
+    - name: rest
+      port: 8081
+      targetPort: 8081
+      nodePort: 32081
+    - name: grpc
+      port: 8082
+      targetPort: 8082
+      nodePort: 32082

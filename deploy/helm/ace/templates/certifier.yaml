@@ -1,0 +1,129 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: certifier-workspace
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.storage.certifierWorkspace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: certifier
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: certifier
+  template:
+    metadata:
+      labels:
+        app: certifier
+    spec:
+      initContainers:
+        - name: wait-for-mongodb
+          image: {{ .Values.images.mongodb }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          command: [bash, -c]
+          args:
+            - |
+              echo "Waiting for MongoDB RS to be initialized..."
+              until mongosh --quiet --host mongodb:27017 \
+                -u "${MONGODB_USERNAME:-admin}" \
+                -p "${MONGODB_PASSWORD:-1234}" \
+                --authenticationDatabase admin \
+                --eval "rs.status().ok" 2>/dev/null | grep -q 1; do
+                echo "  still waiting..."; sleep 5
+              done
+              echo "MongoDB RS ready."
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
+        - name: workspace-init
+          image: {{ .Values.images.busybox }}
+          command: [sh, -c, "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /ws
+      containers:
+        - name: certifier
+          image: {{ .Values.images.certifier }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretName }}
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
+            - name: MONGODB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_DATABASE
+                  optional: true
+            - name: MONGODB_CONNECTION_STRING
+              value: "mongodb://$(MONGODB_USERNAME):$(MONGODB_PASSWORD)@mongodb:27017/$(MONGODB_DATABASE)?authSource=admin&directConnection=true"
+            - name: LANGFUSE_HOST
+              value: "http://langfuse-web:3000"
+            - name: PYTHONPATH
+              value: "/app"
+            - name: API_PORT
+              value: "8000"
+            - name: WORKSPACE_DIR
+              value: "/app/workspace"
+            - name: CERT_WORKSPACE_DIR
+              value: "/app/workspace/cert"
+          volumeMounts:
+            - name: workspace
+              mountPath: /app/workspace
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 6
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: certifier-workspace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: certifier
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  selector:
+    app: certifier
+  type: NodePort
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 32080

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: ace
+description: Agent Certification Engine — full platform stack (control plane + observability + certifier)
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - agentcert
+  - chaos
+  - certification
+  - litmus
+maintainers:
+  - name: AgentCert
+    url: https://github.com/AgentCert/ace-monorepo

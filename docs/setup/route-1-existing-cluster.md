@@ -39,6 +39,8 @@ shows `local` as the default). The wizard:
 4. Applies all manifests in `deploy/k8s/`
 5. Waits for core services to become ready
 
+At the deploy prompt the wizard also asks how to apply: press **`k`** for `kubectl apply` (default) or **`h`** for `helm upgrade --install`. Choose Helm if you want release tracking (`helm history`, `helm rollback`) or plan to upgrade without re-running the full wizard. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for Helm day-to-day commands.
+
 <div class="callout callout-tip">
 <code>CLUSTER_MODE=auto</code> also works — it probes your kubeconfig, finds the
 existing cluster, and skips kind creation. Use <code>local</code> to fail loudly if

@@ -330,6 +330,31 @@ echo
 
 # --- K8s deployment helpers -------------------------------------------------
 
+# dedup_env PATH — deduplicate .env in-place, keeping the LAST value for each
+# key. Blank lines and comments are preserved; only duplicate KEY= lines are
+# collapsed. This prevents `kubectl create secret --from-env-file` from failing
+# with "another key by that name already exists".
+dedup_env() {
+    python3 - "$1" <<'PY'
+import sys, re
+path = sys.argv[1]
+lines = open(path).read().splitlines()
+# Two-pass: first collect last-seen index for each key
+last = {}
+for i, ln in enumerate(lines):
+    m = re.match(r'^([A-Za-z0-9_.]+)=', ln)
+    if m:
+        last[m.group(1)] = i
+out = []
+for i, ln in enumerate(lines):
+    m = re.match(r'^([A-Za-z0-9_.]+)=', ln)
+    if m and last[m.group(1)] != i:
+        continue  # drop earlier duplicate
+    out.append(ln)
+open(path, "w").write("\n".join(out) + "\n")
+PY
+}
+
 # set_env KEY VALUE — set or replace a key in .env
 set_env() {
     local k="$1" v="$2"
@@ -346,6 +371,18 @@ PY
     else
         printf '%s=%s\n' "$k" "$v" >> "${ENV_FILE}"
     fi
+}
+
+# apply_ace_env_secret — dedup .env then create/update the ace-env Secret
+apply_ace_env_secret() {
+    local ns="${1:-ace}"
+    dedup_env "${ENV_FILE}"
+    kubectl create secret generic ace-env \
+        --namespace "${ns}" \
+        --from-env-file="${ENV_FILE}" \
+        --dry-run=client -o yaml \
+        | kubectl apply -f - >/dev/null
+    ok "ace-env Secret up to date."
 }
 
 # Patch .env so in-cluster pods use K8s service DNS names instead of host IPs.
@@ -536,14 +573,8 @@ k8s_deploy() {
     kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
 
     # 6) Create (or update) the ace-env Secret from .env
-    #    --from-env-file parses KEY=VALUE; values may contain special chars.
     echo -e "${DIM}Creating/updating ace-env Secret from .env…${NC}"
-    kubectl create secret generic ace-env \
-        --namespace "${NS}" \
-        --from-env-file="${ENV_FILE}" \
-        --dry-run=client -o yaml \
-        | kubectl apply -f - >/dev/null
-    ok "ace-env Secret up to date."
+    apply_ace_env_secret "${NS}"
 
     # 7) Apply RBAC
     kubectl apply -f "${K8S_DIR}/01-rbac.yaml"
@@ -591,6 +622,112 @@ k8s_deploy() {
     echo -e "  ${DIM}status:  kubectl get pods -n ace${NC}"
     echo -e "  ${DIM}logs:    kubectl logs -n ace deploy/graphql -f${NC}"
     echo -e "  ${DIM}teardown: kind delete cluster --name ${KIND_CLUSTER_NAME:-agentcert}${NC}"
+    echo -e "${GREEN}=======================================================${NC}"
+}
+
+# Generate deploy/helm/ace/values-env.yaml from .env (and litellm config) so
+# the chart owns the ace-env Secret. The file is gitignored — never committed.
+# After running this, the only helm command needed is:
+#   helm upgrade --install ace deploy/helm/ace --create-namespace -f deploy/helm/ace/values-env.yaml
+generate_helm_values_env() {
+    local out="${REPO_ROOT}/deploy/helm/ace/values-env.yaml"
+    local litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
+    dedup_env "${ENV_FILE}"
+    python3 - "${ENV_FILE}" "${out}" "${litellm_cfg}" "${REPO_ROOT}" <<'PY'
+import sys, re, os
+env_path, out_path, litellm_cfg, repo_root = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# collect keys in order, last value wins
+keys_order, seen = [], {}
+for ln in open(env_path).read().splitlines():
+    m = re.match(r'^([A-Za-z0-9_.]+)=(.*)', ln)
+    if not m:
+        continue
+    k, v = m.group(1), m.group(2)
+    if k not in seen:
+        keys_order.append(k)
+    seen[k] = v
+lines = ["env:"]
+for k in keys_order:
+    v = seen[k].replace("'", "''")
+    lines.append(f"  {k}: '{v}'")
+# repo hostPath (machine-specific; overrides values.yaml default)
+lines += ["", f"repo:", f"  hostPath: '{repo_root}'"]
+# litellm config (inline so --set-file is not needed)
+if os.path.isfile(litellm_cfg):
+    cfg = open(litellm_cfg).read()
+    import textwrap
+    lines += ["", "litellm:", "  config: |"]
+    lines += ["    " + l for l in cfg.splitlines()]
+open(out_path, "w").write("\n".join(lines) + "\n")
+PY
+    ok "Generated values-env.yaml (env + litellm config + hostPath)."
+}
+
+# Deploy via Helm — helm owns everything: namespace, secret, all workloads.
+helm_deploy() {
+    local CHART_DIR="${REPO_ROOT}/deploy/helm/ace"
+    local VALUES_ENV="${CHART_DIR}/values-env.yaml"
+    local NS="ace"
+    local LITELLM_CFG="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
+    local envval
+    envval() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true; }
+
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  Deploying ACE stack via Helm${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo
+
+    # 1) Patch .env with K8s-specific service DNS names
+    k8s_env_patch
+
+    # 2) Ensure kind cluster is up with the right port mappings
+    ensure_kind_cluster
+
+    # 3) Verify kubectl is connected
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
+        return 1
+    fi
+
+    # 4) Generate values-env.yaml (helm reads this to create the ace-env Secret)
+    echo -e "${DIM}Generating values-env.yaml from .env…${NC}"
+    generate_helm_values_env
+
+    # 5) Run helm — it owns namespace, secret, and all workloads
+    local helm_cmd=(
+        helm upgrade --install ace "${CHART_DIR}"
+        --namespace "${NS}"
+        --create-namespace
+        -f "${VALUES_ENV}"
+        --timeout 10m
+    )
+
+    echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
+    echo
+    "${helm_cmd[@]}"
+
+    # 6) Print access URLs
+    local admu admp luser lpass
+    admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
+    admp="$(envval ADMIN_PASSWORD)";              admp="${admp:-litmus}"
+    luser="$(envval LANGFUSE_INIT_USER_EMAIL)";   luser="${luser:-admin@agentcert.local}"
+    lpass="$(envval LANGFUSE_INIT_USER_PASSWORD)";lpass="${lpass:-agentcert-admin}"
+    echo
+    echo -e "${GREEN}=======================================================${NC}"
+    echo -e "${GREEN}  ✓ ACE stack deployed via Helm${NC}"
+    echo -e "${GREEN}=======================================================${NC}"
+    echo -e "  ${BOLD}Release${NC}       ace  (namespace: ${NS})"
+    echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+    echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
+    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"
+    echo -e "  ${BOLD}MongoDB${NC}       localhost:27017"
+    echo
+    echo -e "  ${DIM}status:   kubectl get pods -n ace${NC}"
+    echo -e "  ${DIM}upgrade:  helm upgrade --install ace deploy/helm/ace --create-namespace -f deploy/helm/ace/values-env.yaml --timeout 10m${NC}"
+    echo -e "  ${DIM}rollback: helm rollback ace -n ace${NC}"
+    echo -e "  ${DIM}teardown: helm uninstall ace -n ace${NC}"
     echo -e "${GREEN}=======================================================${NC}"
 }
 
@@ -663,7 +800,13 @@ for _charts_dir in "${REPO_ROOT}/agent-charts/charts" "${REPO_ROOT}/app-charts/c
     fi
 done
 
-read -rp "$(echo -e "Deploy the stack to the Kubernetes cluster now? ${DIM}[y/N]${NC}: ")" go
-if [[ "$go" =~ ^[Yy] ]]; then
-    k8s_deploy
-fi
+echo -e "${BOLD}Deploy the stack to the Kubernetes cluster now?${NC}"
+echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
+echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
+echo -e "   ${BOLD}n${NC}  skip for now"
+read -rp "$(echo -e "Choice ${DIM}[k/h/N]${NC}: ")" deploy_choice
+case "${deploy_choice,,}" in
+    k) k8s_deploy ;;
+    h) helm_deploy ;;
+    *) echo -e "${DIM}Skipped — run './scripts/setup.sh' again and choose k or h to deploy.${NC}" ;;
+esac

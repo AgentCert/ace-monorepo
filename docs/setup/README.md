@@ -31,6 +31,7 @@ cd ace-monorepo</code></pre>
       <strong>Run the setup wizard — configures .env, creates kind cluster, deploys to Kubernetes</strong>
       <pre><code>./scripts/setup.sh</code></pre>
       <p>Answer the Azure OpenAI prompts, accept defaults for everything else, then answer <strong>Y</strong> to deploy at the end.</p>
+      <p>At the deploy prompt the wizard asks <em>how</em> to deploy: press <strong>k</strong> for <code>kubectl apply</code> (default) or <strong>h</strong> for <code>helm upgrade --install</code>. Both install the same stack — Helm adds release tracking and rollback. See <a href="{{ "/setup/managing-services.html" | relative_url }}">Managing services</a> for Helm day-to-day commands.</p>
     </div>
   </div>
 </div>

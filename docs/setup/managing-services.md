@@ -181,6 +181,39 @@ kubectl delete namespace ace
 
 ---
 
+## Helm Path — Upgrade & Rollback
+
+If you deployed via Helm (`h` choice in setup.sh), use these commands instead
+of re-applying raw manifests:
+
+```bash
+# Upgrade to latest (also re-injects litellm config):
+helm upgrade ace deploy/helm/ace \
+  --set-file litellm.config=agentcert-stack/litellm-setup/litellm_config.yaml \
+  --timeout 10m
+
+# See release history:
+helm history ace -n ace
+
+# Roll back one version:
+helm rollback ace -n ace
+
+# Roll back to a specific revision:
+helm rollback ace 2 -n ace
+
+# Show what would change (dry-run):
+helm upgrade ace deploy/helm/ace --dry-run
+
+# Uninstall (keeps PVCs — data is safe):
+helm uninstall ace -n ace
+```
+
+Helm vs kubectl — after `.env` changes the workflow is the same: re-run
+`./scripts/setup.sh` and choose `h`. The script recreates the `ace-env` Secret
+before running `helm upgrade`.
+
+---
+
 ## Common One-Liners
 
 ```bash

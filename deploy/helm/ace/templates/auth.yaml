@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      containers:
+        - name: auth
+          image: {{ .Values.images.auth }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - containerPort: 3000
+            - containerPort: 3030
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretName }}
+          env:
+            - name: REST_PORT
+              value: "3000"
+            - name: GRPC_PORT
+              value: "3030"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
+            - name: DB_SERVER
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/?replicaSet=rs0&authSource=admin"
+            - name: MONGO_CONNECTION_STRING
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/agentcert?authSource=admin&directConnection=true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  selector:
+    app: auth
+  type: NodePort
+  ports:
+    - name: rest
+      port: 3000
+      targetPort: 3000
+      nodePort: 32003
+    - name: grpc
+      port: 3030
+      targetPort: 3030
+      nodePort: 32030

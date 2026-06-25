@@ -128,6 +128,11 @@ cd ace-monorepo
 The wizard prompts for your Azure OpenAI credentials, defaults everything else, and
 asks at the end whether to deploy. Answer **Y** and the cluster is up in ~5 minutes.
 
+After answering Y the wizard asks *how* to deploy: **`k`** for `kubectl apply`
+(default) or **`h`** for `helm upgrade --install`. Both install the same stack —
+Helm adds release tracking (`helm history`, `helm rollback`) and lets you upgrade
+later without re-running the full wizard.
+
 > ### 📚 Detailed setup guides — [`docs/setup/`](./docs/setup/)
 > - **[Setup overview & prerequisites](./docs/setup/README.md)**
 > - **[Configuration & changing ports](./docs/setup/configuration.md)** — every `.env` switch + how to move busy ports

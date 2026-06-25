@@ -1,0 +1,31 @@
+ACE stack deployed successfully!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Service         URL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  UI (web)        http://localhost:2001
+  GraphQL API     http://localhost:8081
+  Auth            http://localhost:3000
+  Certifier       http://localhost:18000/docs
+  LiteLLM         http://localhost:14000
+  Langfuse        http://localhost:4000
+  MongoDB         mongodb://localhost:27017
+  MinIO           http://localhost:9090
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Check pod status:
+  kubectl get pods -n ace
+
+View logs:
+  kubectl logs -n ace -l app=graphql --tail=50 -f
+
+Upgrade the release:
+  helm upgrade ace deploy/helm/ace \
+    --set-file litellm.config=agentcert-stack/litellm-setup/litellm_config.yaml \
+    --timeout 10m
+
+Rollback to previous version:
+  helm rollback ace -n ace
+
+Uninstall (keeps PVCs by default):
+  helm uninstall ace -n ace

@@ -73,14 +73,27 @@ The wizard:
 4. Prompts for a `CLUSTER_MODE` — press Enter to accept `auto` (creates a kind cluster if none exists)
 5. Patches `.env` with Kubernetes service DNS names
 6. Asks: **Deploy the stack to the Kubernetes cluster now? [y/N]** → answer **Y**
+7. Asks how to deploy — press **`k`** for `kubectl apply` (default) or **`h`** for Helm
 
 When you answer Y, the wizard:
 
 - Creates the kind cluster `agentcert` using `local-personal-workspace/kind-agentcert.yaml` (with all required `extraPortMappings` and `extraMounts`)
 - Creates the `ace-env` Kubernetes Secret from `.env`
-- Applies all manifests in `deploy/k8s/` in order: namespace → RBAC → MongoDB → auth → graphql → web → LiteLLM → certifier → Langfuse
+- Applies all manifests in `deploy/k8s/` in order: namespace → RBAC → MongoDB → auth → graphql → web → LiteLLM → certifier → Langfuse (kubectl path), or installs the `deploy/helm/ace` chart (Helm path)
 - Waits for MongoDB, auth, graphql, web, and certifier to become ready (up to 5 min)
 - Prints access URLs
+
+#### If you chose Helm
+
+The wizard generates `deploy/helm/ace/values-env.yaml` from your `.env` and runs:
+
+```bash
+helm upgrade --install ace deploy/helm/ace \
+  -n ace --create-namespace \
+  -f deploy/helm/ace/values-env.yaml
+```
+
+To upgrade after changing `.env`, re-run `./scripts/setup.sh` and press `h` again, or run the command above directly. Use `helm history ace -n ace` and `helm rollback ace -n ace` for release management. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for more Helm day-to-day commands.
 
 ---
 

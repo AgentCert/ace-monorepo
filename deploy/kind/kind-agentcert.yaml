@@ -1,0 +1,59 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: agentcert
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # ingress
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      # ── ACE application services ──────────────────────────────────────────
+      # containerPort = NodePort value in the K8s Service manifest
+      # hostPort      = port reachable from the host (browser / CLI)
+      - containerPort: 32001
+        hostPort: 2001    # AgentCert web UI
+        protocol: TCP
+      - containerPort: 32003
+        hostPort: 3000    # auth REST
+        protocol: TCP
+      - containerPort: 32030
+        hostPort: 3030    # auth gRPC
+        protocol: TCP
+      - containerPort: 32081
+        hostPort: 8081    # graphql REST
+        protocol: TCP
+      - containerPort: 32082
+        hostPort: 8082    # graphql gRPC
+        protocol: TCP
+      - containerPort: 32080
+        hostPort: 18000   # certifier API
+        protocol: TCP
+      - containerPort: 31400
+        hostPort: 14000   # LiteLLM proxy
+        protocol: TCP
+      - containerPort: 32400
+        hostPort: 4000    # Langfuse UI/API
+        protocol: TCP
+      - containerPort: 32017
+        hostPort: 27017   # MongoDB
+        protocol: TCP
+      - containerPort: 32090
+        hostPort: 19090   # MinIO S3 API
+        protocol: TCP
+      # ── Monitoring / OIDC ─────────────────────────────────────────────────
+      - containerPort: 31090
+        hostPort: 31090   # Prometheus
+        protocol: TCP
+      - containerPort: 31687
+        hostPort: 31687   # Grafana
+        protocol: TCP
+      - containerPort: 32000
+        hostPort: 32000   # dex OIDC
+        protocol: TCP

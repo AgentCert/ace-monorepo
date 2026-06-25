@@ -77,7 +77,7 @@ The wizard:
 
 When you answer Y, the wizard:
 
-- Creates the kind cluster `agentcert` using `local-personal-workspace/kind-agentcert.yaml` (with all required `extraPortMappings` and `extraMounts`)
+- Creates the kind cluster `agentcert` using `deploy/kind/kind-agentcert.yaml` (with all required `extraPortMappings`); place a `local-personal-workspace/kind-agentcert.yaml` to override for personal tweaks
 - Creates the `ace-env` Kubernetes Secret from `.env`
 - Applies all manifests in `deploy/k8s/` in order: namespace → RBAC → MongoDB → auth → graphql → web → LiteLLM → certifier → Langfuse (kubectl path), or installs the `deploy/helm/ace` chart (Helm path)
 - Waits for MongoDB, auth, graphql, web, and certifier to become ready (up to 5 min)
@@ -139,7 +139,7 @@ Langfuse UI: **[http://localhost:4000](http://localhost:4000)** (`admin@agentcer
 ## 5. Service Access Reference
 
 All ports are mapped from kind's `extraPortMappings` (defined in
-`local-personal-workspace/kind-agentcert.yaml`):
+`deploy/kind/kind-agentcert.yaml`):
 
 | Service | Host port | NodePort | Notes |
 |---|---|---|---|
@@ -199,7 +199,7 @@ A fresh cluster has **no chaos infrastructure yet**. Follow
 The kind cluster is a Docker container named <code>agentcert-control-plane</code>. It
 is <strong>not</strong> backed by an external volume — deleting the container (e.g. via
 <code>docker system prune</code>) permanently loses cluster state. Recreate with:<br>
-<code>kind create cluster --config local-personal-workspace/kind-agentcert.yaml</code><br>
+<code>kind create cluster --config deploy/kind/kind-agentcert.yaml</code><br>
 then re-run <code>./scripts/setup.sh</code> and answer Y to redeploy.
 </div>
 

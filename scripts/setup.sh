@@ -465,11 +465,21 @@ k8s_env_patch() {
     ok "Patched .env with K8s service DNS names."
 }
 
-# Ensure the kind cluster exists and has the port mappings + repo extraMount
-# required for the K8s deployment. Recreates the cluster if the config has
-# changed (new port mappings / extraMounts not present on the existing node).
+# Ensure the kind cluster exists and has the port mappings required for the
+# K8s deployment. Recreates the cluster if the config has changed.
+#
+# Config resolution order (first found wins):
+#   1. local-personal-workspace/kind-agentcert.yaml  — personal override (gitignored)
+#   2. deploy/kind/kind-agentcert.yaml               — tracked default, ships with the repo
 ensure_kind_cluster() {
-    local kind_cfg="${REPO_ROOT}/local-personal-workspace/kind-agentcert.yaml"
+    local kind_cfg_personal="${REPO_ROOT}/local-personal-workspace/kind-agentcert.yaml"
+    local kind_cfg_default="${REPO_ROOT}/deploy/kind/kind-agentcert.yaml"
+    local kind_cfg
+    if [[ -f "${kind_cfg_personal}" ]]; then
+        kind_cfg="${kind_cfg_personal}"
+    else
+        kind_cfg="${kind_cfg_default}"
+    fi
     local cluster_name="${KIND_CLUSTER_NAME:-agentcert}"
 
     # Check whether the current cluster node already has the ACE port bindings
@@ -498,12 +508,8 @@ ensure_kind_cluster() {
     fi
 
     echo -e "${DIM}Creating kind cluster '${cluster_name}' (this takes ~1-2 min)…${NC}"
-    if [[ -f "${kind_cfg}" ]]; then
-        kind create cluster --name "${cluster_name}" --config "${kind_cfg}"
-    else
-        warn "Kind config not found at ${kind_cfg} — creating with defaults (no port mappings)."
-        kind create cluster --name "${cluster_name}"
-    fi
+    echo -e "${DIM}Using kind config: ${kind_cfg}${NC}"
+    kind create cluster --name "${cluster_name}" --config "${kind_cfg}"
     kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
     ok "Kind cluster '${cluster_name}' created."
 }

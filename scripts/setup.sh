@@ -467,19 +467,8 @@ k8s_env_patch() {
 
 # Ensure the kind cluster exists and has the port mappings required for the
 # K8s deployment. Recreates the cluster if the config has changed.
-#
-# Config resolution order (first found wins):
-#   1. local-personal-workspace/kind-agentcert.yaml  — personal override (gitignored)
-#   2. deploy/kind/kind-agentcert.yaml               — tracked default, ships with the repo
 ensure_kind_cluster() {
-    local kind_cfg_personal="${REPO_ROOT}/local-personal-workspace/kind-agentcert.yaml"
-    local kind_cfg_default="${REPO_ROOT}/deploy/kind/kind-agentcert.yaml"
-    local kind_cfg
-    if [[ -f "${kind_cfg_personal}" ]]; then
-        kind_cfg="${kind_cfg_personal}"
-    else
-        kind_cfg="${kind_cfg_default}"
-    fi
+    local kind_cfg="${REPO_ROOT}/deploy/kind/kind-agentcert.yaml"
     local cluster_name="${KIND_CLUSTER_NAME:-agentcert}"
 
     # Check whether the current cluster node already has the ACE port bindings

@@ -77,7 +77,7 @@ The wizard:
 
 When you answer Y, the wizard:
 
-- Creates the kind cluster `agentcert` using `deploy/kind/kind-agentcert.yaml` (with all required `extraPortMappings`); place a `local-personal-workspace/kind-agentcert.yaml` to override for personal tweaks
+- Creates the kind cluster `agentcert` using `deploy/kind/kind-agentcert.yaml` (with all required `extraPortMappings`)
 - Creates the `ace-env` Kubernetes Secret from `.env`
 - Applies all manifests in `deploy/k8s/` in order: namespace → RBAC → MongoDB → auth → graphql → web → LiteLLM → certifier → Langfuse (kubectl path), or installs the `deploy/helm/ace` chart (Helm path)
 - Waits for MongoDB, auth, graphql, web, and certifier to become ready (up to 5 min)

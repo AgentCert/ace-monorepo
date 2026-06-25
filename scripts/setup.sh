@@ -165,8 +165,8 @@ echo
 
 # --- OPTIONAL: cluster + infra modes ---------------------------------------
 echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
-echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind · cloud=AKS/EKS/GKE${NC}"
-CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh/cloud)')"
+echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind${NC}"
+CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
@@ -181,44 +181,12 @@ detect_kind_gw() {
 {{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
 }
 
-# In-cluster pods call back to the control plane on this host. For kind/local
-# that's the kind-network gateway; for cloud the VM must be reachable at a
-# routable IP, so ask for it.
-AZURE_CONFIG_DIR=""; AWS_CONFIG_DIR=""; GCLOUD_CONFIG_DIR=""
-if [[ "${CLUSTER_MODE}" == cloud ]]; then
-    CALLBACK_HOST="$(ask HOST_PUBLIC_IP 'VM public/reachable IP (in-cluster pods call back here)')"
-    CALLBACK_HOST="$(echo "${CALLBACK_HOST}" | tr -d '[:space:]')"
-
-    # Auto-detect cloud provider credential directories so cluster-init can use
-    # exec-auth kubeconfigs (Azure AD/kubelogin, AWS IAM, GKE) without --admin.
-    # The dirs are mounted read-only into the cluster-init container.
-    echo
-    echo -e "   ${DIM}Detecting cloud provider credentials for exec-auth support…${NC}"
-    if [[ -d "${HOME}/.azure" ]]; then
-        AZURE_CONFIG_DIR="${HOME}/.azure"
-        ok "Azure credentials detected → AZURE_CONFIG_DIR=${AZURE_CONFIG_DIR}"
-        echo -e "   ${DIM}(kubelogin will use these — no --admin flag needed)${NC}"
-    fi
-    if [[ -d "${HOME}/.aws" ]]; then
-        AWS_CONFIG_DIR="${HOME}/.aws"
-        ok "AWS credentials detected   → AWS_CONFIG_DIR=${AWS_CONFIG_DIR}"
-    fi
-    if [[ -d "${HOME}/.config/gcloud" ]]; then
-        GCLOUD_CONFIG_DIR="${HOME}/.config/gcloud"
-        ok "GCP credentials detected   → GCLOUD_CONFIG_DIR=${GCLOUD_CONFIG_DIR}"
-    fi
-    if [[ -z "${AZURE_CONFIG_DIR}" && -z "${AWS_CONFIG_DIR}" && -z "${GCLOUD_CONFIG_DIR}" ]]; then
-        warn "No cloud credentials found in ~/.azure, ~/.aws, or ~/.config/gcloud."
-        warn "If your kubeconfig uses exec-auth, log in first (az login / aws sso login / gcloud auth login)."
-    fi
+CALLBACK_HOST="$(detect_kind_gw || true)"
+if [[ -n "${CALLBACK_HOST}" ]]; then
+    echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
 else
-    CALLBACK_HOST="$(detect_kind_gw || true)"
-    if [[ -n "${CALLBACK_HOST}" ]]; then
-        echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
-    else
-        CALLBACK_HOST="172.26.0.1"
-        warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
-    fi
+    CALLBACK_HOST="172.26.0.1"
+    warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
 fi
 echo
 
@@ -228,9 +196,7 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _AZ_ALIAS="$AZ_ALIAS" _AZ_APIVER="$AZ_APIVER" \
        _GEMINI_KEY="$GEMINI_KEY" _OPENROUTER_KEY="$OPENROUTER_KEY" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
-       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
-       _AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" _AWS_CONFIG_DIR="$AWS_CONFIG_DIR" \
-       _GCLOUD_CONFIG_DIR="$GCLOUD_CONFIG_DIR"
+       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN"
 python3 - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
@@ -305,24 +271,10 @@ if cb:
     # LiteLLM gateway and Langfuse via the same pod->host gateway IP.
     sets["LITELLM_HOST"]            = f"http://{cb}:14000"
     sets["LANGFUSE_HOST"]           = f"http://{cb}:4000"
-    if cm == "cloud":
-        sets["HOST_PUBLIC_IP"] = cb
-
-# ── Cloud provider credential dirs (exec-auth support) ────────────────────────
-# Written only when non-empty so non-cloud users never get these keys in .env.
-for env_key, env_var in [
-    ("AZURE_CONFIG_DIR",  "_AZURE_CONFIG_DIR"),
-    ("AWS_CONFIG_DIR",    "_AWS_CONFIG_DIR"),
-    ("GCLOUD_CONFIG_DIR", "_GCLOUD_CONFIG_DIR"),
-]:
-    val = os.environ.get(env_var, "")
-    if val:
-        sets[env_key] = val
 
 # WebSocket origin allow-list (graphql checks the subscriber's Host against this).
 # Must include the host IP in-cluster pods connect from — kind gateway (172.*),
-# pod CIDR (10.*), LAN (192.168.*), plus the explicit callback host (e.g. a cloud
-# public IP). Otherwise the subscriber gets "websocket: bad handshake".
+# pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
 host_alt = ("|" + re.escape(cb)) if cb else ""
 sets["ALLOWED_ORIGINS"] = (
     r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"

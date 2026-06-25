@@ -51,9 +51,9 @@ The control plane is based on **Litmus ChaosCenter 3.x**, so the UI uses Litmus 
 
 <div class="callout callout-info">
 <span class="callout-title">Pre-flight checklist</span>
-Stack is healthy: <code>docker compose ps</code> shows <code>auth</code>, <code>graphql</code>, <code>web</code> Up, and <code>cluster-init</code> exited 0.<br>
+Stack is healthy: <code>kubectl get pods -n ace</code> shows all pods <code>Running</code>.<br>
 UI is reachable: <strong><a href="http://localhost:2001">http://localhost:2001</a></strong> — log in with <code>ADMIN_USERNAME / ADMIN_PASSWORD</code> (default <code>admin / litmus</code>).<br>
-<code>kubectl config current-context</code> and <code>kubectl get nodes</code> both work on the host.
+<code>kubectl config current-context</code> returns <code>kind-agentcert</code> and <code>kubectl get nodes</code> shows the node Ready.
 </div>
 
 ---
@@ -120,24 +120,29 @@ If it stays **DISCONNECTED**, work through the [networking checklist](#networkin
 
 ---
 
-## Networking Checklist (Pods → Host)
+## Networking Checklist (Pods → Control Plane)
 
-In-cluster pods must reach the control plane **on the host**. Three things have to line up:
+In the Kubernetes setup, the control plane (graphql, auth, etc.) runs inside the
+same cluster as the infra subscriber — so pods reach graphql via Kubernetes DNS,
+not the host IP. The `SERVER_ADDR` and `SUBSCRIBER_CALLBACK_URL` in `.env` are
+patched to `http://graphql.ace.svc.cluster.local:8081` by `scripts/setup.sh`.
+
+If the subscriber still can't connect:
 
 <div class="callout callout-warning">
-<span class="callout-title">⚠ The three failure modes</span>
-<strong>1. Wrong host IP.</strong> Inside a pod, <code>localhost</code> is the pod, not the host. For kind (routes 1 &amp; 2) the host is the kind-network gateway <code>172.26.0.1</code>. For cloud (route 3) use <code>HOST_PUBLIC_IP</code>.<br><br>
-<strong>2. Host services bind <code>0.0.0.0</code>.</strong> The compose control plane does this by default. Verify: <code>ss -tlnp "( sport = :8081 )"</code> → <code>0.0.0.0:8081</code>.<br><br>
-<strong>3. Firewall allows the port.</strong> If UFW is active on the host:<br>
-<code>sudo ufw allow from 172.26.0.0/16 to any port 8081 proto tcp</code><br>
-<code>sudo ufw allow from 172.26.0.0/16 to any port 4000 proto tcp</code>
+<span class="callout-title">⚠ Common failure modes</span>
+<strong>1. Graphql pod not running.</strong> <code>kubectl get pods -n ace -l app=graphql</code> — must show Running.<br><br>
+<strong>2. Wrong SERVER_ADDR in .env.</strong> Check <code>grep SERVER_ADDR .env</code> — should be
+<code>http://graphql.ace.svc.cluster.local:8081/query</code>, not a host IP.<br>
+Re-run <code>./scripts/setup.sh</code> to patch and redeploy.<br><br>
+<strong>3. Subscriber in wrong namespace.</strong> Cross-namespace DNS works fine (<code>service.namespace.svc.cluster.local</code>). The subscriber in <code>litmus</code> can reach <code>graphql.ace.svc.cluster.local</code> without any extra config.
 </div>
 
-Quick reachability test from inside the cluster:
+Quick reachability test from inside the litmus namespace:
 ```bash
-kubectl run -i --rm --restart=Never reach-test --image=busybox --command -- \
-  sh -c 'wget -q -T 3 -O- http://172.26.0.1:8081/query --post-data={} --header=Content-Type:application/json'
-# reached & rejected empty body = OK; timeout = networking/firewall problem
+kubectl run -i --rm --restart=Never reach-test -n litmus --image=busybox --command -- \
+  sh -c 'wget -q -T 3 -O- http://graphql.ace.svc.cluster.local:8081/query --post-data={} --header=Content-Type:application/json'
+# reached & rejected empty body = OK; timeout = DNS or pod not running
 ```
 
 ---
@@ -193,7 +198,7 @@ kubectl -n <target-ns> get pods -w   # watch the fault take effect
 |---|---|---|
 | **Pass/Fail + score** | Experiment run in UI | Based on your Resilience Probes |
 | **Agent traces** | [Langfuse :4000](http://localhost:4000) → project `agentcert` | Every LLM call the agent made under fault |
-| **Certification report** | [Certifier :8000/docs](http://localhost:8000/docs) | POST the Langfuse trace → get a 12-section JSON+PDF report |
+| **Certification report** | [Certifier :18000/docs](http://localhost:18000/docs) | POST the Langfuse trace → get a 12-section JSON+PDF report |
 
 The `scripts/run_certification.py` helper wraps the Certifier API calls for you.
 
@@ -203,10 +208,10 @@ The `scripts/run_certification.py` helper wraps the Certifier API calls for you.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Experiment create: `failed RBAC preflight: unable to load in-cluster configuration` | graphql can't read the kubeconfig | Ensure `cluster-init` ran OK (`docker logs ace-cluster-init`); it publishes a `0644` kubeconfig to the shared volume |
-| Infra stuck **DISCONNECTED**; subscriber log: `dial tcp [::1]:8081: connection refused` | `SERVER_ADDR` points at `localhost` | Set `SERVER_ADDR`/`SUBSCRIBER_CALLBACK_URL` to `172.26.0.1:8081` (kind) or `HOST_PUBLIC_IP:8081` (cloud) |
+| Experiment create: `failed RBAC preflight: unable to load in-cluster configuration` | graphql can't reach the K8s API | Check `kubectl logs -n ace deploy/graphql` — the graphql pod uses its ServiceAccount token for in-cluster auth |
+| Infra stuck **DISCONNECTED**; subscriber log: `dial tcp [::1]:8081: connection refused` | Subscriber can't reach graphql | The infra YAML uses `graphql.ace.svc.cluster.local:8081` as the callback — verify graphql pod is Running |
 | Subscriber log: `dial tcp 172.26.0.1:8081: i/o timeout` | UFW dropping the port | `sudo ufw allow from 172.26.0.0/16 to any port 8081 proto tcp` |
 | Subscriber log: `websocket: bad handshake` | `ALLOWED_ORIGINS` regex mismatch | Widen `ALLOWED_ORIGINS` in `.env` to include `172.*` / `10.*` ranges, restart graphql |
 | App install fails: `clusterroles ... 'prometheus' is forbidden` | chaos SA lacks RBAC perms | Apply the `argo-chaos-admin` binding shown above |
-| Login fails `invalid_credentials` | admin row predates current `.env` | Delete admin user from MongoDB, then `docker compose restart auth` |
+| Login fails `invalid_credentials` | admin row predates current `.env` | Delete admin user from MongoDB, then `kubectl rollout restart -n ace deploy/auth` |
 | Langfuse UI 500 on first boot | init password < 8 chars | Set `LANGFUSE_INIT_USER_PASSWORD` (≥ 8 chars) and recreate `langfuse-web` |

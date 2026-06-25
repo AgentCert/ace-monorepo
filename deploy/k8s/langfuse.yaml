@@ -478,6 +478,37 @@ spec:
               value: "http://localhost:9090"
             - name: LANGFUSE_S3_BATCH_EXPORT_ENDPOINT
               value: "http://minio:9000"
+            # Auto-seed org / project / API keys on first boot.
+            # Langfuse applies these as upserts, so restarts are safe.
+            # LANGFUSE_INIT_USER_* are already injected via envFrom (exact key names match).
+            - name: LANGFUSE_INIT_ORG_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: LANGFUSE_ORG_ID
+                  optional: true
+            - name: LANGFUSE_INIT_ORG_NAME
+              value: "AgentCert"
+            - name: LANGFUSE_INIT_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: LANGFUSE_PROJECT_ID
+                  optional: true
+            - name: LANGFUSE_INIT_PROJECT_NAME
+              value: "agentcert"
+            - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: LANGFUSE_PUBLIC_KEY
+                  optional: true
+            - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: LANGFUSE_SECRET_KEY
+                  optional: true
 ---
 apiVersion: v1
 kind: Service

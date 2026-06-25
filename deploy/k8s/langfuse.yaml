@@ -67,6 +67,9 @@ spec:
               value: UTC
             - name: PGTZ
               value: UTC
+            # Subdir keeps postgres init happy when Azure Disk creates lost+found
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           readinessProbe:
             exec:
               command: [pg_isready, -U, postgres]
@@ -295,10 +298,16 @@ spec:
       labels:
         app: minio
     spec:
+      securityContext:
+        fsGroup: 65532   # kubelet chowns the PVC to this GID at mount time
       containers:
         - name: minio
           image: cgr.dev/chainguard/minio
           imagePullPolicy: IfNotPresent
+          securityContext:
+            # Chainguard minio runs as nonroot (65532); give it write access to the PVC
+            runAsUser: 65532
+            runAsGroup: 65532
           command: [sh]
           args:
             - -c

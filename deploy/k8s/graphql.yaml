@@ -26,6 +26,21 @@ spec:
         app: graphql
     spec:
       serviceAccountName: graphql
+      # Clone chart repos into a shared emptyDir so the pod is not bound to a
+      # specific node path. On Kind, extraMounts serve the same data via hostPath;
+      # on cloud clusters (AKS/EKS/GKE) this initContainer takes over.
+      initContainers:
+        - name: clone-charts
+          image: alpine/git
+          command:
+            - sh
+            - -c
+            - |
+              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /mnt/repo/agent-charts
+              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /mnt/repo/app-charts
+          volumeMounts:
+            - name: repo
+              mountPath: /mnt/repo
       containers:
         - name: graphql
           image: agentcert/agentcert-graphql:latest
@@ -119,9 +134,7 @@ spec:
               readOnly: true
       volumes:
         - name: repo
-          hostPath:
-            path: /srv/projects/ace-monorepo
-            type: Directory
+          emptyDir: {}
         - name: ca-certs
           hostPath:
             path: /etc/ssl/certs/ca-certificates.crt

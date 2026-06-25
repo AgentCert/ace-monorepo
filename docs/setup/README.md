@@ -7,13 +7,14 @@ nav_fold: true
 
 # You're minutes away from your first certification report.
 
-One command starts the entire platform: Kubernetes chaos injection, an LLM observability layer, a statistical certification pipeline, and a UI to drive it all. No Go, Node, kubectl, kind, or Helm needs to be on your host — the stack builds its own images and provisions Kubernetes automatically.
+One command starts the entire platform: a Kubernetes cluster, MongoDB, the AgentCert
+control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 ---
 
 ## Quick Start
 
-**Prerequisites: Docker 28+ and the compose plugin. That's it.**
+**Prerequisites: Docker 28+, kind, kubectl. That's it.**
 
 <div class="qs-steps">
   <div class="qs-step">
@@ -27,15 +28,9 @@ cd ace-monorepo</code></pre>
   <div class="qs-step">
     <div class="qs-num">2</div>
     <div class="qs-body">
-      <strong>Configure — wizard walks you through LLM providers, flash-agent model, and cluster mode</strong>
+      <strong>Run the setup wizard — configures .env, creates kind cluster, deploys to Kubernetes</strong>
       <pre><code>./scripts/setup.sh</code></pre>
-    </div>
-  </div>
-  <div class="qs-step">
-    <div class="qs-num">3</div>
-    <div class="qs-body">
-      <strong>Start everything</strong>
-      <pre><code>docker compose up -d</code></pre>
+      <p>Answer the Azure OpenAI prompts, accept defaults for everything else, then answer <strong>Y</strong> to deploy at the end.</p>
     </div>
   </div>
 </div>
@@ -44,7 +39,8 @@ Open **[http://localhost:2001](http://localhost:2001)** · login `admin / litmus
 
 <div class="callout callout-info">
 <span class="callout-title">First run</span>
-Building images takes 5–15 minutes; subsequent starts take seconds.<br>
+Pulling images and creating the kind cluster takes 3–10 minutes; subsequent
+<code>./scripts/setup.sh</code> runs take seconds.<br>
 <strong>Stuck?</strong> Join <a href="https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw">Slack ↗</a> — the fastest way to get unblocked.
 </div>
 
@@ -52,13 +48,13 @@ Building images takes 5–15 minutes; subsequent starts take seconds.<br>
 
 ## Prerequisites
 
-You need **Docker** and the **compose plugin**. Nothing else.
-
 | Tool | Min version | Check | Install |
 |---|---|---|---|
 | Docker Engine | 28+ | `docker --version` | [docs.docker.com ↗](https://docs.docker.com/engine/install/) |
-| Docker Compose plugin | v2.20+ | `docker compose version` | bundled with recent Docker |
 | User in `docker` group | — | `groups \| grep docker` | `sudo usermod -aG docker $USER` then re-login |
+| kind | v0.20+ | `kind version` | [kind releases ↗](https://github.com/kubernetes-sigs/kind/releases) or `go install sigs.k8s.io/kind@latest` |
+| kubectl | v1.27+ | `kubectl version --client` | `sudo snap install kubectl --classic` or [kubernetes.io ↗](https://kubernetes.io/docs/tasks/tools/) |
+| git | any | `git --version` | `sudo apt-get install git` |
 
 **LLM credentials** — you need at least one of:
 
@@ -86,7 +82,7 @@ The 4-phase certification pipeline calls Azure OpenAI directly (standard model, 
 
 ## What Comes Up
 
-One `docker compose up -d` starts the full platform:
+`./scripts/setup.sh` deploys the full platform into a kind cluster:
 
 <div class="svc-grid">
   <div class="svc-card">
@@ -111,7 +107,7 @@ One `docker compose up -d` starts the full platform:
   </div>
   <div class="svc-card">
     <div class="svc-card-name">LiteLLM</div>
-    <div class="svc-card-desc">LLM gateway — proxies calls to Azure OpenAI</div>
+    <div class="svc-card-desc">LLM gateway — proxies calls to Azure OpenAI / Gemini / OpenRouter</div>
     <a href="http://localhost:14000" class="svc-card-port">:14000</a>
   </div>
   <div class="svc-card">
@@ -122,14 +118,13 @@ One `docker compose up -d` starts the full platform:
   <div class="svc-card">
     <div class="svc-card-name">Certifier</div>
     <div class="svc-card-desc">4-phase pipeline → 12-section certification report</div>
-    <a href="http://localhost:8000/docs" class="svc-card-port">:8000/docs</a>
-  </div>
-  <div class="svc-card">
-    <div class="svc-card-name">cluster-init</div>
-    <div class="svc-card-desc">One-shot: provisions Kubernetes or reuses existing cluster</div>
-    <span class="svc-card-port">one-shot</span>
+    <a href="http://localhost:18000/docs" class="svc-card-port">:18000/docs</a>
   </div>
 </div>
+
+All services run as Kubernetes Deployments in the `ace` namespace inside a local
+kind cluster. Ports are exposed via NodePort services and kind's `extraPortMappings`
+so they are reachable on `localhost` from the VM.
 
 ---
 
@@ -140,7 +135,7 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
 <div class="arch-diagram">
 
   <div class="arch-box arch-box-cp">
-    <div class="arch-box-title">ACE Control Plane</div>
+    <div class="arch-box-title">ACE Control Plane — namespace: ace</div>
     <div class="arch-services">
       <div class="arch-svc">Web UI <span class="arch-svc-port">:2001</span></div>
       <span class="arch-arrow-h">⟷</span>
@@ -207,7 +202,7 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
   </div>
 
   <div class="arch-box arch-box-cert">
-    <div class="arch-box-title">Certifier — 4-phase pipeline · :8000</div>
+    <div class="arch-box-title">Certifier — 4-phase pipeline · :18000</div>
     <div class="arch-phases">
       <div class="arch-phase">
         <span class="arch-phase-num">Phase 0 · </span>Fault Bucketing
@@ -240,51 +235,38 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
 
 ---
 
-## Choose Your Kubernetes Route
-
-Set `CLUSTER_MODE` in `.env` to match your situation:
+## Choose Your Route
 
 <div class="route-grid">
   <div class="route-card">
     <div class="route-label">Route 1</div>
-    <div class="route-card-title">Existing cluster</div>
+    <div class="route-card-title">Existing local cluster</div>
     <div class="route-card-env">CLUSTER_MODE=local</div>
-    <div class="route-card-when">You already have a working kind / minikube / k3s cluster and a valid kubeconfig. Lightest path — only the ACE control plane starts.</div>
+    <div class="route-card-when">You already have a kind / minikube / k3s cluster and <code>kubectl</code> points at it. The full ACE stack is deployed into that cluster.</div>
     <a href="{{ "/setup/route-1-existing-cluster.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
   <div class="route-card">
     <div class="route-label">Route 2</div>
-    <div class="route-card-title">Fresh machine</div>
+    <div class="route-card-title">Fresh VM (kind)</div>
     <div class="route-card-env">CLUSTER_MODE=fresh</div>
-    <div class="route-card-when">Clean machine with Docker but no Kubernetes yet. <code>cluster-init</code> creates a local kind cluster for you. The true one-command path.</div>
+    <div class="route-card-when">Clean VM with Docker + kind + kubectl but no cluster yet. The wizard creates a kind cluster with the right port mappings. Services are on <code>localhost</code> immediately.</div>
     <a href="{{ "/setup/route-2-fresh-kind.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
   <div class="route-card">
     <div class="route-label">Route 3</div>
-    <div class="route-card-title">Cloud cluster</div>
-    <div class="route-card-env">CLUSTER_MODE=cloud</div>
-    <div class="route-card-when">Your Kubernetes cluster lives in the cloud (AKS / EKS / GKE) and your VM is already logged in to it. ACE runs on the VM and drives the remote cluster.</div>
+    <div class="route-card-title">Cloud cluster (AKS / EKS / GKE)</div>
+    <div class="route-card-env">CLUSTER_MODE=local</div>
+    <div class="route-card-when">VM is already logged in to a cloud cluster (<code>az aks get-credentials</code> etc.) and <code>kubectl get nodes</code> works. ACE deploys into the cloud cluster; browser UIs exposed via LoadBalancer.</div>
     <a href="{{ "/setup/route-3-cloud-aks.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
+  <div class="route-card">
+    <div class="route-label">Local Dev</div>
+    <div class="route-card-title">Host processes</div>
+    <div class="route-card-env">start-agentcert-v2.sh</div>
+    <div class="route-card-when">Actively developing the Go backend or React frontend. Auth, GraphQL, and the UI run directly on the host with hot-reload; MongoDB, Langfuse, LiteLLM, and the Certifier run in Docker.</div>
+    <a href="{{ "/setup/local-dev.html" | relative_url }}" class="route-card-link">Setup guide →</a>
+  </div>
 </div>
-
-`CLUSTER_MODE=auto` (the default) probes for an existing cluster first and creates a kind cluster if none is found.
-
----
-
-## Configuration
-
-The wizard handles 90% of it. The only values you **must** provide are Azure OpenAI credentials:
-
-```bash
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_API_KEY=sk-...
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-```
-
-Everything else — MongoDB passwords, Langfuse keys, JWT secrets — is auto-generated.
-
-Full reference: [Configuration & Ports →]({{ "/setup/configuration.html" | relative_url }})
 
 ---
 
@@ -293,22 +275,21 @@ Full reference: [Configuration & Ports →]({{ "/setup/configuration.html" | rel
 Follow the experiment guide to run your first certification:
 
 - **[Run your first experiment →]({{ "/setup/running-an-experiment.html" | relative_url }})** — UI walkthrough from login to report
-- **[Managing & restarting services →]({{ "/setup/managing-services.html" | relative_url }})** — day-to-day commands
+- **[Managing & restarting services →]({{ "/setup/managing-services.html" | relative_url }})** — day-to-day kubectl commands
 
 ### Useful commands
 
 ```bash
-docker compose ps                                          # health check
-docker compose logs -f graphql                             # control plane logs
-docker compose logs -f certifier                           # pipeline logs
-docker compose up -d --force-recreate auth graphql web app # reload .env
-docker compose down                                        # stop (keep data)
-docker compose down -v                                     # stop + wipe all data
+kubectl get pods -n ace                                    # health check
+kubectl logs -n ace deploy/graphql -f                      # control plane logs
+kubectl logs -n ace deploy/certifier -f                    # pipeline logs
+kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/web deploy/certifier  # reload config
+kind delete cluster --name agentcert                       # tear down everything
 ```
 
 <div class="callout callout-warning">
-<span class="callout-title">⚠ Restart vs recreate</span>
-<code>docker compose restart</code> does <strong>not</strong> reload <code>.env</code>. Use <code>--force-recreate</code> when you change env vars.
+<span class="callout-title">⚠ Applying .env changes</span>
+After editing <code>.env</code>, re-run <code>./scripts/setup.sh</code> and answer Y to deploy. It recreates the <code>ace-env</code> Secret and rolls out affected deployments.
 </div>
 
 ---
@@ -317,9 +298,10 @@ docker compose down -v                                     # stop + wipe all dat
 
 | Symptom | Fix |
 |---|---|
-| `cluster-init` exits non-zero | `docker compose logs cluster-init` — usually Docker socket permissions or missing kind config |
-| UI at :2001 shows blank | GraphQL not ready yet — wait 30 s, then check `docker compose logs graphql` |
-| Langfuse key errors | `docker compose restart langfuse-worker langfuse-server` — auto-provisioning runs on first boot only |
-| LiteLLM 401 errors | Check `AZURE_OPENAI_API_KEY` in `.env`, then `docker compose up -d --force-recreate litellm` |
+| Pods stuck in `Pending` | `kubectl describe pod -n ace <pod>` — usually a PVC or image pull issue |
+| UI at :2001 shows blank | GraphQL not ready — `kubectl logs -n ace deploy/graphql` |
+| Langfuse key errors | Delete and recreate the langfuse-web pod: `kubectl rollout restart -n ace deploy/langfuse-web` |
+| LiteLLM 401 errors | Check `AZURE_OPENAI_API_KEY` in `.env`, re-run `./scripts/setup.sh` |
+| `kind` cluster missing port mappings | Run `./scripts/setup.sh` — it detects missing port bindings and offers to recreate the cluster |
 
 Still stuck? **[Join Slack ↗](https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw)** or [open a GitHub issue ↗](https://github.com/AgentCert/ace-monorepo/issues).

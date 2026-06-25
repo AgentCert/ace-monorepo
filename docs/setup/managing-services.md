@@ -6,105 +6,188 @@ nav_order: 6
 
 # Managing & Restarting Services
 
-Day-to-day operations once the stack is up: restarting individual services, reloading `.env` changes, and updating images. Everything is `docker compose` run from the repo root.
+Day-to-day operations once the stack is up: checking health, restarting services,
+applying `.env` changes, and tearing down. Everything is `kubectl` run from the
+repo root against the `ace` namespace.
 
 ---
 
 ## Service Names
 
-The control-plane services you'll restart most often:
+All ACE services are Kubernetes Deployments (or StatefulSets) in the `ace`
+namespace:
 
-| Service (compose) | Container | What it is |
+| Kubernetes name | What it is | Host port |
 |---|---|---|
-| `auth` | `agentcert-auth` | Authentication backend (REST :3000, gRPC :3030) |
-| `graphql` | `agentcert-graphql` | Core backend / GraphQL API (:8081) — installs agents, RBAC, infra |
-| `web` | `agentcert-web` | AgentCert UI (nginx, :2001) |
-| `app` | `certifier_app` | Certifier service (:8000) |
-
-Supporting services (you rarely restart these): `mongo`, `langfuse-web`, `langfuse-worker`, `postgres`, `clickhouse`, `redis`, `minio`, `litellm`, `cluster-init`.
+| `deploy/auth` | Authentication backend (REST :3000, gRPC :3030) | 3000 / 3030 |
+| `deploy/graphql` | Core backend / GraphQL API (:8081) | 8081 |
+| `deploy/web` | AgentCert UI (nginx) | 2001 |
+| `deploy/certifier` | Certifier pipeline (FastAPI) | 18000 |
+| `deploy/litellm` | LiteLLM proxy | 14000 |
+| `deploy/langfuse-web` | Langfuse UI/API | 4000 |
+| `deploy/langfuse-worker` | Langfuse background processor | — |
+| `statefulset/mongodb` | MongoDB replica set | 27017 |
+| `deploy/postgres` | PostgreSQL (Langfuse) | — |
+| `deploy/clickhouse` | ClickHouse (Langfuse traces) | — |
+| `deploy/redis` | Redis (Langfuse queue) | — |
+| `deploy/minio` | MinIO S3 storage (Langfuse blobs) | 19090 |
 
 ```bash
-docker compose ps    # list everything with current state
+kubectl get pods -n ace          # list everything with current state
+kubectl get pods -n ace -w       # watch for changes
 ```
 
 ---
 
-## Restart vs Recreate
+## Health Check
+
+```bash
+kubectl get pods -n ace
+# All pods should show READY 1/1 (or N/N) and STATUS Running
+```
+
+Quick HTTP check:
+
+```bash
+curl -s -o /dev/null -w "UI      %{http_code}\n" http://localhost:2001/
+curl -s -o /dev/null -w "graphql %{http_code}\n" http://localhost:8081/
+curl -s -o /dev/null -w "langfuse %{http_code}\n" http://localhost:4000/
+curl -s -o /dev/null -w "litellm %{http_code}\n" http://localhost:14000/health
+curl -s -o /dev/null -w "cert    %{http_code}\n" http://localhost:18000/docs
+```
+
+---
+
+## Restart a Service
+
+```bash
+# Rolling restart (keeps old pod running until new one is ready):
+kubectl rollout restart -n ace deploy/graphql
+
+# Restart multiple:
+kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/web deploy/certifier
+
+# Wait for rollout to complete:
+kubectl rollout status -n ace deploy/graphql
+```
+
+---
+
+## Tail Logs
+
+```bash
+kubectl logs -n ace deploy/graphql -f          # control plane
+kubectl logs -n ace deploy/certifier -f        # certification pipeline
+kubectl logs -n ace deploy/langfuse-web -f     # Langfuse
+kubectl logs -n ace deploy/litellm -f          # LiteLLM proxy
+kubectl logs -n ace statefulset/mongodb -f     # MongoDB
+```
+
+Add `--previous` to see logs from a crashed container:
+
+```bash
+kubectl logs -n ace deploy/graphql --previous
+```
+
+---
+
+## Applying `.env` Changes
+
+After editing `.env`, re-run the setup wizard. It recreates the `ace-env` Secret
+and restarts all affected deployments:
+
+```bash
+./scripts/setup.sh
+# … answer Y to deploy at the end
+```
+
+To update only the Secret without rerunning the full wizard:
+
+```bash
+kubectl create secret generic ace-env \
+  --namespace ace \
+  --from-env-file=.env \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Then restart the affected services to pick up the new env:
+kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/certifier
+```
 
 <div class="callout callout-warning">
-<span class="callout-title">⚠ restart does NOT reload .env</span>
-Environment variables are read <strong>only when a container is created</strong>.<br><br>
-<code>docker compose restart &lt;svc&gt;</code> → reuses the existing container → <strong>keeps the old env</strong>.<br>
-<code>docker compose up -d --force-recreate &lt;svc&gt;</code> → creates a fresh container → <strong>reads the current .env</strong>.<br><br>
-After editing <code>.env</code>, always use <code>--force-recreate</code>.
+<span class="callout-title">⚠ Secrets don't hot-reload</span>
+Kubernetes Secrets mounted as env vars are read at pod creation time. A Secret
+update only takes effect after the pod is restarted — use <code>kubectl rollout
+restart</code> after updating <code>ace-env</code>.
 </div>
 
+---
+
+## After a `.env` Change — Quick Reference
+
+| You changed… | Affected deployments | Command |
+|---|---|---|
+| `AZURE_OPENAI_*`, model alias | `graphql`, `certifier` | `kubectl rollout restart -n ace deploy/graphql deploy/certifier` |
+| MongoDB address / creds | `auth`, `graphql`, `certifier` | `kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/certifier` |
+| Langfuse keys | `certifier`, `langfuse-web` | `kubectl rollout restart -n ace deploy/certifier deploy/langfuse-web` |
+| LiteLLM config | `litellm` | `kubectl rollout restart -n ace deploy/litellm` |
+| Any control-plane env, unsure | all four | `kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/web deploy/certifier` |
+
+---
+
+## Pulling Updated Images
+
+Kubernetes uses the image cached on the kind node. To force a pull of a newer
+`agentcert/*:latest`:
+
 ```bash
-# Fast restart (does NOT reload .env):
-docker compose restart auth graphql web app
+# Delete the pod — Kubernetes recreates it, pulling the image fresh:
+kubectl delete pod -n ace -l app=graphql
+# Or re-apply the manifest (imagePullPolicy: IfNotPresent means no pull if already cached):
+# To force: temporarily edit imagePullPolicy to Always, apply, then revert.
+```
 
-# Recreate so .env + image changes take effect:
-docker compose up -d --force-recreate auth graphql web app
+For a full image refresh (all services):
 
-# One service only:
-docker compose up -d --force-recreate graphql
+```bash
+# Pull into kind node first:
+docker pull agentcert/agentcert-graphql:latest
+kind load docker-image agentcert/agentcert-graphql:latest --name agentcert
+# Then restart the pod:
+kubectl rollout restart -n ace deploy/graphql
 ```
 
 ---
 
-## Pulling and Rebuilding Images
-
-<div class="callout callout-info">
-<span class="callout-title">No auto-pull on restart</span>
-Neither <code>restart</code> nor <code>--force-recreate</code> pulls or rebuilds the image. The local image is reused as-is. You only get a new image when you ask for one.
-</div>
+## Tear Down and Recreate
 
 ```bash
-# (A) Update published images (agentcert/* on Docker Hub), then restart:
-docker compose pull auth graphql web
-docker compose up -d auth graphql web
+# Stop everything and delete the kind cluster (removes all data):
+kind delete cluster --name agentcert
 
-# …or in one step:
-docker compose up -d --pull always auth graphql web
+# Recreate from scratch:
+kind create cluster --config local-personal-workspace/kind-agentcert.yaml
+./scripts/setup.sh   # answer Y to deploy
 ```
+
+To keep the cluster but wipe all ACE data:
 
 ```bash
-# (B) Rebuild from local source (services with a build: section):
-docker compose build graphql
-docker compose up -d graphql
+# Delete the ace namespace (removes all deployments, PVCs, secrets):
+kubectl delete namespace ace
 
-# …or in one step:
-docker compose up -d --build graphql
+# Redeploy:
+./scripts/setup.sh   # answer Y to deploy
 ```
-
-> **First-ever `docker compose up`** (image missing locally): services with a `build:` section are **built** from source; image-only services (`mongo`, `litellm`, `postgres`, …) are **pulled**. After that, the image is cached until you explicitly `pull` or `build`.
 
 ---
 
 ## Common One-Liners
 
 ```bash
-docker compose ps                                # states of all services
-docker compose ps auth graphql web app           # just the control plane
-docker compose logs -f graphql                   # tail one service's logs
-docker compose logs -f auth graphql web app      # tail several at once
-docker compose stop graphql                       # stop one service
-docker compose down                               # stop & remove containers (keeps volumes/data)
-docker compose down -v                            # stop + WIPE data — destructive
+kubectl get pods -n ace                                    # all service states
+kubectl get pods -n ace -l app=graphql                     # one service
+kubectl describe pod -n ace <pod-name>                     # detailed state / events
+kubectl exec -it -n ace deploy/graphql -- sh               # shell into a container
+kubectl top pods -n ace                                    # CPU / memory usage
+kubectl get events -n ace --sort-by='.lastTimestamp'       # recent events
 ```
-
----
-
-## After a `.env` Change — Quick Reference
-
-| You changed… | Affected services | Command |
-|---|---|---|
-| `AZURE_OPENAI_*`, model alias | `graphql` | `docker compose up -d --force-recreate graphql` |
-| Mongo address / port | `auth`, `graphql`, `app` | `docker compose up -d --force-recreate auth graphql app` |
-| Callback host / `SERVER_ADDR` / origins | `graphql` | `docker compose up -d --force-recreate graphql` |
-| Langfuse / LiteLLM host | `app`, `litellm` | `docker compose up -d --force-recreate app litellm` |
-| Any control-plane env, unsure | all four | `docker compose up -d --force-recreate auth graphql web app` |
-
-<div class="callout callout-tip">
-Re-running <code>scripts/setup.sh</code> also applies <code>.env</code> changes and recreates the affected services for you, including re-detecting the kind gateway.
-</div>

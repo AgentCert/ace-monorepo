@@ -1,5 +1,5 @@
 ---
-title: "Route 1 · Existing Cluster"
+title: "Route 1 · Existing Local Cluster"
 parent: "Setup"
 nav_order: 2
 ---
@@ -8,7 +8,9 @@ nav_order: 2
 
 <div class="callout callout-success">
 <span class="callout-title">Use this route when…</span>
-You already have a working local Kubernetes cluster (kind / minikube / k3s) and a valid kubeconfig, and you want ACE to use <em>that</em> cluster. This is the lightest path — only the ACE control plane (<code>auth</code>, <code>graphql</code>, <code>web</code>) and the one-shot <code>cluster-init</code> come up; your existing infrastructure is untouched.
+You already have a working local Kubernetes cluster (kind / minikube / k3s) and
+<code>kubectl</code> is already pointed at it. <code>scripts/setup.sh</code> deploys
+the full ACE stack into that cluster — no new cluster is created.
 </div>
 
 ---
@@ -16,68 +18,74 @@ You already have a working local Kubernetes cluster (kind / minikube / k3s) and 
 ## 1. Confirm Your Cluster Works
 
 ```bash
-kubectl config current-context     # e.g. kind-agentcert
-kubectl get nodes                  # nodes should be Ready
+kubectl config current-context     # e.g. kind-agentcert, minikube, k3d-...
+kubectl get nodes                  # node(s) should be Ready
 ```
-
-If that works from your shell, `cluster-init` will reuse it.
 
 ---
 
-## 2. Configure `.env`
+## 2. Run the Setup Wizard
 
-```dotenv
-CLUSTER_MODE=local              # reuse the existing kube context (fail fast if none)
-
-# Reuse infrastructure you already run → mark them external and drop the profiles:
-MONGO_MODE=external
-LANGFUSE_MODE=external
-LITELLM_MODE=external
-COMPOSE_PROFILES=               # empty → compose starts no mongo/langfuse/litellm
+```bash
+./scripts/setup.sh
 ```
 
-Then point the stack at your existing infra:
+When the wizard asks for `CLUSTER_MODE`, enter **`local`** (or press Enter if it
+shows `local` as the default). The wizard:
 
-```dotenv
-DB_SERVER=mongodb://admin:1234@172.26.0.1:27017/?replicaSet=rs0&authSource=admin
-LANGFUSE_HOST=http://172.26.0.1:4000
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LITELLM_HOST=http://172.26.0.1:14000
-```
+1. Patches `.env` with Kubernetes service DNS names (`graphql.ace.svc.cluster.local`, etc.)
+2. **Skips** kind cluster creation (cluster already exists)
+3. Creates the `ace-env` Secret from `.env`
+4. Applies all manifests in `deploy/k8s/`
+5. Waits for core services to become ready
 
 <div class="callout callout-tip">
-<code>CLUSTER_MODE=auto</code> also works here — it probes your kubeconfig and reuses it. Use <code>local</code> when you want it to <strong>fail loudly</strong> if the cluster isn't up, rather than silently creating a kind cluster.
+<code>CLUSTER_MODE=auto</code> also works — it probes your kubeconfig, finds the
+existing cluster, and skips kind creation. Use <code>local</code> to fail loudly if
+no cluster is reachable rather than silently creating a kind cluster.
 </div>
 
 ---
 
-## 3. Bring Up Only the Control Plane
+## 3. Access the Services
 
-Because the infra profiles are empty, a plain `up` starts just what's needed:
+### kind (with ACE port mappings)
+
+If your existing cluster is a kind cluster created with
+`local-personal-workspace/kind-agentcert.yaml`, the ACE `extraPortMappings` are
+already baked in and services are reachable at the usual `localhost` ports:
+
+| Service | URL |
+|---|---|
+| AgentCert UI | http://localhost:2001 |
+| Langfuse | http://localhost:4000 |
+| Certifier | http://localhost:18000/docs |
+| LiteLLM | http://localhost:14000 |
+| MongoDB | localhost:27017 |
+
+### minikube / k3s / other local clusters
+
+NodePort services are on the cluster node's IP, not `localhost`. Use
+`kubectl port-forward` to map them to your local machine:
 
 ```bash
-docker compose up -d cluster-init auth graphql web
+# Run in the background (or use separate terminals):
+kubectl port-forward -n ace svc/web          2001:32001 &
+kubectl port-forward -n ace svc/langfuse-web 4000:3000  &
+kubectl port-forward -n ace svc/certifier    18000:8000 &
+kubectl port-forward -n ace svc/litellm      14000:14000 &
+kubectl port-forward -n ace svc/mongodb      27017:27017 &
 ```
 
-What happens:
-
-1. **`cluster-init`** verifies your kube context and writes a world-readable copy of your kubeconfig into a shared volume (`~/.kube/config` is typically `0600` and unreadable by the container's user).
-2. **`auth`** starts on :3000 / :3030 and connects to your existing mongo.
-3. **`graphql`** starts on :8081 / :8082, reads the shared kubeconfig, and can reach your cluster's API server.
-4. **`web`** serves the UI on :2001.
+Then access the same `localhost` URLs as above.
 
 ---
 
 ## 4. Verify
 
 ```bash
-docker compose ps
-curl -s -o /dev/null -w "web   %{http_code}\n" http://localhost:2001/
-curl -s -o /dev/null -w "api   %{http_code}\n" http://localhost:2001/api/
-
-# graphql can reach your cluster:
-docker exec -u 65534 agentcert-graphql kubectl --kubeconfig=/kube/config get nodes
+kubectl get pods -n ace           # all Running
+curl -s -o /dev/null -w "UI  %{http_code}\n" http://localhost:2001/
 ```
 
 Open **[http://localhost:2001](http://localhost:2001)** and log in (`admin` / `litmus`).
@@ -86,23 +94,13 @@ Open **[http://localhost:2001](http://localhost:2001)** and log in (`admin` / `l
 
 ## 5. Next: Run an Experiment
 
-Your cluster may already have the chaos infrastructure installed. If not, follow **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})** to create an environment, enable chaos, apply the infra YAML, and run an experiment.
+Your cluster may already have chaos infrastructure installed. If not, follow
+**[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**
+to create an environment, enable chaos, apply the infra YAML, and run an experiment.
 
 ---
 
-## Notes & Gotchas
+## Notes
 
-<div class="callout callout-warning">
-<span class="callout-title">kubeconfig permissions</span>
-If graphql logs <code>unable to load in-cluster configuration, KUBERNETES_SERVICE_HOST ... must be defined</code>, it couldn't read your kubeconfig. <code>cluster-init</code> handles this by publishing a <code>0644</code> copy — make sure it ran successfully: <code>docker logs ace-cluster-init</code>.
-</div>
-
-- **minikube/k3s gateway IP:** the `172.26.0.1` references assume the kind network gateway. For other clusters, find the right host IP (`docker network inspect <net> | grep Gateway`, or your host LAN IP) and update the `172.26.0.1` values in `.env`.
-- **Switching back from a fresh test:** if you ran [route 2]({{ "/setup/route-2-fresh-kind.html" | relative_url }}) in the isolated `acefresh` project, stop it and restart your originals:
-  ```bash
-  docker compose -p acefresh -f docker-compose.yml -f compose/fresh.override.yml down
-  docker start agentcert-control-plane agentcert-mongo litellm-proxy \
-    langfuse-langfuse-web-1 langfuse-langfuse-worker-1 langfuse-clickhouse-1 \
-    langfuse-postgres-1 langfuse-minio-1 langfuse-redis-1
-  docker compose up -d cluster-init auth graphql web
-  ```
+- **Re-running setup** — `./scripts/setup.sh` is idempotent. Running it again updates the `ace-env` Secret and re-applies all manifests (no-op if nothing changed).
+- **Port conflicts** — if you have existing NodePort services on the same NodePorts (32001, 32400, etc.), edit `deploy/k8s/` service manifests to use different NodePorts before applying.

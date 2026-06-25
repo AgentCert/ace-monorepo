@@ -1,0 +1,73 @@
+# =============================================================================
+# AgentCert authentication service
+#   REST  → :3000   (host :3000 via NodePort 32003)
+#   gRPC  → :3030   (host :3030 via NodePort 32030)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      containers:
+        - name: auth
+          image: agentcert/agentcert-auth:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+            - containerPort: 3030
+          envFrom:
+            - secretRef:
+                name: ace-env
+          env:
+            # Per-service ports (not in the secret — override to ensure correct values)
+            - name: REST_PORT
+              value: "3000"
+            - name: GRPC_PORT
+              value: "3030"
+            # MongoDB via cluster service (override host-IP from secret)
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_PASSWORD
+                  optional: true
+            - name: DB_SERVER
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/?replicaSet=rs0&authSource=admin"
+            # Also override MONGO_CONNECTION_STRING so auth doesn't fall back to localhost
+            - name: MONGO_CONNECTION_STRING
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/agentcert?authSource=admin&directConnection=true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: ace
+spec:
+  selector:
+    app: auth
+  type: NodePort
+  ports:
+    - name: rest
+      port: 3000
+      targetPort: 3000
+      nodePort: 32003
+    - name: grpc
+      port: 3030
+      targetPort: 3030
+      nodePort: 32030

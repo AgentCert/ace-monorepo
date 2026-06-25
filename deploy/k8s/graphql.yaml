@@ -1,0 +1,147 @@
+# =============================================================================
+# AgentCert GraphQL control plane
+#   REST  → :8081   (host :8081 via NodePort 32081)
+#   gRPC  → :8082   (host :8082 via NodePort 32082)
+#
+# Runs as the `graphql` ServiceAccount (cluster-admin, see 01-rbac.yaml).
+# KUBECONFIG is intentionally unset so the Go client falls back to in-cluster
+# config (pod ServiceAccount token) — no kubeconfig file needed.
+#
+# agent-charts and app-charts are accessed via the hostPath volume
+# /srv/projects/ace-monorepo (mounted into kind nodes via extraMounts).
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphql
+  namespace: ace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: graphql
+  template:
+    metadata:
+      labels:
+        app: graphql
+    spec:
+      serviceAccountName: graphql
+      containers:
+        - name: graphql
+          image: agentcert/agentcert-graphql:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+            - containerPort: 8082
+          envFrom:
+            - secretRef:
+                name: ace-env
+          env:
+            # Per-service ports
+            - name: REST_PORT
+              value: "8081"
+            - name: GRPC_PORT
+              value: "8082"
+            # MongoDB via cluster service
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: MONGODB_PASSWORD
+                  optional: true
+            - name: DB_SERVER
+              value: "mongodb://$(DB_USER):$(DB_PASSWORD)@mongodb:27017/?replicaSet=rs0&authSource=admin"
+            # Auth service is a K8s service in the same namespace, not localhost
+            - name: LITMUS_AUTH_GRPC_ENDPOINT
+              value: "auth"
+            - name: LITMUS_AUTH_GRPC_PORT
+              value: "3030"
+            # In-cluster agents call back via the K8s service (not the host IP)
+            - name: CHAOS_CENTER_UI_ENDPOINT
+              value: "http://graphql.ace.svc.cluster.local:8081"
+            # Allow WebSocket/HTTP connections from in-cluster pods (subscriber, flash-agent)
+            # The default only allows localhost and litmuschaos.io, which blocks in-cluster
+            # service-name origins (graphql.ace.svc.cluster.local, *.litmus.svc.cluster.local).
+            - name: ALLOWED_ORIGINS
+              value: "^(http://|https://|)litmuschaos.io(:[0-9]+|)?,^(http://|https://|)localhost(:[0-9]+|)?,^(http://|https://|ws://|wss://|)[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$,^[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$"
+            # LiteLLM is a K8s service; the flash-agent reaches it by service name
+            # Full cross-namespace DNS — flash-agent runs in sock-shop/litmus, not ace
+            - name: OPENAI_BASE_URL
+              value: "http://litellm.ace.svc.cluster.local:14000/v1"
+            # Certifier endpoints (K8s service)
+            - name: CERTIFIER_BASE_URL
+              value: "http://certifier:8000"
+            - name: CERTIFICATE_PDF_BASE_URL
+              value: "http://certifier:8000"
+            # Charts directories (available via the hostPath volume below)
+            - name: DEFAULT_AGENT_HUB_PATH
+              value: "/srv/projects/ace-monorepo/agent-charts"
+            - name: DEFAULT_APP_HUB_PATH
+              value: "/srv/projects/ace-monorepo/app-charts"
+            # Do not attempt to re-read .env from the host filesystem
+            - name: AGENTCERT_ENV_FILE
+              value: ""
+            # Use the host CA bundle for git-clone TLS inside the container
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/certs/ca-certificates.crt"
+            # Map CHAOS_* → LITMUS_CHAOS_* (docker-compose did this mapping; K8s must do it explicitly)
+            - name: LITMUS_CHAOS_OPERATOR_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: CHAOS_OPERATOR_IMAGE
+                  optional: true
+            - name: LITMUS_CHAOS_RUNNER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: CHAOS_RUNNER_IMAGE
+                  optional: true
+            - name: LITMUS_CHAOS_EXPORTER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: CHAOS_EXPORTER_IMAGE
+                  optional: true
+          volumeMounts:
+            # Repo bind-mount (kind node's extraMount makes this available)
+            - name: repo
+              mountPath: /srv/projects/ace-monorepo
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              readOnly: true
+      volumes:
+        - name: repo
+          hostPath:
+            path: /srv/projects/ace-monorepo
+            type: Directory
+        - name: ca-certs
+          hostPath:
+            path: /etc/ssl/certs/ca-certificates.crt
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: graphql
+  namespace: ace
+spec:
+  selector:
+    app: graphql
+  type: NodePort
+  ports:
+    - name: rest
+      port: 8081
+      targetPort: 8081
+      nodePort: 32081
+    - name: grpc
+      port: 8082
+      targetPort: 8082
+      nodePort: 32082

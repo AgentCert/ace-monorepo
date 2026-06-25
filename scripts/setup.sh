@@ -165,8 +165,8 @@ echo
 
 # --- OPTIONAL: cluster + infra modes ---------------------------------------
 echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
-echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind · cloud=AKS/EKS/GKE${NC}"
-CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh/cloud)')"
+echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind${NC}"
+CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
@@ -181,44 +181,12 @@ detect_kind_gw() {
 {{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
 }
 
-# In-cluster pods call back to the control plane on this host. For kind/local
-# that's the kind-network gateway; for cloud the VM must be reachable at a
-# routable IP, so ask for it.
-AZURE_CONFIG_DIR=""; AWS_CONFIG_DIR=""; GCLOUD_CONFIG_DIR=""
-if [[ "${CLUSTER_MODE}" == cloud ]]; then
-    CALLBACK_HOST="$(ask HOST_PUBLIC_IP 'VM public/reachable IP (in-cluster pods call back here)')"
-    CALLBACK_HOST="$(echo "${CALLBACK_HOST}" | tr -d '[:space:]')"
-
-    # Auto-detect cloud provider credential directories so cluster-init can use
-    # exec-auth kubeconfigs (Azure AD/kubelogin, AWS IAM, GKE) without --admin.
-    # The dirs are mounted read-only into the cluster-init container.
-    echo
-    echo -e "   ${DIM}Detecting cloud provider credentials for exec-auth support…${NC}"
-    if [[ -d "${HOME}/.azure" ]]; then
-        AZURE_CONFIG_DIR="${HOME}/.azure"
-        ok "Azure credentials detected → AZURE_CONFIG_DIR=${AZURE_CONFIG_DIR}"
-        echo -e "   ${DIM}(kubelogin will use these — no --admin flag needed)${NC}"
-    fi
-    if [[ -d "${HOME}/.aws" ]]; then
-        AWS_CONFIG_DIR="${HOME}/.aws"
-        ok "AWS credentials detected   → AWS_CONFIG_DIR=${AWS_CONFIG_DIR}"
-    fi
-    if [[ -d "${HOME}/.config/gcloud" ]]; then
-        GCLOUD_CONFIG_DIR="${HOME}/.config/gcloud"
-        ok "GCP credentials detected   → GCLOUD_CONFIG_DIR=${GCLOUD_CONFIG_DIR}"
-    fi
-    if [[ -z "${AZURE_CONFIG_DIR}" && -z "${AWS_CONFIG_DIR}" && -z "${GCLOUD_CONFIG_DIR}" ]]; then
-        warn "No cloud credentials found in ~/.azure, ~/.aws, or ~/.config/gcloud."
-        warn "If your kubeconfig uses exec-auth, log in first (az login / aws sso login / gcloud auth login)."
-    fi
+CALLBACK_HOST="$(detect_kind_gw || true)"
+if [[ -n "${CALLBACK_HOST}" ]]; then
+    echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
 else
-    CALLBACK_HOST="$(detect_kind_gw || true)"
-    if [[ -n "${CALLBACK_HOST}" ]]; then
-        echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
-    else
-        CALLBACK_HOST="172.26.0.1"
-        warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
-    fi
+    CALLBACK_HOST="172.26.0.1"
+    warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
 fi
 echo
 
@@ -228,9 +196,7 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _AZ_ALIAS="$AZ_ALIAS" _AZ_APIVER="$AZ_APIVER" \
        _GEMINI_KEY="$GEMINI_KEY" _OPENROUTER_KEY="$OPENROUTER_KEY" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
-       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
-       _AZURE_CONFIG_DIR="$AZURE_CONFIG_DIR" _AWS_CONFIG_DIR="$AWS_CONFIG_DIR" \
-       _GCLOUD_CONFIG_DIR="$GCLOUD_CONFIG_DIR"
+       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN"
 python3 - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
@@ -305,24 +271,10 @@ if cb:
     # LiteLLM gateway and Langfuse via the same pod->host gateway IP.
     sets["LITELLM_HOST"]            = f"http://{cb}:14000"
     sets["LANGFUSE_HOST"]           = f"http://{cb}:4000"
-    if cm == "cloud":
-        sets["HOST_PUBLIC_IP"] = cb
-
-# ── Cloud provider credential dirs (exec-auth support) ────────────────────────
-# Written only when non-empty so non-cloud users never get these keys in .env.
-for env_key, env_var in [
-    ("AZURE_CONFIG_DIR",  "_AZURE_CONFIG_DIR"),
-    ("AWS_CONFIG_DIR",    "_AWS_CONFIG_DIR"),
-    ("GCLOUD_CONFIG_DIR", "_GCLOUD_CONFIG_DIR"),
-]:
-    val = os.environ.get(env_var, "")
-    if val:
-        sets[env_key] = val
 
 # WebSocket origin allow-list (graphql checks the subscriber's Host against this).
 # Must include the host IP in-cluster pods connect from — kind gateway (172.*),
-# pod CIDR (10.*), LAN (192.168.*), plus the explicit callback host (e.g. a cloud
-# public IP). Otherwise the subscriber gets "websocket: bad handshake".
+# pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
 host_alt = ("|" + re.escape(cb)) if cb else ""
 sets["ALLOWED_ORIGINS"] = (
     r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
@@ -372,12 +324,13 @@ echo -e "  Cluster mode      : ${BOLD}${CLUSTER_MODE}${NC}"
 echo -e "  Infra             : MongoDB + Langfuse + LiteLLM run locally ${DIM}(defaults; edit .env to change)${NC}"
 echo -e "${CYAN}-------------------------------------------------------${NC}"
 echo
-echo -e "Next:  ${BOLD}docker compose up -d${NC}    ${DIM}then open http://localhost:2001 (admin / litmus)${NC}"
+echo -e "Next:  ${BOLD}./scripts/setup.sh${NC} then answer Y to deploy, or run ${BOLD}kubectl get pods -n ace${NC}"
 echo -e "Docs:  ${DIM}docs/setup/  ·  configuration & ports: docs/setup/configuration.md${NC}"
 echo
 
-# --- optional: bring it up now ---------------------------------------------
-# Set or replace KEY=VALUE in .env (used to remap ports on conflict).
+# --- K8s deployment helpers -------------------------------------------------
+
+# set_env KEY VALUE — set or replace a key in .env
 set_env() {
     local k="$1" v="$2"
     if grep -qE "^${k}=" "${ENV_FILE}"; then
@@ -395,220 +348,246 @@ PY
     fi
 }
 
-# Replace ONLY the host in an http(s)/mongodb URL env var, preserving the
-# scheme, any user:pass@, the port and path. Used to retarget pod->host
-# callback URLs at the real kind gateway without clobbering remapped ports.
-rehost() {
-    local k="$1" h="$2"
-    grep -qE "^${k}=" "${ENV_FILE}" || return 0
-    python3 - "${ENV_FILE}" "$k" "$h" <<'PY'
-import sys, re
-path, k, h = sys.argv[1:4]
-ls = open(path).read().splitlines()
-for i, l in enumerate(ls):
-    m = re.match(rf'^{re.escape(k)}=(.*)$', l)
-    if m:
-        v = re.sub(r'(//(?:[^/@]+@)?)[^:/]+', r'\g<1>' + h, m.group(1), count=1)
-        ls[i] = f"{k}={v}"
-open(path, "w").write("\n".join(ls) + "\n")
-PY
+# Patch .env so in-cluster pods use K8s service DNS names instead of host IPs.
+# This must run before the Secret is created from .env.
+k8s_env_patch() {
+    local mn_user mn_pass mn_db
+    mn_user="$(grep -m1 '^MONGODB_USERNAME=' "${ENV_FILE}" | cut -d= -f2- || echo admin)"
+    mn_pass="$(grep -m1 '^MONGODB_PASSWORD=' "${ENV_FILE}" | cut -d= -f2- || echo 1234)"
+    mn_db="$(grep  -m1 '^MONGODB_DATABASE=' "${ENV_FILE}" | cut -d= -f2- || echo agentcert)"
+
+    # MongoDB: replace host IP with K8s service name; keep directConnection=true
+    set_env DB_SERVER \
+        "mongodb://${mn_user}:${mn_pass}@mongodb:27017/?replicaSet=rs0&authSource=admin"
+    set_env MONGODB_CONNECTION_STRING \
+        "mongodb://${mn_user}:${mn_pass}@mongodb:27017/${mn_db}?authSource=admin&directConnection=true"
+    set_env CERTIFIER_MONGODB_URI \
+        "mongodb://${mn_user}:${mn_pass}@mongodb:27017/${mn_db}?authSource=admin&directConnection=true"
+
+    # In-cluster agents call back to graphql via the K8s service
+    set_env SUBSCRIBER_CALLBACK_URL "http://graphql.ace.svc.cluster.local:8081"
+    set_env SERVER_ADDR             "http://graphql.ace.svc.cluster.local:8081/query"
+    set_env PORTAL_ENDPOINT         "http://graphql.ace.svc.cluster.local:8081"
+
+    # Auth gRPC: graphql talks to auth by service name, not localhost
+    set_env LITMUS_AUTH_GRPC_ENDPOINT "auth"
+
+    # LiteLLM: in-cluster pods reach it by service name (container port 4000,
+    # but the K8s service exposes port 14000 → targetPort 4000)
+    set_env LITELLM_HOST "http://litellm:14000"
+
+    # Langfuse: certifier/litellm reach it by service name (container port 3000)
+    set_env LANGFUSE_HOST         "http://langfuse-web:3000"
+    set_env LANGFUSE_HOST_COMPOSE "http://langfuse-web:3000"
+
+    # Certifier: graphql calls back to certifier by service name
+    set_env CERTIFIER_BASE_URL       "http://certifier:8000"
+    set_env CERTIFICATE_PDF_BASE_URL "http://certifier:8000"
+
+    # Postgres (Langfuse): default dev credentials
+    set_env POSTGRES_USER     "postgres"
+    set_env POSTGRES_PASSWORD "postgres"
+    set_env POSTGRES_DB       "postgres"
+
+    # ClickHouse (Langfuse): default dev credentials
+    set_env CLICKHOUSE_USER     "default"
+    set_env CLICKHOUSE_PASSWORD "clickhouse"
+
+    # Redis (Langfuse): must match --requirepass arg on the redis server
+    set_env REDIS_AUTH "myredissecret"
+
+    # Langfuse web (Next.js Auth)
+    set_env NEXTAUTH_URL    "http://localhost:4000"
+    set_env NEXTAUTH_SECRET "mysecret"
+    set_env SALT            "mysalt"
+    set_env ENCRYPTION_KEY  "0000000000000000000000000000000000000000000000000000000000000000"
+
+    # MinIO (Langfuse S3 storage)
+    set_env MINIO_ROOT_USER     "minio"
+    set_env MINIO_ROOT_PASSWORD "miniosecret"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_BUCKET             "langfuse"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_REGION             "auto"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID      "minio"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY  "miniosecret"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE   "true"
+    set_env LANGFUSE_S3_EVENT_UPLOAD_PREFIX             "events/"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_BUCKET             "langfuse"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_REGION             "auto"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID      "minio"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY  "miniosecret"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE   "true"
+    set_env LANGFUSE_S3_MEDIA_UPLOAD_PREFIX             "media/"
+    set_env LANGFUSE_S3_BATCH_EXPORT_ENABLED            "false"
+    set_env LANGFUSE_S3_BATCH_EXPORT_BUCKET             "langfuse"
+    set_env LANGFUSE_S3_BATCH_EXPORT_REGION             "auto"
+    set_env LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID      "minio"
+    set_env LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY  "miniosecret"
+    set_env LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE   "true"
+    set_env LANGFUSE_S3_BATCH_EXPORT_PREFIX             "exports/"
+
+    ok "Patched .env with K8s service DNS names."
 }
 
-# Runs `docker compose up -d` and, on failure, resolves the three common causes:
-# container-name conflicts (auto-remove + retry), host-port conflicts (offer to
-# stop the holder OR remap to a free port written into .env), and dependency
-# failures (report + point at logs). Loops until clean or the user opts out.
-compose_up() {
-    # Stream live progress (tee) so a slow fresh bring-up — kind creation, mongo
-    # health, image pulls — never looks frozen, while capturing the log to detect
-    # container-name conflicts. Compose reports conflicts a few at a time, so we
-    # LOOP: clear each round's conflicts and retry until the up is conflict-free.
-    # One confirmation up front, then it auto-clears subsequent conflicts.
-    local log auto=0 tries=0 conflicts c owner ans ports result=ok svc up_flags=""
-    log="$(mktemp)"
-    echo -e "${DIM}(streaming docker compose output — a fresh kind bring-up can take several minutes)${NC}"
-    while true; do
-        tries=$((tries + 1))
-        if [[ "${tries}" -gt 20 ]]; then
-            warn "Giving up after ${tries} attempts — resolve the issues above, then: docker compose up -d"
-            result=stuck; break
-        fi
-        # ${up_flags} becomes --force-recreate after a port is freed/remapped, so
-        # the new binding is applied instead of reusing a stale container.
-        ( cd "${REPO_ROOT}" && docker compose up -d ${up_flags} ) 2>&1 | tee "${log}" || true
+# Ensure the kind cluster exists and has the port mappings + repo extraMount
+# required for the K8s deployment. Recreates the cluster if the config has
+# changed (new port mappings / extraMounts not present on the existing node).
+ensure_kind_cluster() {
+    local kind_cfg="${REPO_ROOT}/local-personal-workspace/kind-agentcert.yaml"
+    local cluster_name="${KIND_CLUSTER_NAME:-agentcert}"
 
-        # (a) container NAME conflict → remove the offending container(s) + retry
-        if grep -q 'is already in use' "${log}"; then
-            if [[ "${tries}" -ge 12 ]]; then
-                warn "Still hitting name conflicts after ${tries} attempts — resolve manually."
-                result=namestuck; break
-            fi
-            mapfile -t conflicts < <(grep -oE 'container name "/[^"]+"' "${log}" \
-                | sed -E 's#.*"/([^"]+)".*#\1#' | sort -u)
-            if [[ "${auto}" -eq 0 ]]; then
-                echo
-                warn "Container name(s) already in use by other containers:"
-                for c in "${conflicts[@]}"; do
-                    owner="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project"}}' "$c" 2>/dev/null)"
-                    echo -e "    ${BOLD}${c}${NC} ${DIM}(project: ${owner:-standalone})${NC}"
-                done
-                echo -e "${DIM}(more may surface as the bring-up proceeds; answering yes clears them too)${NC}"
-                read -rp "$(echo -e "Remove conflicting container(s) and retry until clean? ${DIM}[y/N]${NC}: ")" ans
-                [[ "${ans}" =~ ^[Yy] ]] || { warn "Left in place. Remove/rename them, then: docker compose up -d"; result=declined; break; }
-                auto=1
-            fi
-            docker rm -f "${conflicts[@]}" >/dev/null 2>&1 || true
-            ok "Removed: ${conflicts[*]} — retrying…"
-            continue
-        fi
+    # Check whether the current cluster node already has the ACE port bindings
+    # (nodePort 32001 → host 2001 is the canary). If not, recreate the cluster.
+    local has_ace_ports
+    has_ace_ports="$(docker inspect "${cluster_name}-control-plane" 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin)[0]; \
+          print('yes' if '32001/tcp' in d.get('HostConfig',{}).get('PortBindings',{}) else 'no')" \
+        2>/dev/null || echo "no")"
 
-        # (b) host PORT conflict → per port, offer to stop the holder OR remap to
-        #     a free port (written into .env), then retry.
-        if grep -qE 'port is already allocated|Bind for [0-9.]+:[0-9]+ failed' "${log}"; then
-            mapfile -t ports < <(grep -oE 'Bind for [0-9.]+:[0-9]+ failed' "${log}" \
-                | grep -oE ':[0-9]+ ' | tr -d ': ' | sort -u)
-            local pchanged=0 p holder pvar pvar2 pdesc newp
-            for p in "${ports[@]}"; do
-                # map the busy host port → the .env knob(s) that control it
-                pvar=""; pvar2=""; pdesc=""
-                case "$p" in
-                    4000)  pvar=LANGFUSE_PORT; pvar2=LANGFUSE_HOST;  pdesc="Langfuse UI/API" ;;
-                    9090)  pvar=MINIO_API_PORT;                      pdesc="Langfuse MinIO" ;;
-                    14000) pvar=LITELLM_PORT;  pvar2=LITELLM_HOST;   pdesc="LiteLLM proxy" ;;
-                    27017) pvar=MONGO_PORT;     pvar2=DB_SERVER;     pdesc="MongoDB" ;;
-                    8000)  pvar=API_PORT;                            pdesc="Certifier API" ;;
-                    *)     pdesc="(no .env knob)" ;;
-                esac
-                holder="$(docker ps --filter "publish=${p}" --format '{{.Names}}' 2>/dev/null | head -1)"
-                echo
-                warn "Port ${p} (${pdesc}) is in use${holder:+ by container '${holder}'}."
-                if [[ -z "$pvar" ]]; then
-                    echo -e "  ${DIM}No .env port knob for ${p} — free it manually, then re-run.${NC}"
-                    continue
-                fi
-                echo -e "    ${BOLD}m${NC} = move ACE to a free port (sets ${pvar} in .env)"
-                [[ -n "$holder" ]] && echo -e "    ${BOLD}s${NC} = stop the container '${holder}' that holds ${p}"
-                echo -e "    ${BOLD}k${NC} = skip"
-                read -rp "  choice for ${p} [m/s/k]: " ans
-                case "$ans" in
-                    m|M)
-                        read -rp "  new ${pvar} (free port): " newp
-                        newp="$(echo "${newp}" | tr -d '[:space:]')"
-                        if [[ -n "$newp" ]]; then
-                            set_env "$pvar" "$newp"
-                            # keep the matching host/URL var in sync
-                            case "$pvar2" in
-                                LANGFUSE_HOST) set_env LANGFUSE_HOST "http://${CALLBACK_HOST:-172.26.0.1}:${newp}" ;;
-                                LITELLM_HOST)  set_env LITELLM_HOST  "http://${CALLBACK_HOST:-172.26.0.1}:${newp}" ;;
-                                DB_SERVER)     warn "  Remember to update the port in DB_SERVER (Mongo client URL) to ${newp}." ;;
-                            esac
-                            ok "  Set ${pvar}=${newp}"; pchanged=1
-                        fi ;;
-                    s|S)
-                        if [[ -n "$holder" ]] && docker stop "$holder" >/dev/null 2>&1; then
-                            ok "  Stopped ${holder}"; pchanged=1
-                        else
-                            warn "  Could not stop ${holder:-(host process — free it manually)}"
-                        fi ;;
-                    *) warn "  Skipped ${p}." ;;
-                esac
-            done
-            if [[ "$pchanged" -eq 1 ]]; then
-                up_flags="--force-recreate"   # ensure freed/remapped ports are applied (no stale-container reuse)
-                ok "Retrying with updated config (force-recreate)…"; continue
-            fi
-            warn "No changes made — resolve the port(s) above, then: docker compose up -d"
-            echo -e "  ${DIM}(or set *_MODE=external to reuse an existing service — see docs/setup/configuration.md)${NC}"
-            result=port; break
-        fi
-
-        # (c) a dependency/one-shot failed (e.g. cluster-init couldn't reach k8s)
-        if grep -qE "didn't complete successfully|dependency failed to start" "${log}"; then
-            svc="$(grep -oE 'service "[^"]+" didn'"'"'t complete successfully' "${log}" \
-                | sed -E 's/service "([^"]+)".*/\1/' | sort -u | tr '\n' ' ')"
-            echo
-            warn "A dependency failed to start: ${svc:-see output above}"
-            if echo "${svc}" | grep -q cluster-init; then
-                echo -e "  cluster-init couldn't get a working Kubernetes context. Check it:"
-                echo -e "    ${BOLD}docker logs ace-cluster-init${NC}"
-                echo -e "  Common cause: CLUSTER_MODE=local/cloud but no reachable cluster, or a"
-                echo -e "  stopped kind cluster. For a fresh local cluster: ${BOLD}kind delete cluster --name agentcert${NC} then re-run,"
-                echo -e "  or set ${BOLD}CLUSTER_MODE=fresh${NC} in .env."
-            else
-                echo -e "  Inspect it: ${BOLD}docker logs <that-container>${NC}"
-            fi
-            result=svcfail; break
-        fi
-
-        # (d) compose reported success — but a container can still crash-loop on an
-        #     INTERNAL error (e.g. a port already bound *inside* host networking),
-        #     which never shows in the `up` output. Poll the actual states.
-        echo -e "${DIM}(verifying services stay healthy…)${NC}"
-        sleep 8
-        local bad
-        # `|| true` so a clean stack (grep finds nothing → exit 1) doesn't trip
-        # `set -e` and abort before the success summary.
-        bad="$( { cd "${REPO_ROOT}" && docker compose ps -a --format '{{.Name}}\t{{.State}}\t{{.Status}}' 2>/dev/null \
-            | grep -iE 'restarting|exited' \
-            | grep -viE 'cluster-init|mongo-init|mongo-keyfile|workspace-init'; } || true)"   # one-shots exit 0 on purpose
-        if [[ -n "$bad" ]]; then
-            echo
-            warn "These services started but are NOT staying up (crash-looping / exited):"
-            echo "${bad}" | sed -E 's/^/    /'
-            echo -e "  Inspect the failing one(s): ${BOLD}docker compose logs <name>${NC}  (e.g. docker logs agentcert-auth)"
-            echo -e "  ${DIM}Common cause on a shared box: a host port (3000/3030/8081/…) is held by another process — free it or move the matching *_PORT.${NC}"
-            result=unhealthy
-        fi
-        break
-    done
-    rm -f "${log}"
-
-    # Re-detect the kind gateway now that bring-up has created the kind network
-    # (on a fresh VM it didn't exist when we wrote .env). If it differs from what
-    # we wrote, retarget the pod->host callback URLs and recreate graphql so the
-    # in-cluster subscriber/agent use the correct per-VM address.
-    if [[ "${result}" == ok && "${CLUSTER_MODE}" != cloud ]]; then
-        local gw_now
-        gw_now="$(detect_kind_gw || true)"
-        if [[ -n "${gw_now}" && "${gw_now}" != "${CALLBACK_HOST}" ]]; then
-            warn "kind gateway is ${gw_now} (placeholder was ${CALLBACK_HOST}) — retargeting pod->host callbacks in .env."
-            rehost SUBSCRIBER_CALLBACK_URL "${gw_now}"
-            rehost SERVER_ADDR             "${gw_now}"
-            rehost PORTAL_ENDPOINT         "${gw_now}"
-            rehost LITELLM_HOST            "${gw_now}"
-            rehost LANGFUSE_HOST           "${gw_now}"
-            CALLBACK_HOST="${gw_now}"
-            ( cd "${REPO_ROOT}" && docker compose up -d --force-recreate graphql >/dev/null 2>&1 ) || true
-            ok "Retargeted callbacks at ${gw_now} and recreated graphql."
-        fi
+    if [[ "${has_ace_ports}" == "yes" ]]; then
+        ok "kind cluster '${cluster_name}' already has ACE port mappings — reusing it."
+        kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
+        return 0
     fi
-    echo
-    if [[ "${result}" == ok ]]; then
-        local lport luser lpass admu admp lmode
-        envval() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true; }
-        lport="$(envval LANGFUSE_PORT)";              lport="${lport:-4000}"
-        luser="$(envval LANGFUSE_INIT_USER_EMAIL)";   luser="${luser:-admin@agentcert.local}"
-        lpass="$(envval LANGFUSE_INIT_USER_PASSWORD)";lpass="${lpass:-agentcert-admin}"
-        admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
-        admp="$(envval ADMIN_PASSWORD)";              admp="${admp:-litmus}"
-        lmode="$(envval LANGFUSE_MODE)";              lmode="${lmode:-local}"
-        echo -e "${GREEN}=======================================================${NC}"
-        echo -e "${GREEN}  ✓ Stack is up${NC}"
-        echo -e "${GREEN}=======================================================${NC}"
-        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001        login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
-        if [[ "${lmode}" == local ]]; then
-            echo -e "  ${BOLD}Langfuse${NC}      http://localhost:${lport}        login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
-        else
-            echo -e "  ${BOLD}Langfuse${NC}      external (LANGFUSE_HOST in .env)"
+
+    if kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
+        warn "kind cluster '${cluster_name}' exists but lacks the ACE port mappings."
+        warn "It must be recreated (extraPortMappings can only be set at creation time)."
+        read -rp "$(echo -e "Delete and recreate cluster '${cluster_name}'? ${DIM}[y/N]${NC}: ")" _ans
+        if [[ ! "${_ans}" =~ ^[Yy] ]]; then
+            warn "Skipped cluster recreation — port mappings will NOT work until recreated."
+            return 0
         fi
-        echo -e "  ${BOLD}Certifier${NC}     http://localhost:8000/docs"
-        echo
-        echo -e "  ${DIM}status: docker compose ps   ·   logs: docker compose logs -f graphql${NC}"
-        echo -e "  ${DIM}stop:   docker compose down   (add -v to wipe data)${NC}"
-        echo -e "${GREEN}=======================================================${NC}"
+        kind delete cluster --name "${cluster_name}"
+    fi
+
+    echo -e "${DIM}Creating kind cluster '${cluster_name}' (this takes ~1-2 min)…${NC}"
+    if [[ -f "${kind_cfg}" ]]; then
+        kind create cluster --name "${cluster_name}" --config "${kind_cfg}"
     else
-        warn "Bring-up did NOT fully succeed (see above). After fixing, re-run: docker compose up -d"
+        warn "Kind config not found at ${kind_cfg} — creating with defaults (no port mappings)."
+        kind create cluster --name "${cluster_name}"
     fi
+    kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
+    ok "Kind cluster '${cluster_name}' created."
+}
+
+# Inject the real litellm_config.yaml into the litellm ConfigMap manifest
+# before applying, so model aliases and env-var references are up to date.
+patch_litellm_configmap() {
+    local src="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
+    local dst="${REPO_ROOT}/deploy/k8s/litellm.yaml"
+    if [[ ! -f "${src}" ]]; then
+        warn "litellm_config.yaml not found at ${src} — skipping ConfigMap patch."
+        return 0
+    fi
+    # Replace the placeholder value in the ConfigMap with the real config,
+    # indented by 4 spaces to match the YAML data block.
+    python3 - "${src}" "${dst}" <<'PY'
+import sys, re, textwrap
+src_path, dst_path = sys.argv[1], sys.argv[2]
+cfg = open(src_path).read()
+# indent every line by 4 spaces for the ConfigMap data block
+indented = textwrap.indent(cfg, "    ")
+dst = open(dst_path).read()
+dst = re.sub(
+    r'(  litellm_config\.yaml: \|)\n    # Placeholder.*?(?=\n---|\Z)',
+    r'\1\n' + indented.rstrip(),
+    dst,
+    flags=re.DOTALL,
+)
+open(dst_path, "w").write(dst)
+PY
+    ok "Injected litellm_config.yaml into ConfigMap."
+}
+
+# Deploy all K8s manifests into the cluster.
+k8s_deploy() {
+    local K8S_DIR="${REPO_ROOT}/deploy/k8s"
+    local NS="ace"
+    local envval
+    envval() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true; }
+
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  Deploying ACE stack to Kubernetes cluster${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo
+
+    # 1) Patch .env with K8s-specific service DNS names
+    k8s_env_patch
+
+    # 2) Ensure kind cluster is up with the right port mappings
+    ensure_kind_cluster
+
+    # 3) Verify kubectl is connected
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
+        return 1
+    fi
+
+    # 4) Inject real litellm_config into the ConfigMap manifest
+    patch_litellm_configmap
+
+    # 5) Apply namespace first
+    kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
+
+    # 6) Create (or update) the ace-env Secret from .env
+    #    --from-env-file parses KEY=VALUE; values may contain special chars.
+    echo -e "${DIM}Creating/updating ace-env Secret from .env…${NC}"
+    kubectl create secret generic ace-env \
+        --namespace "${NS}" \
+        --from-env-file="${ENV_FILE}" \
+        --dry-run=client -o yaml \
+        | kubectl apply -f - >/dev/null
+    ok "ace-env Secret up to date."
+
+    # 7) Apply RBAC
+    kubectl apply -f "${K8S_DIR}/01-rbac.yaml"
+
+    # 8) Apply all remaining manifests (alphabetical = deterministic order)
+    for f in "${K8S_DIR}"/mongodb.yaml \
+              "${K8S_DIR}"/auth.yaml \
+              "${K8S_DIR}"/graphql.yaml \
+              "${K8S_DIR}"/web.yaml \
+              "${K8S_DIR}"/litellm.yaml \
+              "${K8S_DIR}"/certifier.yaml \
+              "${K8S_DIR}"/langfuse.yaml; do
+        [[ -f "$f" ]] && kubectl apply -f "$f"
+    done
+    ok "Manifests applied."
+
+    # 9) Wait for core services to become ready (best-effort; don't abort on timeout)
+    echo
+    echo -e "${DIM}Waiting for MongoDB, auth, graphql, web, certifier to be ready (up to 5 min)…${NC}"
+    local svc
+    for svc in mongodb auth graphql web certifier; do
+        kubectl rollout status \
+            "$(kubectl get statefulset,deployment -n "${NS}" \
+                -o name 2>/dev/null | grep "/${svc}$" | head -1)" \
+            -n "${NS}" --timeout=300s 2>/dev/null \
+            && ok "${svc} ready" || warn "${svc} not yet ready — check: kubectl get pods -n ${NS}"
+    done
+
+    # 10) Print access URLs
+    local admu admp luser lpass
+    admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
+    admp="$(envval ADMIN_PASSWORD)";              admp="${admp:-litmus}"
+    luser="$(envval LANGFUSE_INIT_USER_EMAIL)";   luser="${luser:-admin@agentcert.local}"
+    lpass="$(envval LANGFUSE_INIT_USER_PASSWORD)";lpass="${lpass:-agentcert-admin}"
+    echo
+    echo -e "${GREEN}=======================================================${NC}"
+    echo -e "${GREEN}  ✓ ACE stack deployed to cluster${NC}"
+    echo -e "${GREEN}=======================================================${NC}"
+    echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+    echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
+    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"
+    echo -e "  ${BOLD}MongoDB${NC}       localhost:27017"
+    echo
+    echo -e "  ${DIM}status:  kubectl get pods -n ace${NC}"
+    echo -e "  ${DIM}logs:    kubectl logs -n ace deploy/graphql -f${NC}"
+    echo -e "  ${DIM}teardown: kind delete cluster --name ${KIND_CLUSTER_NAME:-agentcert}${NC}"
+    echo -e "${GREEN}=======================================================${NC}"
 }
 
 # --- build and push (if requested earlier) ----------------------------------
@@ -670,7 +649,7 @@ fi
 # git clones on hosts with umask 0077 create directories as 700, which blocks
 # uid 65534 from traversing into the repo at all.  Fix: repo root needs o+x
 # (traversal) so the container can reach the bind-mounted files; the .env also
-# needs o+r so the container can re-read it via AGENTCERT_ENV_FILE; and the
+# needs o+r so the container can re-read it via the hostPath volume; and the
 # charts subdirs need o+rX so ReadDir succeeds.  All idempotent.
 chmod o+x  "${REPO_ROOT}"          2>/dev/null && ok "Made repo root traversable for uid 65534 (graphql)" || true
 chmod o+r  "${ENV_FILE}"           2>/dev/null || true
@@ -680,7 +659,7 @@ for _charts_dir in "${REPO_ROOT}/agent-charts/charts" "${REPO_ROOT}/app-charts/c
     fi
 done
 
-read -rp "$(echo -e "Bring the stack up now with 'docker compose up -d'? ${DIM}[y/N]${NC}: ")" go
+read -rp "$(echo -e "Deploy the stack to the Kubernetes cluster now? ${DIM}[y/N]${NC}: ")" go
 if [[ "$go" =~ ^[Yy] ]]; then
-    compose_up
+    k8s_deploy
 fi

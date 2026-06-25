@@ -628,9 +628,9 @@ generate_helm_values_env() {
     local out="${REPO_ROOT}/deploy/helm/ace/values-env.yaml"
     local litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
     dedup_env "${ENV_FILE}"
-    python3 - "${ENV_FILE}" "${out}" "${litellm_cfg}" "${REPO_ROOT}" <<'PY'
+    python3 - "${ENV_FILE}" "${out}" "${litellm_cfg}" <<'PY'
 import sys, re, os
-env_path, out_path, litellm_cfg, repo_root = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+env_path, out_path, litellm_cfg = sys.argv[1], sys.argv[2], sys.argv[3]
 # collect keys in order, last value wins
 keys_order, seen = [], {}
 for ln in open(env_path).read().splitlines():
@@ -645,12 +645,9 @@ lines = ["env:"]
 for k in keys_order:
     v = seen[k].replace("'", "''")
     lines.append(f"  {k}: '{v}'")
-# repo hostPath (machine-specific; overrides values.yaml default)
-lines += ["", f"repo:", f"  hostPath: '{repo_root}'"]
 # litellm config (inline so --set-file is not needed)
 if os.path.isfile(litellm_cfg):
     cfg = open(litellm_cfg).read()
-    import textwrap
     lines += ["", "litellm:", "  config: |"]
     lines += ["    " + l for l in cfg.splitlines()]
 open(out_path, "w").write("\n".join(lines) + "\n")

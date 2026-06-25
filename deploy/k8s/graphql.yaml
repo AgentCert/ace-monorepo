@@ -7,8 +7,8 @@
 # KUBECONFIG is intentionally unset so the Go client falls back to in-cluster
 # config (pod ServiceAccount token) — no kubeconfig file needed.
 #
-# agent-charts and app-charts are accessed via the hostPath volume
-# /srv/projects/ace-monorepo (mounted into kind nodes via extraMounts).
+# agent-charts and app-charts are cloned at startup by the clone-charts
+# initContainer into /repo — no host bind-mount needed.
 # =============================================================================
 apiVersion: apps/v1
 kind: Deployment
@@ -26,21 +26,17 @@ spec:
         app: graphql
     spec:
       serviceAccountName: graphql
-      # Clone chart repos into a shared emptyDir so the pod is not bound to a
-      # specific node path. On Kind, extraMounts serve the same data via hostPath;
-      # on cloud clusters (AKS/EKS/GKE) this initContainer takes over.
       initContainers:
         - name: clone-charts
           image: alpine/git
-          command:
-            - sh
-            - -c
+          command: [sh, -c]
+          args:
             - |
-              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /mnt/repo/agent-charts
-              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /mnt/repo/app-charts
+              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
+              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
           volumeMounts:
             - name: repo
-              mountPath: /mnt/repo
+              mountPath: /repo
       containers:
         - name: graphql
           image: agentcert/agentcert-graphql:latest
@@ -96,9 +92,9 @@ spec:
               value: "http://certifier:8000"
             # Charts directories (available via the hostPath volume below)
             - name: DEFAULT_AGENT_HUB_PATH
-              value: "/srv/projects/ace-monorepo/agent-charts"
+              value: "/repo/agent-charts"
             - name: DEFAULT_APP_HUB_PATH
-              value: "/srv/projects/ace-monorepo/app-charts"
+              value: "/repo/app-charts"
             # Do not attempt to re-read .env from the host filesystem
             - name: AGENTCERT_ENV_FILE
               value: ""
@@ -127,7 +123,7 @@ spec:
           volumeMounts:
             # Repo bind-mount (kind node's extraMount makes this available)
             - name: repo
-              mountPath: /srv/projects/ace-monorepo
+              mountPath: /repo
               readOnly: true
             - name: ca-certs
               mountPath: /etc/ssl/certs/ca-certificates.crt

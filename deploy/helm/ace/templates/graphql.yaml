@@ -15,6 +15,16 @@ spec:
     spec:
       serviceAccountName: graphql
       initContainers:
+        - name: clone-charts
+          image: alpine/git
+          command: [sh, -c]
+          args:
+            - |
+              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
+              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
         - name: wait-for-mongodb
           image: {{ .Values.images.mongodb }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
@@ -87,9 +97,9 @@ spec:
             - name: CERTIFICATE_PDF_BASE_URL
               value: "http://certifier:8000"
             - name: DEFAULT_AGENT_HUB_PATH
-              value: "{{ .Values.repo.hostPath }}/agent-charts"
+              value: "/repo/agent-charts"
             - name: DEFAULT_APP_HUB_PATH
-              value: "{{ .Values.repo.hostPath }}/app-charts"
+              value: "/repo/app-charts"
             - name: AGENTCERT_ENV_FILE
               value: ""
             - name: SSL_CERT_FILE
@@ -114,16 +124,14 @@ spec:
                   optional: true
           volumeMounts:
             - name: repo
-              mountPath: {{ .Values.repo.hostPath }}
+              mountPath: /repo
               readOnly: true
             - name: ca-certs
               mountPath: /etc/ssl/certs/ca-certificates.crt
               readOnly: true
       volumes:
         - name: repo
-          hostPath:
-            path: {{ .Values.repo.hostPath }}
-            type: Directory
+          emptyDir: {}
         - name: ca-certs
           hostPath:
             path: /etc/ssl/certs/ca-certificates.crt

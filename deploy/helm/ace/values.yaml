@@ -45,17 +45,11 @@ storage:
   langfuseClickhouseLogs: 2Gi
   langfuseMinio:          10Gi
 
-# ── Host path for the repo bind-mount (graphql reads agent-charts / app-charts)
-repo:
-  hostPath: /srv/projects/ace-monorepo
-
 # ── LiteLLM config ────────────────────────────────────────────────────────────
-# Populated by scripts/setup.sh via:
-#   --set-file litellm.config=agentcert-stack/litellm-setup/litellm_config.yaml
-# Leave empty here — setup.sh always injects the real config.
+# Leave empty here — setup.sh injects the real config via values-env.yaml.
 litellm:
   config: |
-    # placeholder — injected by scripts/setup.sh via --set-file litellm.config=...
+    # placeholder — injected by scripts/setup.sh via values-env.yaml
     model_list: []
     general_settings:
       master_key: os.environ/LITELLM_MASTER_KEY

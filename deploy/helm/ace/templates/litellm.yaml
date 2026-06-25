@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ include "ace.namespace" . }}
+data:
+  litellm_config.yaml: |
+{{ .Values.litellm.config | indent 4 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: litellm-data
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.storage.litellm }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          image: {{ .Values.images.litellm }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          args: [--config, /app/config.yaml, --port, "4000", --detailed_debug]
+          ports:
+            - containerPort: 4000
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretName }}
+          env:
+            - name: LANGFUSE_HOST
+              value: "http://langfuse-web:3000"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: litellm_config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            tcpSocket:
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: litellm-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: {{ include "ace.namespace" . }}
+spec:
+  selector:
+    app: litellm
+  type: NodePort
+  ports:
+    - port: 14000
+      targetPort: 4000
+      nodePort: 31400

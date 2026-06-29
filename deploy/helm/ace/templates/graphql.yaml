@@ -20,11 +20,20 @@ spec:
           command: [sh, -c]
           args:
             - |
+              if [ -f /certs/ca-certificates.crt ]; then
+                git config --global http.sslCAInfo /certs/ca-certificates.crt
+              fi
               git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
               git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+          env:
+            - name: SSL_CERT_FILE
+              value: "/certs/ca-certificates.crt"
           volumeMounts:
             - name: repo
               mountPath: /repo
+            - name: ca-certs
+              mountPath: /certs
+              readOnly: true
         - name: wait-for-mongodb
           image: {{ .Values.images.mongodb }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
@@ -89,7 +98,11 @@ spec:
             - name: CHAOS_CENTER_UI_ENDPOINT
               value: "http://graphql.ace.svc.cluster.local:8081"
             - name: ALLOWED_ORIGINS
-              value: "^(http://|https://|)litmuschaos.io(:[0-9]+|)?,^(http://|https://|)localhost(:[0-9]+|)?,^(http://|https://|ws://|wss://|)[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$,^[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ALLOWED_ORIGINS
+                  optional: true
             - name: OPENAI_BASE_URL
               value: "http://litellm.ace.svc.cluster.local:14000/v1"
             - name: CERTIFIER_BASE_URL
@@ -103,7 +116,7 @@ spec:
             - name: AGENTCERT_ENV_FILE
               value: ""
             - name: SSL_CERT_FILE
-              value: "/etc/ssl/certs/ca-certificates.crt"
+              value: "/certs/ca-certificates.crt"
             - name: LITMUS_CHAOS_OPERATOR_IMAGE
               valueFrom:
                 secretKeyRef:
@@ -127,15 +140,15 @@ spec:
               mountPath: /repo
               readOnly: true
             - name: ca-certs
-              mountPath: /etc/ssl/certs/ca-certificates.crt
+              mountPath: /certs
               readOnly: true
       volumes:
         - name: repo
           emptyDir: {}
         - name: ca-certs
-          hostPath:
-            path: /etc/ssl/certs/ca-certificates.crt
-            type: File
+          configMap:
+            name: ca-certs
+            optional: true
 ---
 apiVersion: v1
 kind: Service

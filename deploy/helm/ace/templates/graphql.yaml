@@ -124,6 +124,8 @@ spec:
               value: {{ .Values.chartsBranch | default "main" | quote }}
             - name: AGENTCERT_ENV_FILE
               value: ""
+            - name: IMAGE_REGISTRY
+              value: {{ .Values.imageRegistry | quote }}
             - name: SSL_CERT_FILE
               value: "/certs/ca-certificates.crt"
             - name: LITMUS_CHAOS_OPERATOR_IMAGE

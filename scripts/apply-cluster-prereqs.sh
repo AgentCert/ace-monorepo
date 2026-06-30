@@ -109,3 +109,41 @@ kubectl patch serviceaccount default -n "${NS}" \
 echo
 echo -e "${GREEN}=== Pre-deploy fixes applied ===${NC}"
 echo -e "${DIM}Now run: helm upgrade --install ace deploy/helm/ace -n ace -f deploy/helm/ace/values-env.yaml --timeout 10m${NC}"
+
+# ── 6) Setup litmus namespace for JFrog image pulls ──────────────────────────
+echo
+echo -e "${BOLD}5) Litmus namespace setup${NC}"
+kubectl create namespace litmus --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
+    kubectl create secret docker-registry jfrog-registry \
+        --namespace litmus \
+        --docker-server="infyartifactory.jfrog.io" \
+        --docker-username="${JFROG_USER}" \
+        --docker-password="${JFROG_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+kubectl patch serviceaccount default -n litmus \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+# litmus-admin SA is created by the chaos infra — patch it if it exists
+kubectl patch serviceaccount litmus-admin -n litmus \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+ok "litmus namespace ready with jfrog-registry secret."
+
+# ── 7) Setup sock-shop namespace for JFrog image pulls ───────────────────────
+echo
+echo -e "${BOLD}6) Sock-shop namespace setup${NC}"
+kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
+    kubectl create secret docker-registry jfrog-registry \
+        --namespace sock-shop \
+        --docker-server="infyartifactory.jfrog.io" \
+        --docker-username="${JFROG_USER}" \
+        --docker-password="${JFROG_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+kubectl patch serviceaccount default -n sock-shop \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+ok "sock-shop namespace ready with jfrog-registry secret."
+
+echo
+echo -e "${GREEN}=== All namespace prerequisites applied ===${NC}"

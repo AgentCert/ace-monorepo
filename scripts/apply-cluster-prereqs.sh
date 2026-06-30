@@ -69,7 +69,7 @@ if [[ -d "$CA_DIR" ]] && ls "$CA_DIR"/*.crt >/dev/null 2>&1; then
     # Ensure certs are readable without sudo
     chmod a+r "$CA_DIR"/*.crt 2>/dev/null || true
     # Build a single CA bundle (system + corporate certs)
-    local bundle="/tmp/ace-ca-bundle.pem"
+    bundle="/tmp/ace-ca-bundle.pem"
     cp /etc/ssl/certs/ca-certificates.crt "$bundle" 2>/dev/null || : > "$bundle"
     cat "$CA_DIR"/*.crt >> "$bundle" 2>/dev/null || true
     # Create ConfigMap with single key 'ca-certificates.crt' (what SSL_CERT_FILE expects)

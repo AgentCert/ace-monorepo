@@ -25,8 +25,8 @@ spec:
               if [ -f /certs/ca-certificates.crt ]; then
                 git config --global http.sslCAInfo /certs/ca-certificates.crt
               fi
-              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts || true
-              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts || true
+              git clone --depth 1 -b {{ .Values.chartsBranch | default "main" }} https://github.com/AgentCert/agent-charts.git /repo/agent-charts || true
+              git clone --depth 1 -b {{ .Values.chartsBranch | default "main" }} https://github.com/AgentCert/app-charts.git    /repo/app-charts || true
               mkdir -p /repo/agent-charts/charts /repo/app-charts/charts
           env:
             - name: SSL_CERT_FILE
@@ -116,6 +116,12 @@ spec:
               value: "/repo/agent-charts"
             - name: DEFAULT_APP_HUB_PATH
               value: "/repo/app-charts"
+            - name: DEFAULT_AGENT_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
+            - name: DEFAULT_APP_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
+            - name: DEFAULT_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
             - name: AGENTCERT_ENV_FILE
               value: ""
             - name: SSL_CERT_FILE

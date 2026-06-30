@@ -8,6 +8,10 @@
 
 secretName: ace-env
 
+# Branch to clone for agent-charts, app-charts, and chaos-charts
+# Use "feature/docker-images-repository" for JFrog image references
+chartsBranch: "feature/docker-images-repository"
+
 # ── Environment variables (populated from .env by setup.sh) ──────────────────
 # scripts/setup.sh generates deploy/helm/ace/values-env.yaml with every
 # KEY: "value" from .env under this key, then passes -f values-env.yaml.

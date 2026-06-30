@@ -277,8 +277,10 @@ if cb:
 # pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
 host_alt = ("|" + re.escape(cb)) if cb else ""
 sets["ALLOWED_ORIGINS"] = (
-    r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
+    r"^(http://|https://|ws://|wss://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
     r"|172\.[0-9]+\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+"
+    r"|100\.78\.[0-9]+\.[0-9]+|100\.104\.[0-9]+\.[0-9]+"
+    r"|[a-z0-9.-]+\.svc\.cluster\.local"
     + host_alt + r")(:[0-9]+|)$"
 )
 
@@ -463,6 +465,52 @@ k8s_env_patch() {
     set_env LANGFUSE_S3_BATCH_EXPORT_PREFIX             "exports/"
 
     ok "Patched .env with K8s service DNS names."
+}
+
+# Build and apply the ca-certs ConfigMap from the system CA bundle + any
+# corporate proxy certs pointed to by CORPORATE_CA_CERT_DIR in .env.
+# This ConfigMap is mounted into pods (graphql, etc.) that need to make
+# outbound HTTPS calls (e.g. cloning chaos-charts from GitHub).
+apply_ca_certs_configmap() {
+    local ns="$1"
+    local ca_dir
+    ca_dir="$(grep -m1 '^CORPORATE_CA_CERT_DIR=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true)"
+
+    local bundle="/tmp/ace-ca-bundle.pem"
+
+    # Start with the system CA bundle
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        cp /etc/ssl/certs/ca-certificates.crt "${bundle}"
+    else
+        : > "${bundle}"
+    fi
+
+    # Append corporate proxy certs if CORPORATE_CA_CERT_DIR is set
+    if [[ -n "${ca_dir}" && -d "${ca_dir}" ]]; then
+        local cert_count=0
+        for crt in "${ca_dir}"/*.crt "${ca_dir}"/*.pem; do
+            if [[ -f "${crt}" ]]; then
+                sudo cat "${crt}" >> "${bundle}" 2>/dev/null || cat "${crt}" >> "${bundle}" 2>/dev/null || true
+                cert_count=$((cert_count + 1))
+            fi
+        done
+        if [[ ${cert_count} -gt 0 ]]; then
+            ok "Appended ${cert_count} corporate CA cert(s) from ${ca_dir}"
+        else
+            warn "CORPORATE_CA_CERT_DIR=${ca_dir} set but no .crt/.pem files found."
+        fi
+    fi
+
+    # Create/update the ConfigMap
+    if [[ -s "${bundle}" ]]; then
+        kubectl create configmap ca-certs -n "${ns}" \
+            --from-file=ca-certificates.crt="${bundle}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        ok "ca-certs ConfigMap created/updated in namespace '${ns}'."
+    else
+        warn "No CA bundle found — ca-certs ConfigMap not created."
+    fi
+    rm -f "${bundle}"
 }
 
 # Ensure the kind cluster exists and has the port mappings required for the
@@ -685,6 +733,10 @@ helm_deploy() {
     # 4) Generate values-env.yaml (helm reads this to create the ace-env Secret)
     echo -e "${DIM}Generating values-env.yaml from .env…${NC}"
     generate_helm_values_env
+
+    # 4b) Create/update ca-certs ConfigMap for TLS interception
+    kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
+    apply_ca_certs_configmap "${NS}"
 
     # 5) Run helm — it owns namespace, secret, and all workloads
     local helm_cmd=(

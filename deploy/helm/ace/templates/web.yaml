@@ -99,7 +99,7 @@ spec:
         runAsUser: 0
       containers:
         - name: web
-          image: {{ .Values.images.web }}
+          image: {{ include "ace.image" (dict "img" .Values.images.web "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 2001
@@ -118,11 +118,12 @@ kind: Service
 metadata:
   name: web
   namespace: {{ include "ace.namespace" . }}
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
 spec:
   selector:
     app: web
-  type: NodePort
+  type: LoadBalancer
   ports:
     - port: 2001
       targetPort: 2001
-      nodePort: 32001

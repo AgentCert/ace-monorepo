@@ -26,7 +26,7 @@ spec:
     spec:
       initContainers:
         - name: wait-for-mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -54,14 +54,14 @@ spec:
                   key: MONGODB_PASSWORD
                   optional: true
         - name: workspace-init
-          image: {{ .Values.images.busybox }}
+          image: {{ include "ace.image" (dict "img" .Values.images.busybox "reg" .Values.imageRegistry) }}
           command: [sh, -c, "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"]
           volumeMounts:
             - name: workspace
               mountPath: /ws
       containers:
         - name: certifier
-          image: {{ .Values.images.certifier }}
+          image: {{ include "ace.image" (dict "img" .Values.images.certifier "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 8000

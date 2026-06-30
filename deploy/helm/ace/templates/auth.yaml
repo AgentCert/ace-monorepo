@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: auth
-          image: {{ .Values.images.auth }}
+          image: {{ include "ace.image" (dict "img" .Values.images.auth "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 3000

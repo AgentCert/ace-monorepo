@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: {{ .Values.images.postgres }}
+          image: {{ include "ace.image" (dict "img" .Values.images.postgres "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 5432
@@ -52,6 +52,8 @@ spec:
               value: UTC
             - name: PGTZ
               value: UTC
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           readinessProbe:
             exec:
               command: [pg_isready, -U, postgres]
@@ -108,7 +110,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: {{ .Values.images.redis }}
+          image: {{ include "ace.image" (dict "img" .Values.images.redis "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [redis-server]
           args:
@@ -196,7 +198,7 @@ spec:
         fsGroup: 101
       containers:
         - name: clickhouse
-          image: {{ .Values.images.clickhouse }}
+          image: {{ include "ace.image" (dict "img" .Values.images.clickhouse "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 8123
@@ -280,9 +282,14 @@ spec:
       labels:
         app: minio
     spec:
+      securityContext:
+        runAsUser: 1000
+        fsGroup: 1000
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: minio
-          image: {{ .Values.images.minio }}
+          image: {{ include "ace.image" (dict "img" .Values.images.minio "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [sh]
           args:
@@ -355,7 +362,7 @@ spec:
     spec:
       containers:
         - name: langfuse-worker
-          image: {{ .Values.images.langfuseWorker }}
+          image: {{ include "ace.image" (dict "img" .Values.images.langfuseWorker "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           envFrom:
             - secretRef:
@@ -415,7 +422,7 @@ spec:
     spec:
       containers:
         - name: langfuse-web
-          image: {{ .Values.images.langfuseWeb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.langfuseWeb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 3000
@@ -493,11 +500,12 @@ kind: Service
 metadata:
   name: langfuse-web
   namespace: {{ include "ace.namespace" . }}
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
 spec:
   selector:
     app: langfuse-web
-  type: NodePort
+  type: LoadBalancer
   ports:
     - port: 3000
       targetPort: 3000
-      nodePort: 32400

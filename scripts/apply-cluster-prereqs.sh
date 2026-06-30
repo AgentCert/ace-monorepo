@@ -66,6 +66,8 @@ fi
 echo
 echo -e "${BOLD}2) Corporate CA Certificates${NC}"
 if [[ -d "$CA_DIR" ]] && ls "$CA_DIR"/*.crt >/dev/null 2>&1; then
+    # Ensure certs are readable without sudo
+    chmod a+r "$CA_DIR"/*.crt 2>/dev/null || true
     # Create ConfigMap from all .crt files in the directory
     kubectl create configmap ca-certs \
         --namespace "${NS}" \

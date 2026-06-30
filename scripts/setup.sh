@@ -490,7 +490,7 @@ apply_ca_certs_configmap() {
         local cert_count=0
         for crt in "${ca_dir}"/*.crt "${ca_dir}"/*.pem; do
             if [[ -f "${crt}" ]]; then
-                sudo cat "${crt}" >> "${bundle}" 2>/dev/null || cat "${crt}" >> "${bundle}" 2>/dev/null || true
+                cat "${crt}" >> "${bundle}" 2>/dev/null || true
                 cert_count=$((cert_count + 1))
             fi
         done
@@ -734,9 +734,8 @@ helm_deploy() {
     echo -e "${DIM}Generating values-env.yaml from .env…${NC}"
     generate_helm_values_env
 
-    # 4b) Create/update ca-certs ConfigMap for TLS interception
-    kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
-    apply_ca_certs_configmap "${NS}"
+    # 4b) ca-certs ConfigMap — run ./scripts/apply-cluster-prereqs.sh separately (needs sudo)
+    # Skipped here to avoid hanging on sudo password prompt.
 
     # 5) Run helm — it owns namespace, secret, and all workloads
     local helm_cmd=(

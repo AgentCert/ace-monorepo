@@ -293,8 +293,6 @@ spec:
       securityContext:
         runAsUser: 1000
         fsGroup: 1000
-      imagePullSecrets:
-        - name: jfrog-registry
       containers:
         - name: minio
           image: {{ include "ace.image" (dict "img" .Values.images.minio "reg" .Values.imageRegistry) }}

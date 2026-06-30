@@ -68,12 +68,17 @@ echo -e "${BOLD}2) Corporate CA Certificates${NC}"
 if [[ -d "$CA_DIR" ]] && ls "$CA_DIR"/*.crt >/dev/null 2>&1; then
     # Ensure certs are readable without sudo
     chmod a+r "$CA_DIR"/*.crt 2>/dev/null || true
-    # Create ConfigMap from all .crt files in the directory
+    # Build a single CA bundle (system + corporate certs)
+    local bundle="/tmp/ace-ca-bundle.pem"
+    cp /etc/ssl/certs/ca-certificates.crt "$bundle" 2>/dev/null || : > "$bundle"
+    cat "$CA_DIR"/*.crt >> "$bundle" 2>/dev/null || true
+    # Create ConfigMap with single key 'ca-certificates.crt' (what SSL_CERT_FILE expects)
     kubectl create configmap ca-certs \
         --namespace "${NS}" \
-        --from-file="$CA_DIR" \
+        --from-file=ca-certificates.crt="$bundle" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    ok "ca-certs ConfigMap created from ${CA_DIR}/*.crt"
+    rm -f "$bundle"
+    ok "ca-certs ConfigMap created (system + corporate bundle)"
 else
     warn "No .crt files found in ${CA_DIR} — skipping CA ConfigMap."
     echo -e "  ${DIM}Set CORPORATE_CA_CERT_DIR to your cert directory and re-run.${NC}"

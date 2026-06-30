@@ -55,8 +55,10 @@ if [[ -f "$SOCK_SHOP_VALUES" ]]; then
     "s|image: rabbitmq:|image: ${IMAGE_REGISTRY}/rabbitmq:|g" \
     "s|image: prom/prometheus:|image: ${IMAGE_REGISTRY}/prom/prometheus:|g" \
     "s|image: grafana/grafana:|image: ${IMAGE_REGISTRY}/grafana/grafana:|g" \
+    "s|image: litmuschaos/|image: ${IMAGE_REGISTRY}/litmuschaos/|g" \
     "s|image: registry.k8s.io/|image: ${IMAGE_REGISTRY}/|g" \
     "s|image: quay.io/containers/|image: ${IMAGE_REGISTRY}/|g" \
+    "s|image: quay.io/|image: ${IMAGE_REGISTRY}/|g" \
     "s|image: agentcert/|image: ${IMAGE_REGISTRY}/agentcert/|g" \
     "s|image: docker.io/|image: ${IMAGE_REGISTRY}/|g"
   echo "  ✓ Updated"
@@ -104,6 +106,13 @@ _update_chaos_yaml() {
     -e "s|value: \"[^\"]*litmuschaos/chaos-exporter:|value: \"${IMAGE_REGISTRY}/litmuschaos/chaos-exporter:|g" \
     -e "s|image: \"[^\"]*agentcert/|image: \"${IMAGE_REGISTRY}/agentcert/|g" \
     -e "s|value: \"[^\"]*agentcert/|value: \"${IMAGE_REGISTRY}/agentcert/|g" \
+    -e "s|value: \"[^\"]*gaiadocker/iproute2|value: \"${IMAGE_REGISTRY}/gaiadocker/iproute2|g" \
+    -e "s|value: \"gaiadocker/iproute2|value: \"${IMAGE_REGISTRY}/gaiadocker/iproute2|g" \
+    -e "s|image: litmuschaos/k8s:|image: ${IMAGE_REGISTRY}/litmuschaos/k8s:|g" \
+    -e "s|image: litmuschaos/litmus-checker:|image: ${IMAGE_REGISTRY}/litmuschaos/litmus-checker:|g" \
+    -e "s|image: litmuschaos/litmus-app-deployer:|image: ${IMAGE_REGISTRY}/litmuschaos/litmus-app-deployer:|g" \
+    -e "s|image: alpine/k8s:|image: ${IMAGE_REGISTRY}/alpine/k8s:|g" \
+    -e "s|image: devth/alpine-bench|image: ${IMAGE_REGISTRY}/devth/alpine-bench|g" \
     "$f"
   sed -i "s|${IMAGE_REGISTRY}/${IMAGE_REGISTRY}/|${IMAGE_REGISTRY}/|g" "$f"
 }

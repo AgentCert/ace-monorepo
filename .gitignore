@@ -50,3 +50,16 @@ agent-charts/
 scripts/azure-build/start-agentcert-v2.sh
 local-personal-workspace/
 deploy/helm/ace/values-env.yaml
+agent-charts
+certifier
+agent-charts
+AgentCert
+app-charts
+certifier
+chaos-charts
+agent-charts
+AgentCert
+app-charts
+certifier
+agent-charts
+AgentCert

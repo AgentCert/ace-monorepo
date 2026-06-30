@@ -24,6 +24,8 @@ spec:
       labels:
         app: certifier
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       initContainers:
         - name: wait-for-mongodb
           image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}

@@ -41,6 +41,8 @@ spec:
       labels:
         app: mongodb
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       initContainers:
         - name: keyfile-gen
           image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
@@ -122,6 +124,8 @@ spec:
   backoffLimit: 10
   template:
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       restartPolicy: OnFailure
       containers:
         - name: rs-init

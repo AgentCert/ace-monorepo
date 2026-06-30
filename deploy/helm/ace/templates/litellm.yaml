@@ -35,6 +35,8 @@ spec:
       annotations:
         checksum/config: {{ .Values.litellm.config | sha256sum }}
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: litellm
           image: {{ include "ace.image" (dict "img" .Values.images.litellm "reg" .Values.imageRegistry) }}

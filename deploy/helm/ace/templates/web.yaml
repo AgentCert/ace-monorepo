@@ -95,6 +95,8 @@ spec:
       labels:
         app: web
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       securityContext:
         runAsUser: 0
       containers:

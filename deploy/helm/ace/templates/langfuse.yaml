@@ -25,6 +25,8 @@ spec:
       labels:
         app: postgres
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: postgres
           image: {{ include "ace.image" (dict "img" .Values.images.postgres "reg" .Values.imageRegistry) }}
@@ -108,6 +110,8 @@ spec:
       labels:
         app: redis
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: redis
           image: {{ include "ace.image" (dict "img" .Values.images.redis "reg" .Values.imageRegistry) }}
@@ -192,6 +196,8 @@ spec:
       labels:
         app: clickhouse
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       securityContext:
         runAsUser: 101
         runAsGroup: 101
@@ -282,6 +288,8 @@ spec:
       labels:
         app: minio
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       securityContext:
         runAsUser: 1000
         fsGroup: 1000
@@ -360,6 +368,8 @@ spec:
       labels:
         app: langfuse-worker
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: langfuse-worker
           image: {{ include "ace.image" (dict "img" .Values.images.langfuseWorker "reg" .Values.imageRegistry) }}
@@ -420,6 +430,8 @@ spec:
       labels:
         app: langfuse-web
     spec:
+      imagePullSecrets:
+        - name: jfrog-registry
       containers:
         - name: langfuse-web
           image: {{ include "ace.image" (dict "img" .Values.images.langfuseWeb "reg" .Values.imageRegistry) }}

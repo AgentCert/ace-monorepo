@@ -143,6 +143,9 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
 fi
 kubectl patch serviceaccount default -n sock-shop \
     -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+# flash-agent-sa is created by the helm chart — patch it if it exists
+kubectl patch serviceaccount flash-agent-sa -n sock-shop \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
 ok "sock-shop namespace ready with jfrog-registry secret."
 
 echo

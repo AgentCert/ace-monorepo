@@ -45,23 +45,12 @@ patch_file() {
 }
 
 # ── 1) app-charts/charts/sock-shop/values.yaml ──────────────────────────────
+# SKIP: The sock-shop helm chart uses _helpers.tpl to prefix global.imageRegistry
+# to all image values automatically. Running sed here causes double-prefixing.
+# If you need to update the registry, change global.imageRegistry in values.yaml.
 SOCK_SHOP_VALUES="$REPO_ROOT/app-charts/charts/sock-shop/values.yaml"
 if [[ -f "$SOCK_SHOP_VALUES" ]]; then
-  echo "▸ app-charts/charts/sock-shop/values.yaml"
-  patch_file "$SOCK_SHOP_VALUES" \
-    "s|image: weaveworksdemos/|image: ${IMAGE_REGISTRY}/weaveworksdemos/|g" \
-    "s|image: mongo$|image: ${IMAGE_REGISTRY}/mongo|g" \
-    "s|image: mongo\b|image: ${IMAGE_REGISTRY}/mongo|g" \
-    "s|image: rabbitmq:|image: ${IMAGE_REGISTRY}/rabbitmq:|g" \
-    "s|image: prom/prometheus:|image: ${IMAGE_REGISTRY}/prom/prometheus:|g" \
-    "s|image: grafana/grafana:|image: ${IMAGE_REGISTRY}/grafana/grafana:|g" \
-    "s|image: litmuschaos/|image: ${IMAGE_REGISTRY}/litmuschaos/|g" \
-    "s|image: registry.k8s.io/|image: ${IMAGE_REGISTRY}/|g" \
-    "s|image: quay.io/containers/|image: ${IMAGE_REGISTRY}/|g" \
-    "s|image: quay.io/|image: ${IMAGE_REGISTRY}/|g" \
-    "s|image: agentcert/|image: ${IMAGE_REGISTRY}/agentcert/|g" \
-    "s|image: docker.io/|image: ${IMAGE_REGISTRY}/|g"
-  echo "  ✓ Updated"
+  echo "▸ app-charts/charts/sock-shop/values.yaml — SKIPPED (uses _helpers.tpl image helper)"
 fi
 
 # ── 2) agent-charts — flash-agent, k8s-agent values.yaml ────────────────────

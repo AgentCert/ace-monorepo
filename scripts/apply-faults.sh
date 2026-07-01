@@ -106,7 +106,10 @@ else
   echo ""
   echo "Updating experiment files..."
   if [[ -d "$EXPERIMENTS_DIR" ]]; then
-    find "$EXPERIMENTS_DIR" -type f -name '*.yaml' | while read -r exp_yaml; do
+    find "$EXPERIMENTS_DIR" -type f -name '*.yaml' \
+      ! -name '*.chartserviceversion.yaml' \
+      ! -name 'argowf-chaos-admin.yaml' \
+      | while read -r exp_yaml; do
       local_name="${exp_yaml#$EXPERIMENTS_DIR/}"
       update_yaml "$exp_yaml" "experiment/$local_name"
     done

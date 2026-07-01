@@ -789,13 +789,12 @@ helm_deploy() {
             -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
         ok "jfrog-registry secret in kube-system + ${NS}"
 
-        # Deploy the sync CronJob
+        # Deploy the sync Deployment (replaces old CronJob)
         if [[ -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" ]]; then
+            kubectl delete cronjob jfrog-secret-sync -n kube-system --ignore-not-found >/dev/null 2>&1 || true
             kubectl apply -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" >/dev/null
-            ok "jfrog-secret-sync CronJob deployed (replicates secret to all namespaces every 60s)"
-            # Trigger immediate sync
-            kubectl delete job jfrog-secret-sync-init -n kube-system 2>/dev/null || true
-            kubectl create job --from=cronjob/jfrog-secret-sync jfrog-secret-sync-init -n kube-system >/dev/null 2>&1 || true
+            ok "jfrog-secret-sync Deployment deployed (watches namespaces + syncs secret within seconds)"
+            kubectl rollout status deployment/jfrog-secret-sync -n kube-system --timeout=60s >/dev/null 2>&1 || true
         fi
     else
         warn "JFrog credentials not provided — pods may fail to pull images."
@@ -830,8 +829,8 @@ helm_deploy() {
         ok "MongoDB RS already initialized."
     fi
 
-    # 5d) Wait for initial sync job to finish (ensures all namespaces have jfrog-registry)
-    kubectl wait --for=condition=complete job/jfrog-secret-sync-init -n kube-system --timeout=60s 2>/dev/null || true
+    # 5d) Brief pause for jfrog-secret-sync Deployment to complete its initial sync
+    sleep 5
 
     # Resolve image registry once (used by all subsequent deploys)
     local img_reg

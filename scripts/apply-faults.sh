@@ -25,7 +25,7 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
   [[ -n "$_val" ]] && IMAGE_REGISTRY="$_val"
 fi
 
-IMAGE_REGISTRY="${IMAGE_REGISTRY:-docker.io}"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}"
 FAULT_NAME=""
 NAMESPACE="sock-shop"
 DO_APPLY=false

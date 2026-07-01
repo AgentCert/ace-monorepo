@@ -177,18 +177,21 @@ ok "sock-shop namespace ready with jfrog-registry secret."
 echo
 echo -e "${GREEN}=== All namespace prerequisites applied ===${NC}"
 
-# ── 8) Deploy JFrog Secret Sync CronJob (cluster-wide) ──────────────────────
+# ── 8) Deploy JFrog Secret Sync Deployment (cluster-wide) ──────────────────
 echo
 echo -e "${BOLD}7) JFrog Secret Sync (cluster-wide auto-replication)${NC}"
 if [[ -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" ]]; then
+    # Migrate: remove old CronJob if present (replaced by always-running Deployment).
+    kubectl delete cronjob jfrog-secret-sync -n kube-system --ignore-not-found >/dev/null 2>&1 || true
+
     kubectl apply -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" >/dev/null
-    ok "jfrog-secret-sync CronJob deployed in kube-system."
-    echo -e "  ${DIM}Runs every 60s — copies jfrog-registry secret to ALL namespaces + patches SAs.${NC}"
-    echo -e "  ${DIM}Any new namespace (e.g. litmus infra from UI) will automatically get credentials.${NC}"
-    # Trigger first sync immediately
-    kubectl create job --from=cronjob/jfrog-secret-sync jfrog-secret-sync-init \
-        -n kube-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
-    ok "Initial sync job triggered."
+    ok "jfrog-secret-sync Deployment deployed in kube-system."
+    echo -e "  ${DIM}Watches namespace events — syncs jfrog-registry within seconds of creation.${NC}"
+    echo -e "  ${DIM}Also reconciles all namespaces every 60s (safety net / credential rotation).${NC}"
+    # Wait for the Deployment to be ready; it begins syncing immediately on startup.
+    kubectl rollout status deployment/jfrog-secret-sync -n kube-system --timeout=60s >/dev/null 2>&1 \
+        && ok "jfrog-secret-sync Deployment ready — initial sync underway." \
+        || warn "jfrog-secret-sync Deployment not yet ready (check: kubectl get pod -n kube-system -l app=jfrog-secret-sync)."
 else
     warn "deploy/jfrog-secret-sync.yaml not found — skipping cluster-wide sync."
 fi

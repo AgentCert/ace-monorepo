@@ -174,6 +174,25 @@ kubectl patch serviceaccount flash-agent-sa -n sock-shop \
     -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
 ok "sock-shop namespace ready with jfrog-registry secret."
 
+# ── 8) Setup litellm namespace for JFrog image pulls ─────────────────────────
+echo
+echo -e "${BOLD}7) Litellm namespace setup${NC}"
+kubectl create namespace litellm --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl label namespace litellm app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
+kubectl annotate namespace litellm meta.helm.sh/release-name=litellm --overwrite 2>/dev/null || true
+kubectl annotate namespace litellm meta.helm.sh/release-namespace=litellm --overwrite 2>/dev/null || true
+if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
+    kubectl create secret docker-registry jfrog-registry \
+        --namespace litellm \
+        --docker-server="infyartifactory.jfrog.io" \
+        --docker-username="${JFROG_USER}" \
+        --docker-password="${JFROG_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+kubectl patch serviceaccount default -n litellm \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+ok "litellm namespace ready with jfrog-registry secret."
+
 echo
 echo -e "${GREEN}=== All namespace prerequisites applied ===${NC}"
 

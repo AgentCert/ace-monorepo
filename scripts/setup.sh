@@ -17,7 +17,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
-EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
@@ -26,24 +25,13 @@ ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
 
 # --- prep .env -------------------------------------------------------------
-if [[ ! -f "${EXAMPLE_FILE}" ]]; then
-    echo "ERROR: ${EXAMPLE_FILE} not found — run from a full checkout." >&2
+# .env must already exist (created by apply-cluster-prereqs.sh)
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "ERROR: ${ENV_FILE} not found." >&2
+    echo "       Run 'scripts/apply-cluster-prereqs.sh' first (it creates .env from .env.example)." >&2
     exit 1
 fi
-if [[ ! -f "${ENV_FILE}" ]]; then
-    cp "${EXAMPLE_FILE}" "${ENV_FILE}"
-    ok "Created .env from .env.example"
-    # Ensure critical defaults are set
-    grep -q "^ADMIN_USERNAME=" "${ENV_FILE}" || echo "ADMIN_USERNAME=admin" >> "${ENV_FILE}"
-    grep -q "^ADMIN_PASSWORD=" "${ENV_FILE}" || echo "ADMIN_PASSWORD=Infy@123" >> "${ENV_FILE}"
-    grep -q "^VERSION=" "${ENV_FILE}" || echo "VERSION=3.16.0" >> "${ENV_FILE}"
-    grep -q "^MONGODB_DATABASE=" "${ENV_FILE}" || echo "MONGODB_DATABASE=litmus" >> "${ENV_FILE}"
-    grep -q "^MONGODB_USERNAME=" "${ENV_FILE}" || echo "MONGODB_USERNAME=admin" >> "${ENV_FILE}"
-    grep -q "^MONGODB_PASSWORD=" "${ENV_FILE}" || echo "MONGODB_PASSWORD=1234" >> "${ENV_FILE}"
-    grep -q "^IMAGE_REGISTRY=" "${ENV_FILE}" || echo "IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local" >> "${ENV_FILE}"
-else
-    ok "Using existing .env (press Enter at each prompt to keep current values)"
-fi
+ok "Using existing .env (press Enter at each prompt to keep current values)"
 
 # current value of KEY in .env (empty if unset)
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
@@ -189,6 +177,13 @@ fi
 if [[ -z "$JFROG_TOKEN" ]]; then
     read -rsp "$(echo -e "  ${BOLD}JFrog token/password${NC}: ")" JFROG_TOKEN
     echo
+fi
+
+# Log in to JFrog immediately so the session persists for the entire setup
+if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+    echo "${JFROG_TOKEN}" | docker login infyartifactory.jfrog.io -u "${JFROG_USER}" --password-stdin 2>&1 \
+        && ok "Logged in to JFrog (infyartifactory.jfrog.io)" \
+        || warn "JFrog docker login failed — image pushes may fail later."
 fi
 echo
 
@@ -838,6 +833,14 @@ helm_deploy() {
     # 5d) Wait for initial sync job to finish (ensures all namespaces have jfrog-registry)
     kubectl wait --for=condition=complete job/jfrog-secret-sync-init -n kube-system --timeout=60s 2>/dev/null || true
 
+    # Resolve image registry once (used by all subsequent deploys)
+    local img_reg
+    img_reg="$(envval IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
+
+    # Ensure submodules are up-to-date (chart sources)
+    echo -e "${DIM}Syncing git submodules…${NC}"
+    ( cd "${REPO_ROOT}" && git submodule update --init --recursive 2>/dev/null ) || true
+
     # 5e) Deploy sock-shop
     echo
     echo -e "${BOLD}Deploying sock-shop…${NC}"
@@ -847,8 +850,6 @@ helm_deploy() {
         kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
         kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
         kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
-        local img_reg
-        img_reg="$(envval IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
         helm upgrade --install sock-shop "${SOCK_SHOP_CHART}" \
             --namespace sock-shop \
             --set global.imageRegistry="${img_reg}" \
@@ -944,6 +945,14 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
     echo -e "${CYAN}  Build & push selected images${NC}"
     echo -e "${CYAN}=======================================================${NC}"
     echo
+    # Resolve JFrog registry for tagging
+    img_reg="$(cur IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
+    # Login to JFrog for push
+    if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+        echo "${JFROG_TOKEN}" | docker login infyartifactory.jfrog.io -u "${JFROG_USER}" --password-stdin 2>&1 \
+            && ok "Logged in to JFrog (infyartifactory.jfrog.io)" \
+            || warn "JFrog login failed — images won't be pushed to JFrog."
+    fi
     if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
         ok "Logged in to Docker Hub as ${DH_USER}"
         BUILD_FAILED=()
@@ -973,10 +982,21 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
                 fi
             fi
             if docker push "${_img}:latest"; then
-                ok "  Pushed ${_img}:latest"
+                ok "  Pushed ${_img}:latest to Docker Hub"
             else
-                warn "  Push failed: ${_label}"
+                warn "  Push to Docker Hub failed: ${_label}"
                 BUILD_FAILED+=("${_label} (push)")
+            fi
+            # Also push to JFrog if credentials are available
+            if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+                local _jfrog_img="${img_reg}/${_img}"
+                docker tag "${_img}:latest" "${_jfrog_img}:latest"
+                if docker push "${_jfrog_img}:latest"; then
+                    ok "  Pushed ${_jfrog_img}:latest"
+                else
+                    warn "  Push to JFrog failed: ${_label}"
+                    BUILD_FAILED+=("${_label} (jfrog push)")
+                fi
             fi
         done
         echo

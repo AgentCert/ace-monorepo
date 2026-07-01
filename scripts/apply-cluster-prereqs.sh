@@ -96,16 +96,29 @@ fi
 # ── 4) IMAGE_REGISTRY in .env ────────────────────────────────────────────────
 echo
 echo -e "${BOLD}3) IMAGE_REGISTRY in .env${NC}"
-if [[ -f "$ENV_FILE" ]]; then
-    if grep -q "^IMAGE_REGISTRY=" "$ENV_FILE"; then
-        sed -i "s|^IMAGE_REGISTRY=.*|IMAGE_REGISTRY=${REGISTRY}|" "$ENV_FILE"
+# Ensure .env exists — copy from .env.example if missing
+if [[ ! -f "$ENV_FILE" ]]; then
+    if [[ -f "${REPO_ROOT}/.env.example" ]]; then
+        cp "${REPO_ROOT}/.env.example" "$ENV_FILE"
+        ok "Created .env from .env.example"
     else
-        echo "IMAGE_REGISTRY=${REGISTRY}" >> "$ENV_FILE"
+        warn ".env.example not found — creating empty .env"
+        touch "$ENV_FILE"
     fi
-    ok "IMAGE_REGISTRY=${REGISTRY} in .env"
-else
-    warn ".env not found — run scripts/setup.sh first."
+    # Inject critical defaults if not present
+    grep -q "^ADMIN_USERNAME=" "$ENV_FILE" || echo "ADMIN_USERNAME=admin" >> "$ENV_FILE"
+    grep -q "^ADMIN_PASSWORD=" "$ENV_FILE" || echo "ADMIN_PASSWORD=Infy@123" >> "$ENV_FILE"
+    grep -q "^VERSION=" "$ENV_FILE" || echo "VERSION=3.16.0" >> "$ENV_FILE"
+    grep -q "^MONGODB_DATABASE=" "$ENV_FILE" || echo "MONGODB_DATABASE=litmus" >> "$ENV_FILE"
+    grep -q "^MONGODB_USERNAME=" "$ENV_FILE" || echo "MONGODB_USERNAME=admin" >> "$ENV_FILE"
+    grep -q "^MONGODB_PASSWORD=" "$ENV_FILE" || echo "MONGODB_PASSWORD=1234" >> "$ENV_FILE"
 fi
+if grep -q "^IMAGE_REGISTRY=" "$ENV_FILE"; then
+    sed -i "s|^IMAGE_REGISTRY=.*|IMAGE_REGISTRY=${REGISTRY}|" "$ENV_FILE"
+else
+    echo "IMAGE_REGISTRY=${REGISTRY}" >> "$ENV_FILE"
+fi
+ok "IMAGE_REGISTRY=${REGISTRY} in .env"
 
 # ── 5) Patch default ServiceAccount for imagePullSecrets ─────────────────────
 echo

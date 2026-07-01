@@ -58,6 +58,15 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     ok "jfrog-registry secret created/updated in '${NS}'."
+
+    # Create master copy in kube-system (used by jfrog-secret-sync to replicate to all namespaces)
+    kubectl create secret docker-registry jfrog-registry \
+        --namespace kube-system \
+        --docker-server="infyartifactory.jfrog.io" \
+        --docker-username="${JFROG_USER}" \
+        --docker-password="${JFROG_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    ok "jfrog-registry master secret created in kube-system."
 else
     warn "JFrog credentials not provided — skipping secret creation."
 fi
@@ -133,6 +142,10 @@ ok "litmus namespace ready with jfrog-registry secret."
 echo
 echo -e "${BOLD}6) Sock-shop namespace setup${NC}"
 kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# Add Helm ownership labels so helm install doesn't conflict with pre-created namespace
+kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
+kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
+kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
     kubectl create secret docker-registry jfrog-registry \
         --namespace sock-shop \
@@ -150,3 +163,24 @@ ok "sock-shop namespace ready with jfrog-registry secret."
 
 echo
 echo -e "${GREEN}=== All namespace prerequisites applied ===${NC}"
+
+# ── 8) Deploy JFrog Secret Sync CronJob (cluster-wide) ──────────────────────
+echo
+echo -e "${BOLD}7) JFrog Secret Sync (cluster-wide auto-replication)${NC}"
+if [[ -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" ]]; then
+    kubectl apply -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" >/dev/null
+    ok "jfrog-secret-sync CronJob deployed in kube-system."
+    echo -e "  ${DIM}Runs every 60s — copies jfrog-registry secret to ALL namespaces + patches SAs.${NC}"
+    echo -e "  ${DIM}Any new namespace (e.g. litmus infra from UI) will automatically get credentials.${NC}"
+    # Trigger first sync immediately
+    kubectl create job --from=cronjob/jfrog-secret-sync jfrog-secret-sync-init \
+        -n kube-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
+    ok "Initial sync job triggered."
+else
+    warn "deploy/jfrog-secret-sync.yaml not found — skipping cluster-wide sync."
+fi
+
+echo
+echo -e "${GREEN}═══════════════════════════════════════${NC}"
+echo -e "${GREEN}  All prerequisites complete.${NC}"
+echo -e "${GREEN}═══════════════════════════════════════${NC}"

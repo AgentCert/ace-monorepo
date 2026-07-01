@@ -33,6 +33,14 @@ fi
 if [[ ! -f "${ENV_FILE}" ]]; then
     cp "${EXAMPLE_FILE}" "${ENV_FILE}"
     ok "Created .env from .env.example"
+    # Ensure critical defaults are set
+    grep -q "^ADMIN_USERNAME=" "${ENV_FILE}" || echo "ADMIN_USERNAME=admin" >> "${ENV_FILE}"
+    grep -q "^ADMIN_PASSWORD=" "${ENV_FILE}" || echo "ADMIN_PASSWORD=Infy@123" >> "${ENV_FILE}"
+    grep -q "^VERSION=" "${ENV_FILE}" || echo "VERSION=3.16.0" >> "${ENV_FILE}"
+    grep -q "^MONGODB_DATABASE=" "${ENV_FILE}" || echo "MONGODB_DATABASE=litmus" >> "${ENV_FILE}"
+    grep -q "^MONGODB_USERNAME=" "${ENV_FILE}" || echo "MONGODB_USERNAME=admin" >> "${ENV_FILE}"
+    grep -q "^MONGODB_PASSWORD=" "${ENV_FILE}" || echo "MONGODB_PASSWORD=1234" >> "${ENV_FILE}"
+    grep -q "^IMAGE_REGISTRY=" "${ENV_FILE}" || echo "IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local" >> "${ENV_FILE}"
 else
     ok "Using existing .env (press Enter at each prompt to keep current values)"
 fi
@@ -168,6 +176,20 @@ echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${
 echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind${NC}"
 CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
+echo
+
+# --- Section 4: JFrog Registry credentials --------------------------------
+echo -e "${BOLD}4) JFrog Artifactory credentials${NC} ${DIM}(for pulling images from infyartifactory.jfrog.io)${NC}"
+echo -e "   ${DIM}Set JFROG_USER/JFROG_TOKEN env vars to skip prompts.${NC}"
+JFROG_USER="${JFROG_USER:-$(cur JFROG_USER)}"
+JFROG_TOKEN="${JFROG_TOKEN:-$(cur JFROG_TOKEN)}"
+if [[ -z "$JFROG_USER" ]]; then
+    JFROG_USER="$(ask JFROG_USER 'JFrog username')"
+fi
+if [[ -z "$JFROG_TOKEN" ]]; then
+    read -rsp "$(echo -e "  ${BOLD}JFrog token/password${NC}: ")" JFROG_TOKEN
+    echo
+fi
 echo
 
 # The kind docker-network gateway is the address in-cluster pods use to reach
@@ -748,7 +770,148 @@ helm_deploy() {
 
     echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
     echo
-    "${helm_cmd[@]}"
+    "${helm_cmd[@]}" || warn "Helm install timed out — will continue setup (MongoDB RS likely needs init)."
+
+    # 5b) JFrog Registry — cluster-wide secret sync
+    echo
+    echo -e "${BOLD}Setting up JFrog registry credentials (cluster-wide)…${NC}"
+    if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+        # Master secret in kube-system (source for the sync CronJob)
+        kubectl create secret docker-registry jfrog-registry \
+            --namespace kube-system \
+            --docker-server="infyartifactory.jfrog.io" \
+            --docker-username="${JFROG_USER}" \
+            --docker-password="${JFROG_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        # Also in ace namespace immediately
+        kubectl create secret docker-registry jfrog-registry \
+            --namespace "${NS}" \
+            --docker-server="infyartifactory.jfrog.io" \
+            --docker-username="${JFROG_USER}" \
+            --docker-password="${JFROG_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl patch serviceaccount default -n "${NS}" \
+            -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+        ok "jfrog-registry secret in kube-system + ${NS}"
+
+        # Deploy the sync CronJob
+        if [[ -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" ]]; then
+            kubectl apply -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" >/dev/null
+            ok "jfrog-secret-sync CronJob deployed (replicates secret to all namespaces every 60s)"
+            # Trigger immediate sync
+            kubectl delete job jfrog-secret-sync-init -n kube-system 2>/dev/null || true
+            kubectl create job --from=cronjob/jfrog-secret-sync jfrog-secret-sync-init -n kube-system >/dev/null 2>&1 || true
+        fi
+    else
+        warn "JFrog credentials not provided — pods may fail to pull images."
+    fi
+
+    # 5c) MongoDB RS initialization (localhost exception — no auth needed on fresh DB)
+    echo
+    echo -e "${DIM}Waiting for MongoDB pod to be ready…${NC}"
+    kubectl wait --for=condition=ready pod/mongodb-0 -n "${NS}" --timeout=120s 2>/dev/null || true
+    # Check if RS is already initialized
+    local rs_status
+    rs_status="$(kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval 'rs.status().ok' 2>/dev/null || echo 0)"
+    if [[ "$rs_status" != "1" ]]; then
+        echo -e "${DIM}Initializing MongoDB replica set…${NC}"
+        kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval '
+          rs.initiate({
+            _id: "rs0",
+            members: [{ _id: 0, host: "mongodb-0.mongodb-headless.'"${NS}"'.svc.cluster.local:27017" }]
+          })
+        ' 2>/dev/null || true
+        sleep 5
+        # Create admin user via localhost exception
+        kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval '
+          db.getSiblingDB("admin").createUser({
+            user: "admin",
+            pwd: "1234",
+            roles: [{ role: "root", db: "admin" }]
+          })
+        ' 2>/dev/null || true
+        ok "MongoDB RS initialized + admin user created."
+    else
+        ok "MongoDB RS already initialized."
+    fi
+
+    # 5d) Wait for initial sync job to finish (ensures all namespaces have jfrog-registry)
+    kubectl wait --for=condition=complete job/jfrog-secret-sync-init -n kube-system --timeout=60s 2>/dev/null || true
+
+    # 5e) Deploy sock-shop
+    echo
+    echo -e "${BOLD}Deploying sock-shop…${NC}"
+    local SOCK_SHOP_CHART="${REPO_ROOT}/app-charts/charts/sock-shop"
+    if [[ -d "${SOCK_SHOP_CHART}" ]]; then
+        kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
+        kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
+        kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
+        local img_reg
+        img_reg="$(envval IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
+        helm upgrade --install sock-shop "${SOCK_SHOP_CHART}" \
+            --namespace sock-shop \
+            --set global.imageRegistry="${img_reg}" \
+            --timeout 10m || warn "sock-shop helm install had issues — check pods."
+        ok "sock-shop deployed."
+    else
+        warn "app-charts/charts/sock-shop not found — skipping."
+    fi
+
+    # 5f) Deploy litellm (standalone namespace)
+    echo
+    echo -e "${BOLD}Deploying litellm proxy…${NC}"
+    local LITELLM_DIR="${REPO_ROOT}/agent-charts/litellm"
+    if [[ -d "${LITELLM_DIR}" ]]; then
+        kubectl create namespace litellm --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        # Create litellm secrets from .env values
+        local az_key az_base az_model az_ver lm_master lf_pub lf_sec lf_host
+        az_key="$(envval AZURE_OPENAI_KEY)";       az_key="${az_key:-$(envval AZURE_OPENAI_API_KEY)}"
+        az_base="$(envval AZURE_OPENAI_ENDPOINT)"
+        az_model="$(envval AZURE_OPENAI_CHAT_DEPLOYMENT_NAME)"; az_model="${az_model:-gpt4o}"
+        az_ver="$(envval AZURE_OPENAI_API_VERSION)"; az_ver="${az_ver:-2024-12-01-preview}"
+        lm_master="sk-litellm-master-key"
+        lf_pub="$(envval LANGFUSE_PUBLIC_KEY)";    lf_pub="${lf_pub:-placeholder}"
+        lf_sec="$(envval LANGFUSE_SECRET_KEY)";    lf_sec="${lf_sec:-placeholder}"
+        lf_host="$(envval LANGFUSE_HOST)";         lf_host="${lf_host:-http://langfuse-web.ace.svc.cluster.local:3000}"
+        kubectl create secret generic litellm-secrets \
+            --namespace litellm \
+            --from-literal=AZURE_API_KEY="${az_key}" \
+            --from-literal=AZURE_API_BASE="${az_base}" \
+            --from-literal=AZURE_MODEL="${az_model}" \
+            --from-literal=AZURE_API_VERSION="${az_ver}" \
+            --from-literal=LITELLM_MASTER_KEY="${lm_master}" \
+            --from-literal=LANGFUSE_PUBLIC_KEY="${lf_pub}" \
+            --from-literal=LANGFUSE_SECRET_KEY="${lf_sec}" \
+            --from-literal=LANGFUSE_HOST="${lf_host}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl apply -f "${LITELLM_DIR}/configmap.yaml" >/dev/null
+        kubectl apply -f "${LITELLM_DIR}/deployment.yaml" >/dev/null
+        ok "litellm deployed in litellm namespace."
+    else
+        warn "agent-charts/litellm not found — skipping."
+    fi
+
+    # 5g) Deploy flash-agent
+    echo
+    echo -e "${BOLD}Deploying flash-agent…${NC}"
+    local FLASH_CHART="${REPO_ROOT}/agent-charts/charts/flash-agent"
+    if [[ -d "${FLASH_CHART}" ]]; then
+        helm upgrade --install flash-agent "${FLASH_CHART}" \
+            --namespace sock-shop \
+            --timeout 5m || warn "flash-agent deploy had issues."
+        ok "flash-agent deployed in sock-shop namespace."
+    else
+        warn "agent-charts/charts/flash-agent not found — skipping."
+    fi
+
+    # 5h) Update fault registries
+    echo
+    echo -e "${BOLD}Updating chaos-chart image registries…${NC}"
+    if [[ -x "${REPO_ROOT}/scripts/update-all-registries.sh" ]]; then
+        "${REPO_ROOT}/scripts/update-all-registries.sh" || true
+        ok "Image registries updated."
+    fi
 
     # 6) Print access URLs
     local admu admp luser lpass

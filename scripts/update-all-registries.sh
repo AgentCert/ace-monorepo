@@ -102,6 +102,12 @@ _update_chaos_yaml() {
     -e "s|image: litmuschaos/litmus-app-deployer:|image: ${IMAGE_REGISTRY}/litmuschaos/litmus-app-deployer:|g" \
     -e "s|image: alpine/k8s:|image: ${IMAGE_REGISTRY}/alpine/k8s:|g" \
     -e "s|image: devth/alpine-bench|image: ${IMAGE_REGISTRY}/devth/alpine-bench|g" \
+    -e "s|value: \"[^\"]*litmuschaos.docker.scarf.sh/litmuschaos/go-runner:|value: \"${IMAGE_REGISTRY}/litmuschaos/go-runner:|g" \
+    -e "s|value: \"ubuntu:16.04\"|value: \"${IMAGE_REGISTRY}/ubuntu:16.04\"|g" \
+    -e "s|value: \"[^\"]*alexeiled/stress-ng:|value: \"${IMAGE_REGISTRY}/alexeiled/stress-ng:|g" \
+    -e "s|value: \"alexeiled/stress-ng:|value: \"${IMAGE_REGISTRY}/alexeiled/stress-ng:|g" \
+    -e "s|value: \"[^\"]*gaiadocker/iproute2\"|value: \"${IMAGE_REGISTRY}/gaiadocker/iproute2\"|g" \
+    -e "s|value: \"gaiadocker/iproute2\"|value: \"${IMAGE_REGISTRY}/gaiadocker/iproute2\"|g" \
     "$f"
   sed -i "s|${IMAGE_REGISTRY}/${IMAGE_REGISTRY}/|${IMAGE_REGISTRY}/|g" "$f"
 }

@@ -767,37 +767,15 @@ helm_deploy() {
     echo
     "${helm_cmd[@]}" || warn "Helm install timed out — will continue setup (MongoDB RS likely needs init)."
 
-    # 5b) JFrog Registry — cluster-wide secret sync
+    # 5b) JFrog Registry — delegate to apply-cluster-prereqs.sh (single source of truth)
     echo
     echo -e "${BOLD}Setting up JFrog registry credentials (cluster-wide)…${NC}"
     if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
-        # Master secret in kube-system (source for the sync CronJob)
-        kubectl create secret docker-registry jfrog-registry \
-            --namespace kube-system \
-            --docker-server="infyartifactory.jfrog.io" \
-            --docker-username="${JFROG_USER}" \
-            --docker-password="${JFROG_TOKEN}" \
-            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-        # Also in ace namespace immediately
-        kubectl create secret docker-registry jfrog-registry \
-            --namespace "${NS}" \
-            --docker-server="infyartifactory.jfrog.io" \
-            --docker-username="${JFROG_USER}" \
-            --docker-password="${JFROG_TOKEN}" \
-            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-        kubectl patch serviceaccount default -n "${NS}" \
-            -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
-        ok "jfrog-registry secret in kube-system + ${NS}"
-
-        # Deploy the sync Deployment (replaces old CronJob)
-        if [[ -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" ]]; then
-            kubectl delete cronjob jfrog-secret-sync -n kube-system --ignore-not-found >/dev/null 2>&1 || true
-            kubectl apply -f "${REPO_ROOT}/deploy/jfrog-secret-sync.yaml" >/dev/null
-            ok "jfrog-secret-sync Deployment deployed (watches namespaces + syncs secret within seconds)"
-            kubectl rollout status deployment/jfrog-secret-sync -n kube-system --timeout=60s >/dev/null 2>&1 || true
-        fi
+        export JFROG_USER JFROG_TOKEN
+        bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
     else
         warn "JFrog credentials not provided — pods may fail to pull images."
+        echo -e "  ${DIM}Run: JFROG_USER=... JFROG_TOKEN=... ./scripts/apply-cluster-prereqs.sh${NC}"
     fi
 
     # 5c) MongoDB RS initialization (localhost exception — no auth needed on fresh DB)

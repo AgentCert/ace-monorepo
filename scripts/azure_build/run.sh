@@ -159,23 +159,23 @@ export DEFAULT_HUB_GIT_URL="https://github.com/agentcert/chaos-charts"
 export DEFAULT_HUB_BRANCH_NAME="master"
 
 # Container images
-export SUBSCRIBER_IMAGE="agentcert/litmusportal-subscriber:3.0.0"
-export EVENT_TRACKER_IMAGE="litmuschaos/litmusportal-event-tracker:3.0.0"
-export ARGO_WORKFLOW_CONTROLLER_IMAGE="litmuschaos/workflow-controller:v3.3.1"
-export ARGO_WORKFLOW_EXECUTOR_IMAGE="litmuschaos/argoexec:v3.3.1"
-export LITMUS_CHAOS_OPERATOR_IMAGE="litmuschaos/chaos-operator:3.0.0"
-export LITMUS_CHAOS_RUNNER_IMAGE="litmuschaos/chaos-runner:3.0.0"
-export LITMUS_CHAOS_EXPORTER_IMAGE="litmuschaos/chaos-exporter:3.0.0"
+export SUBSCRIBER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/litmusportal-subscriber:3.0.0"
+export EVENT_TRACKER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/litmusportal-event-tracker:3.0.0"
+export ARGO_WORKFLOW_CONTROLLER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/workflow-controller:v3.3.1"
+export ARGO_WORKFLOW_EXECUTOR_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/argoexec:v3.3.1"
+export LITMUS_CHAOS_OPERATOR_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/chaos-operator:3.0.0"
+export LITMUS_CHAOS_RUNNER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/chaos-runner:3.0.0"
+export LITMUS_CHAOS_EXPORTER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/litmuschaos/chaos-exporter:3.0.0"
 export CONTAINER_RUNTIME_EXECUTOR="k8sapi"
 export WORKFLOW_HELPER_IMAGE_VERSION="3.0.0"
 
 # Install-agent image (used by service.go applyInstallAgentTemplateOverrides)
-export INSTALL_AGENT_IMAGE="agentcert/agentcert-install-agent:latest"
+export INSTALL_AGENT_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-agent:latest"
 export INSTALL_AGENT_IMAGE_PULL_POLICY="Always"
 
 # MCP server images (used by infra namespace manifests)
-export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
-export PROMETHEUS_MCP_SERVER_IMAGE="agentcert/prometheus-mcp-server:latest"
+export KUBERNETES_MCP_SERVER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/kubernetes_mcp_server:latest"
+export PROMETHEUS_MCP_SERVER_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
 # MCP service URLs injected into agent.config.MCP_URLS at install-agent time
 # (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Sock-shop ns since

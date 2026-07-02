@@ -105,13 +105,16 @@ if [[ ! -f "$ENV_FILE" ]]; then
         warn ".env.example not found — creating empty .env"
         touch "$ENV_FILE"
     fi
-    # Inject critical defaults if not present
-    grep -q "^ADMIN_USERNAME=" "$ENV_FILE" || echo "ADMIN_USERNAME=admin" >> "$ENV_FILE"
-    grep -q "^ADMIN_PASSWORD=" "$ENV_FILE" || echo "ADMIN_PASSWORD=Infy@123" >> "$ENV_FILE"
-    grep -q "^VERSION=" "$ENV_FILE" || echo "VERSION=3.16.0" >> "$ENV_FILE"
-    grep -q "^MONGODB_DATABASE=" "$ENV_FILE" || echo "MONGODB_DATABASE=litmus" >> "$ENV_FILE"
-    grep -q "^MONGODB_USERNAME=" "$ENV_FILE" || echo "MONGODB_USERNAME=admin" >> "$ENV_FILE"
-    grep -q "^MONGODB_PASSWORD=" "$ENV_FILE" || echo "MONGODB_PASSWORD=1234" >> "$ENV_FILE"
+    # Inject chaos infra image defaults (used by graphql server to deploy litmus components)
+    grep -q "^SUBSCRIBER_IMAGE=" "$ENV_FILE" || echo "SUBSCRIBER_IMAGE=${REGISTRY}/agentcert/litmusportal-subscriber:3.0.0" >> "$ENV_FILE"
+    grep -q "^EVENT_TRACKER_IMAGE=" "$ENV_FILE" || echo "EVENT_TRACKER_IMAGE=${REGISTRY}/litmuschaos/litmusportal-event-tracker:3.0.0" >> "$ENV_FILE"
+    grep -q "^ARGO_WORKFLOW_CONTROLLER_IMAGE=" "$ENV_FILE" || echo "ARGO_WORKFLOW_CONTROLLER_IMAGE=${REGISTRY}/litmuschaos/workflow-controller:v3.3.1" >> "$ENV_FILE"
+    grep -q "^ARGO_WORKFLOW_EXECUTOR_IMAGE=" "$ENV_FILE" || echo "ARGO_WORKFLOW_EXECUTOR_IMAGE=${REGISTRY}/litmuschaos/argoexec:v3.3.1" >> "$ENV_FILE"
+    grep -q "^CHAOS_OPERATOR_IMAGE=" "$ENV_FILE" || echo "CHAOS_OPERATOR_IMAGE=${REGISTRY}/litmuschaos/chaos-operator:3.0.0" >> "$ENV_FILE"
+    grep -q "^CHAOS_RUNNER_IMAGE=" "$ENV_FILE" || echo "CHAOS_RUNNER_IMAGE=${REGISTRY}/litmuschaos/chaos-runner:3.0.0" >> "$ENV_FILE"
+    grep -q "^CHAOS_EXPORTER_IMAGE=" "$ENV_FILE" || echo "CHAOS_EXPORTER_IMAGE=${REGISTRY}/litmuschaos/chaos-exporter:3.0.0" >> "$ENV_FILE"
+    grep -q "^KUBERNETES_MCP_SERVER_IMAGE=" "$ENV_FILE" || echo "KUBERNETES_MCP_SERVER_IMAGE=${REGISTRY}/kubernetes_mcp_server:latest" >> "$ENV_FILE"
+    grep -q "^PROMETHEUS_MCP_SERVER_IMAGE=" "$ENV_FILE" || echo "PROMETHEUS_MCP_SERVER_IMAGE=${REGISTRY}/agentcert/prometheus-mcp-server:latest" >> "$ENV_FILE"
 fi
 if grep -q "^IMAGE_REGISTRY=" "$ENV_FILE"; then
     sed -i "s|^IMAGE_REGISTRY=.*|IMAGE_REGISTRY=${REGISTRY}|" "$ENV_FILE"
@@ -148,6 +151,12 @@ kubectl patch serviceaccount default -n litmus \
     -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
 # litmus-admin SA is created by the chaos infra — patch it if it exists
 kubectl patch serviceaccount litmus-admin -n litmus \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+# argo SA is created by Argo Workflows (used by chaos-runner and experiment pods)
+kubectl patch serviceaccount argo -n litmus \
+    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+# argo-chaos SA used by some ChaosEngine configurations
+kubectl patch serviceaccount argo-chaos -n litmus \
     -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
 ok "litmus namespace ready with jfrog-registry secret."
 

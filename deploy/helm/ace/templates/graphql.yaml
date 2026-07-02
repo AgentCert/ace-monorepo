@@ -146,6 +146,42 @@ spec:
                   name: {{ .Values.secretName }}
                   key: CHAOS_EXPORTER_IMAGE
                   optional: true
+            - name: SUBSCRIBER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: SUBSCRIBER_IMAGE
+                  optional: true
+            - name: EVENT_TRACKER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: EVENT_TRACKER_IMAGE
+                  optional: true
+            - name: ARGO_WORKFLOW_CONTROLLER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ARGO_WORKFLOW_CONTROLLER_IMAGE
+                  optional: true
+            - name: ARGO_WORKFLOW_EXECUTOR_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ARGO_WORKFLOW_EXECUTOR_IMAGE
+                  optional: true
+            - name: KUBERNETES_MCP_SERVER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: KUBERNETES_MCP_SERVER_IMAGE
+                  optional: true
+            - name: PROMETHEUS_MCP_SERVER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: PROMETHEUS_MCP_SERVER_IMAGE
+                  optional: true
           volumeMounts:
             - name: repo
               mountPath: /repo

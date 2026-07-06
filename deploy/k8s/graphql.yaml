@@ -34,9 +34,16 @@ spec:
             - |
               git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
               git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+          env:
+            - name: GIT_SSL_CAINFO
+              value: "/etc/ssl/certs/ca-certificates.crt"
           volumeMounts:
             - name: repo
               mountPath: /repo
+            - name: ca-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
+              readOnly: true
       containers:
         - name: graphql
           image: agentcert/agentcert-graphql:latest
@@ -76,11 +83,14 @@ spec:
             # In-cluster agents call back via the K8s service (not the host IP)
             - name: CHAOS_CENTER_UI_ENDPOINT
               value: "http://graphql.ace.svc.cluster.local:8081"
-            # Allow WebSocket/HTTP connections from in-cluster pods (subscriber, flash-agent)
-            # The default only allows localhost and litmuschaos.io, which blocks in-cluster
-            # service-name origins (graphql.ace.svc.cluster.local, *.litmus.svc.cluster.local).
+            # Allow WebSocket/HTTP connections from in-cluster pods; value set by scripts/setup.sh
+            # in .env → ace-env secret. Edit ALLOWED_ORIGINS in .env to customise.
             - name: ALLOWED_ORIGINS
-              value: "^(http://|https://|)litmuschaos.io(:[0-9]+|)?,^(http://|https://|)localhost(:[0-9]+|)?,^(http://|https://|ws://|wss://|)[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$,^[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$"
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: ALLOWED_ORIGINS
+                  optional: true
             # LiteLLM is a K8s service; the flash-agent reaches it by service name
             # Full cross-namespace DNS — flash-agent runs in sock-shop/litmus, not ace
             - name: OPENAI_BASE_URL
@@ -127,14 +137,17 @@ spec:
               readOnly: true
             - name: ca-certs
               mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
               readOnly: true
       volumes:
         - name: repo
           emptyDir: {}
         - name: ca-certs
-          hostPath:
-            path: /etc/ssl/certs/ca-certificates.crt
-            type: File
+          configMap:
+            name: ace-ca-certs
+            items:
+              - key: ca-certificates.crt
+                path: ca-certificates.crt
 ---
 apiVersion: v1
 kind: Service

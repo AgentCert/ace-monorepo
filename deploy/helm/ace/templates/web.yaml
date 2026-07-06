@@ -121,8 +121,10 @@ metadata:
 spec:
   selector:
     app: web
-  type: NodePort
+  type: {{ .Values.web.serviceType | default "NodePort" }}
   ports:
     - port: 2001
       targetPort: 2001
+      {{- if ne (.Values.web.serviceType | default "NodePort") "LoadBalancer" }}
       nodePort: 32001
+      {{- end }}

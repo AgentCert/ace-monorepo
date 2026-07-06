@@ -8,6 +8,15 @@
 
 secretName: ace-env
 
+# ── Per-service overrides ─────────────────────────────────────────────────────
+# The web service is the only external entry point — nginx inside it proxies /api/
+# and /auth/ to graphql and auth by K8s service DNS. setup.sh sets web.serviceType
+# to LoadBalancer for cloud (AKS/EKS/GKE) deployments.
+web:
+  serviceType: NodePort
+
+# graphql is internal-only (reached via the web nginx proxy); always NodePort.
+
 # ── Environment variables (populated from .env by setup.sh) ──────────────────
 # scripts/setup.sh generates deploy/helm/ace/values-env.yaml with every
 # KEY: "value" from .env under this key, then passes -f values-env.yaml.

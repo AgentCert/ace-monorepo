@@ -22,9 +22,16 @@ spec:
             - |
               git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
               git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+          env:
+            - name: GIT_SSL_CAINFO
+              value: "/etc/ssl/certs/ca-certificates.crt"
           volumeMounts:
             - name: repo
               mountPath: /repo
+            - name: ca-certs
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
+              readOnly: true
         - name: wait-for-mongodb
           image: {{ .Values.images.mongodb }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
@@ -89,7 +96,11 @@ spec:
             - name: CHAOS_CENTER_UI_ENDPOINT
               value: "http://graphql.ace.svc.cluster.local:8081"
             - name: ALLOWED_ORIGINS
-              value: "^(http://|https://|)litmuschaos.io(:[0-9]+|)?,^(http://|https://|)localhost(:[0-9]+|)?,^(http://|https://|ws://|wss://|)[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$,^[a-z0-9.-]+\\.svc\\.cluster\\.local(:[0-9]+)?$"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ALLOWED_ORIGINS
+                  optional: true
             - name: OPENAI_BASE_URL
               value: "http://litellm.ace.svc.cluster.local:14000/v1"
             - name: CERTIFIER_BASE_URL
@@ -128,14 +139,17 @@ spec:
               readOnly: true
             - name: ca-certs
               mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
               readOnly: true
       volumes:
         - name: repo
           emptyDir: {}
         - name: ca-certs
-          hostPath:
-            path: /etc/ssl/certs/ca-certificates.crt
-            type: File
+          configMap:
+            name: ace-ca-certs
+            items:
+              - key: ca-certificates.crt
+                path: ca-certificates.crt
 ---
 apiVersion: v1
 kind: Service

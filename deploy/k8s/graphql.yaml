@@ -39,7 +39,7 @@ spec:
               mountPath: /repo
       containers:
         - name: graphql
-          image: agentcert/agentcert-graphql:latest
+          image: agentcert/agentcert-graphql:v5-final-fix
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8081

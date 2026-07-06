@@ -96,7 +96,7 @@ spec:
         app: web
     spec:
       imagePullSecrets:
-        - name: jfrog-registry
+        - name: {{ .Values.imagePullSecretName }}
       securityContext:
         runAsUser: 0
       containers:

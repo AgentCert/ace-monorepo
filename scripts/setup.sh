@@ -715,6 +715,16 @@ if os.path.isfile(litellm_cfg):
     cfg = open(litellm_cfg).read()
     lines += ["", "litellm:", "  config: |"]
     lines += ["    " + l for l in cfg.splitlines()]
+# Add imageRegistry and chartsBranch from .env so values.yaml defaults can be overridden
+image_reg = seen.get('IMAGE_REGISTRY', '')
+charts_branch = seen.get('CHARTS_BRANCH', 'feature/docker-images-repository')
+if image_reg:
+    lines += ["", f"imageRegistry: '{image_reg}'"]
+if charts_branch:
+    lines += [f"chartsBranch: '{charts_branch}'"]
+pull_secret = seen.get('IMAGE_PULL_SECRET_NAME', 'jfrog-registry')
+if pull_secret:
+    lines += [f"imagePullSecretName: '{pull_secret}'"]
 open(out_path, "w").write("\n".join(lines) + "\n")
 PY
     ok "Generated values-env.yaml (env + litellm config + hostPath)."

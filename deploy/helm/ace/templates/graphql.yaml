@@ -15,7 +15,7 @@ spec:
     spec:
       serviceAccountName: graphql
       imagePullSecrets:
-        - name: jfrog-registry
+        - name: {{ .Values.imagePullSecretName }}
       initContainers:
         - name: clone-charts
           image: {{ include "ace.image" (dict "img" .Values.images.alpineGit "reg" .Values.imageRegistry) }}

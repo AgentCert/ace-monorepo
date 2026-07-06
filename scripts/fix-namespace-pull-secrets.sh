@@ -15,7 +15,7 @@ set -uo pipefail
 GREEN='\033[0;32m'; NC='\033[0m'
 ok() { echo -e "${GREEN}✓${NC} $*"; }
 
-SECRET_NAME="jfrog-registry"
+SECRET_NAME="${IMAGE_PULL_SECRET_NAME:-jfrog-registry}"
 
 patch_all_sas() {
     local ns="$1"

@@ -266,9 +266,9 @@ export LITMUS_CHAOS_EXPORTER_IMAGE="$(env_val CHAOS_EXPORTER_IMAGE ${IMAGE_REGIS
 export CONTAINER_RUNTIME_EXECUTOR="k8sapi"
 export WORKFLOW_HELPER_IMAGE_VERSION="$(env_val WORKFLOW_HELPER_IMAGE_VERSION 3.0.0)"
 
-export INSTALL_AGENT_IMAGE="$(env_val INSTALL_AGENT_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-agent:latest)"
+export INSTALL_AGENT_IMAGE="$(env_val INSTALL_AGENT_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-agent:v3-template-fix)"
 export INSTALL_AGENT_IMAGE_PULL_POLICY="$(env_val INSTALL_AGENT_IMAGE_PULL_POLICY Always)"
-export INSTALL_APPLICATION_IMAGE="$(env_val INSTALL_APPLICATION_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-app:latest)"
+export INSTALL_APPLICATION_IMAGE="$(env_val INSTALL_APPLICATION_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-app:v3-secret-fix)"
 export INSTALL_APPLICATION_IMAGE_PULL_POLICY="$(env_val INSTALL_APPLICATION_IMAGE_PULL_POLICY Always)"
 export FLASH_AGENT_IMAGE="$(env_val FLASH_AGENT_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-flash-agent:latest)"
 export AGENT_SIDECAR_IMAGE="$(env_val AGENT_SIDECAR_IMAGE ${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agent-sidecar:latest)"

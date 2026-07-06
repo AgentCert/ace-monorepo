@@ -170,7 +170,7 @@ export CONTAINER_RUNTIME_EXECUTOR="k8sapi"
 export WORKFLOW_HELPER_IMAGE_VERSION="3.0.0"
 
 # Install-agent image (used by service.go applyInstallAgentTemplateOverrides)
-export INSTALL_AGENT_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-agent:latest"
+export INSTALL_AGENT_IMAGE="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}/agentcert/agentcert-install-agent:v3-template-fix"
 export INSTALL_AGENT_IMAGE_PULL_POLICY="Always"
 
 # MCP server images (used by infra namespace manifests)

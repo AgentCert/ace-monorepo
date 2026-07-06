@@ -5,7 +5,7 @@ set -euo pipefail
 # apply-faults.sh — Pre-deploy fixes for AKS behind corporate proxy (Zscaler)
 # =============================================================================
 # Run ONCE before helm install/upgrade on a fresh cluster. Creates:
-#   1. jfrog-registry imagePullSecret (for pulling from JFrog Artifactory)
+#   1. $SECRET_NAME imagePullSecret (for pulling from JFrog Artifactory)
 #   2. ca-certs ConfigMap (corporate CA bundle for TLS interception)
 #   3. Ensures IMAGE_REGISTRY is set in .env
 #
@@ -23,6 +23,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 NS="${ACE_NAMESPACE:-ace}"
 REGISTRY="${IMAGE_REGISTRY:-infyartifactory.jfrog.io/docker-local}"
+# Extract docker server from IMAGE_REGISTRY (host part before first /)
+DOCKER_SERVER="${DOCKER_SERVER:-$(echo "$REGISTRY" | cut -d/ -f1)}"
+# Secret name for image pulls — read from .env or default
+SECRET_NAME="${IMAGE_PULL_SECRET_NAME:-jfrog-registry}"
 CA_DIR="${CORPORATE_CA_CERT_DIR:-/usr/local/share/ca-certificates}"
 
 BOLD='\033[1m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
@@ -51,22 +55,22 @@ if [[ -z "$JFROG_TOKEN" ]]; then
 fi
 
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
-    kubectl create secret docker-registry jfrog-registry \
+    kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace "${NS}" \
-        --docker-server="infyartifactory.jfrog.io" \
+        --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    ok "jfrog-registry secret created/updated in '${NS}'."
+    ok "$SECRET_NAME secret created/updated in '${NS}'."
 
     # Create master copy in kube-system (used by jfrog-secret-sync to replicate to all namespaces)
-    kubectl create secret docker-registry jfrog-registry \
+    kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace kube-system \
-        --docker-server="infyartifactory.jfrog.io" \
+        --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    ok "jfrog-registry master secret created in kube-system."
+    ok "$SECRET_NAME master secret created in kube-system."
 else
     warn "JFrog credentials not provided — skipping secret creation."
 fi
@@ -127,8 +131,8 @@ ok "IMAGE_REGISTRY=${REGISTRY} in .env"
 echo
 echo -e "${BOLD}4) Patch default ServiceAccount${NC}"
 kubectl patch serviceaccount default -n "${NS}" \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null \
-    && ok "default SA patched with jfrog-registry imagePullSecret." \
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null \
+    && ok "default SA patched with $SECRET_NAME imagePullSecret." \
     || warn "Could not patch default SA (may not exist yet — will work after first deploy)."
 
 echo
@@ -140,25 +144,25 @@ echo
 echo -e "${BOLD}5) Litmus namespace setup${NC}"
 kubectl create namespace litmus --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
-    kubectl create secret docker-registry jfrog-registry \
+    kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace litmus \
-        --docker-server="infyartifactory.jfrog.io" \
+        --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 fi
 kubectl patch serviceaccount default -n litmus \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
 # litmus-admin SA is created by the chaos infra — patch it if it exists
 kubectl patch serviceaccount litmus-admin -n litmus \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
 # argo SA is created by Argo Workflows (used by chaos-runner and experiment pods)
 kubectl patch serviceaccount argo -n litmus \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
 # argo-chaos SA used by some ChaosEngine configurations
 kubectl patch serviceaccount argo-chaos -n litmus \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
-ok "litmus namespace ready with jfrog-registry secret."
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
+ok "litmus namespace ready with $SECRET_NAME secret."
 
 # ── 7) Setup sock-shop namespace for JFrog image pulls ───────────────────────
 echo
@@ -169,19 +173,19 @@ kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 
 kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
 kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
-    kubectl create secret docker-registry jfrog-registry \
+    kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace sock-shop \
-        --docker-server="infyartifactory.jfrog.io" \
+        --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 fi
 kubectl patch serviceaccount default -n sock-shop \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
 # flash-agent-sa is created by the helm chart — patch it if it exists
 kubectl patch serviceaccount flash-agent-sa -n sock-shop \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
-ok "sock-shop namespace ready with jfrog-registry secret."
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
+ok "sock-shop namespace ready with $SECRET_NAME secret."
 
 # ── 8) Setup litellm namespace for JFrog image pulls ─────────────────────────
 echo
@@ -191,16 +195,16 @@ kubectl label namespace litellm app.kubernetes.io/managed-by=Helm --overwrite 2>
 kubectl annotate namespace litellm meta.helm.sh/release-name=litellm --overwrite 2>/dev/null || true
 kubectl annotate namespace litellm meta.helm.sh/release-namespace=litellm --overwrite 2>/dev/null || true
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
-    kubectl create secret docker-registry jfrog-registry \
+    kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace litellm \
-        --docker-server="infyartifactory.jfrog.io" \
+        --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
         --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 fi
 kubectl patch serviceaccount default -n litellm \
-    -p '{"imagePullSecrets": [{"name": "jfrog-registry"}]}' 2>/dev/null || true
-ok "litellm namespace ready with jfrog-registry secret."
+    -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
+ok "litellm namespace ready with $SECRET_NAME secret."
 
 echo
 echo -e "${GREEN}=== All namespace prerequisites applied ===${NC}"
@@ -214,7 +218,7 @@ if [[ -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" ]]; then
 
     kubectl apply -f "$REPO_ROOT/deploy/jfrog-secret-sync.yaml" >/dev/null
     ok "jfrog-secret-sync Deployment deployed in kube-system."
-    echo -e "  ${DIM}Watches namespace events — syncs jfrog-registry within seconds of creation.${NC}"
+    echo -e "  ${DIM}Watches namespace events — syncs $SECRET_NAME within seconds of creation.${NC}"
     echo -e "  ${DIM}Also reconciles all namespaces every 60s (safety net / credential rotation).${NC}"
     # Wait for the Deployment to be ready; it begins syncing immediately on startup.
     kubectl rollout status deployment/jfrog-secret-sync -n kube-system --timeout=60s >/dev/null 2>&1 \

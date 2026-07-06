@@ -9,8 +9,8 @@
 secretName: ace-env
 
 # Branch to clone for agent-charts, app-charts, and chaos-charts
-# Use "feature/docker-images-repository" for JFrog image references
-chartsBranch: "feature/docker-images-repository"
+# Override via CHARTS_BRANCH in .env (injected into values-env.yaml by setup.sh)
+chartsBranch: "main"
 
 # ── Environment variables (populated from .env by setup.sh) ──────────────────
 # scripts/setup.sh generates deploy/helm/ace/values-env.yaml with every
@@ -18,14 +18,20 @@ chartsBranch: "feature/docker-images-repository"
 env: {}
 
 # ── Image Registry ────────────────────────────────────────────────────────────
-# Set to prefix all agentcert/* images. Leave empty for Docker Hub default.
-imageRegistry: "infyartifactory.jfrog.io/docker-local"
+# Override via IMAGE_REGISTRY in .env (injected into values-env.yaml by setup.sh)
+# Leave empty here — .env is the single source of truth.
+imageRegistry: ""
+
+# ── Image Pull Secret ─────────────────────────────────────────────────────────
+# Override via IMAGE_PULL_SECRET_NAME in .env
+# Name of the docker-registry secret used by all pods to pull images.
+imagePullSecretName: "jfrog-registry"
 
 # ── Images ────────────────────────────────────────────────────────────────────
 # All images prefixed with imageRegistry above. Behind corporate proxy (Zscaler),
 # direct pulls from docker.io/ghcr.io fail — everything goes through JFrog.
 images:
-  graphql:        agentcert/agentcert-graphql:latest
+  graphql:        agentcert/agentcert-graphql:v5-final-fix
   auth:           agentcert/agentcert-auth:latest
   web:            agentcert/agentcert-web:latest
   certifier:      agentcert/certifier:latest

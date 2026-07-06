@@ -14,7 +14,7 @@ spec:
         app: auth
     spec:
       imagePullSecrets:
-        - name: jfrog-registry
+        - name: {{ .Values.imagePullSecretName }}
       containers:
         - name: auth
           image: {{ include "ace.image" (dict "img" .Values.images.auth "reg" .Values.imageRegistry) }}

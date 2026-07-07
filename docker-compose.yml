@@ -160,7 +160,7 @@ services:
     build:
       context: AgentCert/chaoscenter/graphql
       dockerfile: server/Dockerfile
-    image: agentcert/agentcert-graphql:v5-final-fix
+    image: agentcert/agentcert-graphql:v6-dynamic-secret
     container_name: agentcert-graphql
     network_mode: host
     depends_on:

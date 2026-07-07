@@ -31,7 +31,7 @@ imagePullSecretName: "jfrog-registry"
 # All images prefixed with imageRegistry above. Behind corporate proxy (Zscaler),
 # direct pulls from docker.io/ghcr.io fail — everything goes through JFrog.
 images:
-  graphql:        agentcert/agentcert-graphql:v5-final-fix
+  graphql:        agentcert/agentcert-graphql:v6-dynamic-secret
   auth:           agentcert/agentcert-auth:latest
   web:            agentcert/agentcert-web:latest
   certifier:      agentcert/certifier:latest

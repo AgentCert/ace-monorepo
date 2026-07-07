@@ -121,11 +121,12 @@ kind: Service
 metadata:
   name: certifier
   namespace: {{ include "ace.namespace" . }}
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
 spec:
   selector:
     app: certifier
-  type: NodePort
+  type: LoadBalancer
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 32080

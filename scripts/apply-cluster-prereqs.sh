@@ -37,7 +37,7 @@ echo -e "${BOLD}ACE Pre-deploy Fixes (AKS + Corporate Proxy)${NC}"
 echo
 
 # ── 1) Namespace ──────────────────────────────────────────────────────────────
-kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 ok "Namespace '${NS}' exists."
 
 # ── 2) JFrog Registry Secret ─────────────────────────────────────────────────
@@ -65,7 +65,7 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
         --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
     ok "$SECRET_NAME secret created/updated in '${NS}'."
 
     # Create master copy in kube-system (used by jfrog-secret-sync to replicate to all namespaces)
@@ -74,7 +74,7 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
         --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
     ok "$SECRET_NAME master secret created in kube-system."
 else
     warn "JFrog credentials not provided — skipping secret creation."
@@ -94,7 +94,7 @@ if [[ -d "$CA_DIR" ]] && ls "$CA_DIR"/*.crt >/dev/null 2>&1; then
     kubectl create configmap ca-certs \
         --namespace "${NS}" \
         --from-file=ca-certificates.crt="$bundle" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
     rm -f "$bundle"
     ok "ca-certs ConfigMap created (system + corporate bundle)"
 else
@@ -147,14 +147,14 @@ echo -e "${DIM}Now run: helm upgrade --install ace deploy/helm/ace -n ace -f dep
 # ── 6) Setup litmus namespace for JFrog image pulls ──────────────────────────
 echo
 echo -e "${BOLD}5) Litmus namespace setup${NC}"
-kubectl create namespace litmus --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace litmus --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
     kubectl create secret docker-registry "$SECRET_NAME" \
         --namespace litmus \
         --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 fi
 kubectl patch serviceaccount default -n litmus \
     -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
@@ -172,7 +172,7 @@ ok "litmus namespace ready with $SECRET_NAME secret."
 # ── 7) Setup sock-shop namespace for JFrog image pulls ───────────────────────
 echo
 echo -e "${BOLD}6) Sock-shop namespace setup${NC}"
-kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 # Add Helm ownership labels so helm install doesn't conflict with pre-created namespace
 kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
 kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
@@ -183,7 +183,7 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
         --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 fi
 kubectl patch serviceaccount default -n sock-shop \
     -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true
@@ -195,7 +195,7 @@ ok "sock-shop namespace ready with $SECRET_NAME secret."
 # ── 8) Setup litellm namespace for JFrog image pulls ─────────────────────────
 echo
 echo -e "${BOLD}7) Litellm namespace setup${NC}"
-kubectl create namespace litellm --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace litellm --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 kubectl label namespace litellm app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
 kubectl annotate namespace litellm meta.helm.sh/release-name=litellm --overwrite 2>/dev/null || true
 kubectl annotate namespace litellm meta.helm.sh/release-namespace=litellm --overwrite 2>/dev/null || true
@@ -205,7 +205,7 @@ if [[ -n "$JFROG_USER" && -n "$JFROG_TOKEN" ]]; then
         --docker-server="${DOCKER_SERVER}" \
         --docker-username="${JFROG_USER}" \
         --docker-password="${JFROG_TOKEN}" \
-        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        --dry-run=client -o yaml | kubectl apply --force -f - >/dev/null 2>&1 || true
 fi
 kubectl patch serviceaccount default -n litellm \
     -p '{"imagePullSecrets": [{"name": "'$SECRET_NAME'"}]}' 2>/dev/null || true

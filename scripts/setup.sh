@@ -168,22 +168,18 @@ echo
 
 # --- Section 4: JFrog Registry credentials --------------------------------
 echo -e "${BOLD}4) JFrog Artifactory credentials${NC} ${DIM}(for pulling images from infyartifactory.jfrog.io)${NC}"
-echo -e "   ${DIM}Set JFROG_USER/JFROG_TOKEN env vars to skip prompts.${NC}"
+# Read from env vars first, then .env file — no interactive prompt here.
+# apply-cluster-prereqs.sh will prompt if still missing.
 JFROG_USER="${JFROG_USER:-$(cur JFROG_USER)}"
 JFROG_TOKEN="${JFROG_TOKEN:-$(cur JFROG_TOKEN)}"
-if [[ -z "$JFROG_USER" ]]; then
-    JFROG_USER="$(ask JFROG_USER 'JFrog username')"
-fi
-if [[ -z "$JFROG_TOKEN" ]]; then
-    read -rsp "$(echo -e "  ${BOLD}JFrog token/password${NC}: ")" JFROG_TOKEN
-    echo
-fi
 
 # Log in to JFrog immediately so the session persists for the entire setup
 if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
     echo "${JFROG_TOKEN}" | docker login infyartifactory.jfrog.io -u "${JFROG_USER}" --password-stdin 2>&1 \
         && ok "Logged in to JFrog (infyartifactory.jfrog.io)" \
         || warn "JFrog docker login failed — image pushes may fail later."
+else
+    echo -e "   ${DIM}JFROG_USER/JFROG_TOKEN not found in env or .env — will be prompted in apply-cluster-prereqs.sh${NC}"
 fi
 echo
 
@@ -828,23 +824,17 @@ helm_deploy() {
     echo -e "${DIM}Syncing git submodules…${NC}"
     ( cd "${REPO_ROOT}" && git submodule update --init --recursive 2>/dev/null ) || true
 
-    # 5e) Deploy sock-shop
+    # 5e) sock-shop — NOT deployed here.
+    # It is automatically deployed by the install-application Argo workflow step
+    # when an experiment runs (via ChaosHub experiment template).
+    # Only pre-create the namespace + secrets so it's ready when the experiment runs.
     echo
-    echo -e "${BOLD}Deploying sock-shop…${NC}"
-    local SOCK_SHOP_CHART="${REPO_ROOT}/app-charts/charts/sock-shop"
-    if [[ -d "${SOCK_SHOP_CHART}" ]]; then
-        kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-        kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
-        kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
-        kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
-        helm upgrade --install sock-shop "${SOCK_SHOP_CHART}" \
-            --namespace sock-shop \
-            --set global.imageRegistry="${img_reg}" \
-            --timeout 10m || warn "sock-shop helm install had issues — check pods."
-        ok "sock-shop deployed."
-    else
-        warn "app-charts/charts/sock-shop not found — skipping."
-    fi
+    echo -e "${BOLD}Preparing sock-shop namespace (secrets only, no pods)…${NC}"
+    kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
+    kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
+    kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
+    ok "sock-shop namespace ready (app will be deployed by experiment workflow)."
 
     # 5f) Deploy litellm (standalone namespace)
     echo
@@ -880,18 +870,10 @@ helm_deploy() {
         warn "agent-charts/litellm not found — skipping."
     fi
 
-    # 5g) Deploy flash-agent
-    echo
-    echo -e "${BOLD}Deploying flash-agent…${NC}"
-    local FLASH_CHART="${REPO_ROOT}/agent-charts/charts/flash-agent"
-    if [[ -d "${FLASH_CHART}" ]]; then
-        helm upgrade --install flash-agent "${FLASH_CHART}" \
-            --namespace sock-shop \
-            --timeout 5m || warn "flash-agent deploy had issues."
-        ok "flash-agent deployed in sock-shop namespace."
-    else
-        warn "agent-charts/charts/flash-agent not found — skipping."
-    fi
+    # 5g) Flash-agent — NOT deployed here.
+    # It is automatically deployed by the install-agent Argo workflow step
+    # when an experiment runs (via ChaosHub experiment template).
+    # Deploying it at setup time would create it before sock-shop exists.
 
     # 5h) Update fault registries
     echo

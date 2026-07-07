@@ -775,13 +775,18 @@ helm_deploy() {
 
     # 5b) JFrog Registry — delegate to apply-cluster-prereqs.sh (single source of truth)
     echo
-    echo -e "${BOLD}Setting up JFrog registry credentials (cluster-wide)…${NC}"
-    if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
-        export JFROG_USER JFROG_TOKEN
-        bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
+    # 5b) JFrog Registry — skip if already done by apply-cluster-prereqs.sh
+    echo
+    if kubectl get secret "$( grep -m1 '^IMAGE_PULL_SECRET_NAME=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || echo jfrog-registry )" -n "${NS}" >/dev/null 2>&1; then
+        ok "JFrog registry secret already exists — skipping apply-cluster-prereqs.sh (run it manually to update)."
     else
-        warn "JFrog credentials not provided — pods may fail to pull images."
-        echo -e "  ${DIM}Run: JFROG_USER=... JFROG_TOKEN=... ./scripts/apply-cluster-prereqs.sh${NC}"
+        echo -e "${BOLD}Setting up JFrog registry credentials (cluster-wide)…${NC}"
+        if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+            export JFROG_USER JFROG_TOKEN
+            bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
+        else
+            bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
+        fi
     fi
 
     # 5c) MongoDB RS initialization (localhost exception — no auth needed on fresh DB)

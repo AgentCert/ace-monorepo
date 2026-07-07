@@ -43,8 +43,13 @@ ok "Namespace '${NS}' exists."
 # ── 2) JFrog Registry Secret ─────────────────────────────────────────────────
 echo
 echo -e "${BOLD}1) JFrog Registry Secret${NC}"
+# Read from environment, then .env file, then prompt as last resort
 JFROG_USER="${JFROG_USER:-}"
 JFROG_TOKEN="${JFROG_TOKEN:-}"
+if [[ -z "$JFROG_USER" || -z "$JFROG_TOKEN" ]] && [[ -f "$ENV_FILE" ]]; then
+    [[ -z "$JFROG_USER" ]] && JFROG_USER="$(grep -m1 '^JFROG_USER=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)" || true
+    [[ -z "$JFROG_TOKEN" ]] && JFROG_TOKEN="$(grep -m1 '^JFROG_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)" || true
+fi
 
 if [[ -z "$JFROG_USER" ]]; then
     read -rp "  JFrog username: " JFROG_USER

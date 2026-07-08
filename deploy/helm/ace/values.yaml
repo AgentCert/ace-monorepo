@@ -22,6 +22,14 @@ env: {}
 # Leave empty here — .env is the single source of truth.
 imageRegistry: ""
 
+# ── Static IPs (Azure Internal LoadBalancer) ──────────────────────────────────
+# Set these to pin service IPs across redeployments.
+# Leave empty for dynamic assignment.
+staticIP:
+  web: "100.78.201.16"
+  langfuse: "100.78.201.15"
+  certifier: "100.78.201.14"
+
 # ── Image Pull Secret ─────────────────────────────────────────────────────────
 # Override via IMAGE_PULL_SECRET_NAME in .env
 # Name of the docker-registry secret used by all pods to pull images.

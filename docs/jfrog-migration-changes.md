@@ -1,137 +1,210 @@
-# JFrog Migration — Complete Change Log
+# Private Registry Migration — Complete Change Log
 
-All code changes made across the ace-monorepo to migrate from Docker Hub to a private container registry (JFrog Artifactory).
+All code changes made to support pulling container images from a private registry
+instead of Docker Hub. Changes are relative to the `main` branch.
 
 ---
 
 ## Summary
 
-| Repository | Branch | Files Changed |
-|-----------|--------|:---:|
-| `ace-monorepo` | `feature/setup-bug-fixes` | 25 |
-| `AgentCert` (submodule) | `feature/docker-images-repository` | 20 |
-| `agent-charts` (submodule) | `feature/docker-images-repository` | ~8 |
-| `app-charts` (submodule) | `feature/docker-images-repository` | ~23 |
-| `chaos-charts` (submodule) | `feature/docker-images-repository` | ~50 |
-| `certifier` (submodule) | `feature/docker-images-repository` | 1 |
+| Repository | Branch | New Files | Modified Files |
+|-----------|--------|:---------:|:--------------:|
+| `ace-monorepo` | `feature/setup-bug-fixes` | 4 | 15 |
+| `AgentCert` (submodule) | `feature/docker-images-repository` | 0 | 20 |
+| `agent-charts` (submodule) | `feature/docker-images-repository` | 0 | ~8 |
+| `app-charts` (submodule) | `feature/docker-images-repository` | 0 | ~23 |
+| `chaos-charts` (submodule) | `feature/docker-images-repository` | 0 | ~50 |
+| `certifier` (submodule) | `feature/docker-images-repository` | 0 | 1 |
 
 ---
 
-## 1. ace-monorepo Changes
+## 1. ace-monorepo — New Files
 
-### 1.1 Scripts (New)
+### `scripts/apply-cluster-prereqs.sh`
 
-| File | Purpose |
-|------|---------|
-| `scripts/apply-cluster-prereqs.sh` | Creates registry secrets in all namespaces, patches SAs, deploys jfrog-secret-sync, creates CA cert ConfigMap. Reads creds from env vars or prompts interactively. |
-| `scripts/update-all-registries.sh` | Bulk sed replacement of Docker Hub image refs → private registry across all fault.yaml, experiment.yaml, and chart values. Reads `IMAGE_REGISTRY` from `.env`. |
-| `scripts/fix-namespace-pull-secrets.sh` | Patches ALL ServiceAccounts in litmus + sock-shop with `imagePullSecrets` and restarts failing pods. |
+**Purpose:** One-time cluster preparation for private registry access.
 
-### 1.2 Scripts (Modified)
+What it does:
+- Reads `IMAGE_REGISTRY` from `.env` → auto-derives `DOCKER_SERVER` (host part)
+- Reads `IMAGE_PULL_SECRET_NAME` from `.env` (default: `jfrog-registry`)
+- Prompts for registry credentials (or reads from `JFROG_USER`/`JFROG_TOKEN` env vars)
+- Creates docker-registry secret in: ace, kube-system, litmus, sock-shop, litellm namespaces
+- Patches all ServiceAccounts with `imagePullSecrets`
+- Creates CA certificates ConfigMap (for corporate proxy)
+- Deploys `jfrog-secret-sync` (auto-replicates secret to new namespaces)
+
+### `deploy/jfrog-secret-sync.yaml`
+
+**Purpose:** Kubernetes Deployment (in kube-system) that watches namespace events.
+
+What it does:
+- When a new namespace is created → copies registry secret from kube-system within 5 seconds
+- Reconciles all namespaces every 60 seconds (safety net)
+- Patches all ServiceAccounts with `imagePullSecrets`
+
+### `scripts/update-all-registries.sh`
+
+**Purpose:** Bulk-updates image references in chaos-charts and agent-charts YAML files.
+
+What it does:
+- Reads `IMAGE_REGISTRY` from `.env`
+- Replaces `docker.io` / `litmuschaos` / `weaveworksdemos` image prefixes with registry path in:
+  - `chaos-charts/faults/*/fault.yaml` (36+ files)
+  - `chaos-charts/experiments/*/experiment*.yaml` (7 files)
+  - `agent-charts/litellm/deployment.yaml`
+
+### `scripts/fix-namespace-pull-secrets.sh`
+
+**Purpose:** Emergency fix script — patches all SAs in litmus + sock-shop and restarts failing pods.
+
+---
+
+## 2. ace-monorepo — Modified Files
+
+### `deploy/helm/ace/values.yaml`
+
+Added fields (not in main):
+```yaml
+chartsBranch: "main"                    # Git branch for chart clone
+imageRegistry: ""                        # Registry prefix (from .env)
+staticIP:                                # Static LoadBalancer IPs
+  web: "100.78.201.16"
+  langfuse: "100.78.201.15"
+  certifier: "100.78.201.14"
+imagePullSecretName: "jfrog-registry"   # K8s secret name (from .env)
+images:
+  alpineGit: alpine/git                  # New: for init container
+```
+
+### `deploy/helm/ace/templates/_helpers.tpl`
+
+Added `ace.image` helper template that prefixes `imageRegistry` to any image path.
+
+### `deploy/helm/ace/templates/graphql.yaml`
+
+Changes vs main:
+- Added `imagePullSecrets: [{name: {{ .Values.imagePullSecretName }}}]`
+- Init container uses `ace.image` helper + CA cert mount + `chartsBranch`
+- Added env vars: `IMAGE_REGISTRY`, `IMAGE_PULL_SECRET_NAME`
+- CA cert mounted at `/certs` (main had `/etc/ssl/certs/...`)
+
+### `deploy/helm/ace/templates/auth.yaml`
+
+Added `imagePullSecrets` to pod spec.
+
+### `deploy/helm/ace/templates/web.yaml`
+
+- Added `imagePullSecrets`
+- Changed service type: `NodePort` → `LoadBalancer` (with azure internal annotation)
+- Added `staticIP` conditional
+- Image uses `ace.image` helper
+
+### `deploy/helm/ace/templates/certifier.yaml`
+
+- Changed service type: `NodePort` → `LoadBalancer` (with azure internal annotation)
+- Added `imagePullSecrets`
+- Added `staticIP` conditional
+
+### `deploy/helm/ace/templates/mongodb.yaml`
+
+Added `imagePullSecrets` to pod spec.
+
+### `deploy/helm/ace/templates/litellm.yaml`
+
+Added `imagePullSecrets` to pod spec.
+
+### `deploy/helm/ace/templates/langfuse.yaml`
+
+- Added `imagePullSecrets` to all 6 deployments (web, worker, postgres, redis, clickhouse, minio)
+- Changed service type: `NodePort` → `LoadBalancer` (with azure internal annotation)
+- Added `staticIP` conditional
+
+### `scripts/setup.sh`
+
+Changes vs main:
+- Added Section 4: reads `JFROG_USER`/`JFROG_TOKEN` from env silently (no interactive prompt — delegates credential handling to `apply-cluster-prereqs.sh`)
+- Skips `apply-cluster-prereqs.sh` if registry secret already exists
+- `generate_helm_values_env()` injects `imageRegistry`, `imagePullSecretName`, `chartsBranch` into `values-env.yaml`
+- Requires `.env` to exist (user creates via `cp .env.example .env` before running)
+
+### `scripts/azure_build/run.sh`
+
+All image exports prefixed with `${IMAGE_REGISTRY}`.
+
+### `scripts/azure_build/start-agentcert-v2.sh`
+
+`env_val` defaults include registry prefix. Image tags updated to versioned builds.
+
+### `.env.example`
+
+Added: `IMAGE_REGISTRY`, `IMAGE_PULL_SECRET_NAME`, `CHARTS_BRANCH`, all chaos infra image vars, MCP server images, `CERTIFIER_IMAGE`, `CUSTOM_CA_CERT_PATH`.
+
+### `docker-compose.yml`
+
+Updated graphql image tag.
+
+### `deploy/k8s/graphql.yaml`
+
+Updated graphql image tag.
+
+---
+
+## 3. AgentCert Submodule Changes
+
+### Go Code
 
 | File | Change |
 |------|--------|
-| `scripts/setup.sh` | Removed JFrog credential prompts (delegated to `apply-cluster-prereqs.sh`). Skips prereqs if secret already exists. Generates `values-env.yaml` with `imageRegistry`, `imagePullSecretName`, `chartsBranch` from `.env`. |
-| `scripts/azure_build/run.sh` | All image exports prefixed with `${IMAGE_REGISTRY}`. |
-| `scripts/azure_build/start-agentcert-v2.sh` | Same — `env_val` defaults include registry prefix. Install-app/agent tags updated to versioned builds. |
+| `utils/variables.go` | Added `ImagePullSecretName` config field (reads `IMAGE_PULL_SECRET_NAME` env, default `jfrog-registry`) |
+| `pkg/chaos_infrastructure/infra_utils.go` | SA YAML uses `utils.Config.ImagePullSecretName` instead of hardcoded string. ManifestParser replaces `#{IMAGE_PULL_SECRET_NAME}` in templates. |
+| `pkg/chaos_experiment/ops/service.go` | Injects `--set=global.imageRegistry=...` into install-application workflow args |
+| `pkg/helm/service.go` | Adds `--set global.imageRegistry=...` to helm install args |
+| `pkg/projects/project_handler.go` | Sets default image registry for new projects from `IMAGE_REGISTRY` env |
+| `pkg/agent_registry/helm.go` | Passes registry/sidecar image overrides to flash-agent helm install |
 
-### 1.3 Helm Chart (`deploy/helm/ace/`)
+### Manifest YAML Files (14 files)
 
-| File | Change | Why |
-|------|--------|-----|
-| `templates/_helpers.tpl` | Added `ace.image` helper that prefixes `imageRegistry` to image path | DRY — all templates use `{{ include "ace.image" ... }}` |
-| `templates/graphql.yaml` | Added: `imagePullSecrets`, `IMAGE_REGISTRY` env var, `IMAGE_PULL_SECRET_NAME` env var, `alpine/git` init container with CA cert + chartsBranch, volume mounts for CA certs | GraphQL needs registry info to deploy chaos infra + clone charts from GitHub |
-| `templates/auth.yaml` | Added `imagePullSecrets: [{name: {{ .Values.imagePullSecretName }}}]` | Auth pod pulls from private registry |
-| `templates/web.yaml` | Added `imagePullSecrets`, changed to LoadBalancer with `staticIP` support, azure internal annotation | Web pod + external access |
-| `templates/certifier.yaml` | Changed from NodePort to LoadBalancer, added `imagePullSecrets`, `staticIP` support | Certifier needs external access for PDF downloads |
-| `templates/mongodb.yaml` | Added `imagePullSecrets` | MongoDB pulls from private registry |
-| `templates/litellm.yaml` | Added `imagePullSecrets` | LiteLLM pulls from private registry |
-| `templates/langfuse.yaml` | Added `imagePullSecrets` to all 6 deployments, LoadBalancer with `staticIP` | Langfuse stack (web, worker, postgres, redis, clickhouse, minio) |
-| `values.yaml` | Added: `imageRegistry: ""`, `imagePullSecretName`, `chartsBranch`, `staticIP` (web/langfuse/certifier), `images.alpineGit` | Central configuration — all overridden from `.env` via `values-env.yaml` |
+All `cluster/` and `namespace/` manifests: replaced hardcoded `jfrog-registry` with `#{IMAGE_PULL_SECRET_NAME}` placeholder (resolved at runtime).
 
-### 1.4 Infrastructure (`deploy/`)
+Files: `1b_argo_rbac`, `1c_argo_deployment`, `2b_litmus_admin_rbac`, `2c_litmus_deployment`, `3b_agents_deployment`, `4a_mcp_tools_rbac`, `4b_mcp_tools_deployment` (×2 for cluster + namespace scope).
+
+---
+
+## 4. agent-charts Submodule Changes
 
 | File | Change |
 |------|--------|
-| `deploy/jfrog-secret-sync.yaml` | **NEW** — Kubernetes Deployment in kube-system that watches namespace events and replicates the registry secret + patches SAs cluster-wide. Reconciles every 60s. |
-| `deploy/k8s/graphql.yaml` | Updated image tag to `v6-dynamic-secret` |
+| `charts/flash-agent/templates/deployment.yaml` | `{{- if .Values.registry }}` conditional (prevents double-prefix) |
+| `charts/flash-agent/values.yaml` | Added `registry` field |
+| `charts/k8s-agent/templates/deployment.yaml` | Added `imagePullSecrets` |
+| `charts/k8s-agent/values.yaml` | Added `registry` field |
+| `install-agent/main.go` | Added `ensureImagePullSecret()` — copies secret before helm install |
+| `litellm/deployment.yaml` | Added `imagePullSecrets` |
 
-### 1.5 Configuration
+---
+
+## 5. app-charts Submodule Changes
 
 | File | Change |
 |------|--------|
-| `.env.example` | Added `IMAGE_REGISTRY`, `IMAGE_PULL_SECRET_NAME`, `CHARTS_BRANCH`, chaos infra image vars (`SUBSCRIBER_IMAGE`, `CHAOS_OPERATOR_IMAGE`, etc.), MCP server images, `CERTIFIER_IMAGE` |
-| `docker-compose.yml` | Updated graphql image tag |
-| `.gitignore` | Added submodule directories |
+| `charts/sock-shop/values.yaml` | Added `global.imageRegistry` |
+| `charts/sock-shop/templates/_helpers.tpl` | Added image helper that prefixes registry |
+| 13 sock-shop deployment templates | Added `imagePullSecrets` |
+| `templates/mcptools/*.yaml` | Added `imagePullSecrets` |
+| `install-app/main.go` | Added `ensureImagePullSecret()` + `ensureNamespace()` |
 
 ---
 
-## 2. AgentCert Submodule Changes
+## 6. chaos-charts Submodule Changes
 
-### 2.1 Go Code
-
-| File | Change | Why |
-|------|--------|-----|
-| `utils/variables.go` | Added `ImagePullSecretName` field (reads `IMAGE_PULL_SECRET_NAME` env var, default `jfrog-registry`) | Config struct for dynamic secret name |
-| `pkg/chaos_infrastructure/infra_utils.go` | Changed hardcoded `jfrog-registry` → `utils.Config.ImagePullSecretName`. Added `#{IMAGE_PULL_SECRET_NAME}` replacement in ManifestParser. | SA YAML and manifest templates now use dynamic secret name |
-| `pkg/chaos_experiment/ops/service.go` | Added `--set=global.imageRegistry=...` injection into install-application workflow template args | Sock-shop chart needs registry prefix for all images |
-| `pkg/helm/service.go` | Added `--set global.imageRegistry=...` to helm install args | Charts installed by graphql get correct registry |
-| `pkg/projects/project_handler.go` | Reads `IMAGE_REGISTRY` env var to set default image registry for new projects | UI projects use private registry by default |
-| `pkg/agent_registry/helm.go` | Passes registry/sidecar image overrides to flash-agent helm install | Flash-agent gets correct registry-prefixed images |
-
-### 2.2 Manifest YAML Files (cluster/ and namespace/)
-
-All manifest files had hardcoded `jfrog-registry` replaced with `#{IMAGE_PULL_SECRET_NAME}` placeholder (resolved at runtime by ManifestParser):
-
-| File | Change |
-|------|--------|
-| `cluster/1b_argo_rbac.yaml` | `imagePullSecrets: [{name: #{IMAGE_PULL_SECRET_NAME}}]` on argo-chaos SA |
-| `cluster/1c_argo_deployment.yaml` | `imagePullSecrets` on workflow-controller pod |
-| `cluster/2b_litmus_admin_rbac.yaml` | `imagePullSecrets` on litmus-admin SA, fixed indentation |
-| `cluster/2c_litmus_deployment.yaml` | `imagePullSecrets` on chaos-operator + chaos-exporter pods |
-| `cluster/3b_agents_deployment.yaml` | `imagePullSecrets` on subscriber + event-tracker pods |
-| `cluster/4a_mcp_tools_rbac.yaml` | `imagePullSecrets` on mcp-server SAs |
-| `cluster/4b_mcp_tools_deployment.yaml` | `imagePullSecrets` on MCP deployment pods |
-| `namespace/` (same 7 files) | Same changes for namespace-scoped deployments |
+| Category | Files | Change |
+|----------|:---:|--------|
+| Faults | 36+ | `spec.definition.image`, `LIB_IMAGE`, `STRESS_IMAGE`, `TC_IMAGE` → registry-prefixed |
+| Experiments | 7 | `install-application` and `install-agent` images → versioned tags |
 
 ---
 
-## 3. agent-charts Submodule Changes
-
-| File | Change | Why |
-|------|--------|-----|
-| `charts/flash-agent/templates/deployment.yaml` | Changed `{{ .Values.registry \| default "..." }}/` → `{{- if .Values.registry }}{{ .Values.registry }}/{{- end }}` | Prevents double-prefix or leading `/` when registry is empty |
-| `charts/flash-agent/values.yaml` | `registry: infyartifactory.jfrog.io/docker-local` | Default registry for helm installs |
-| `charts/k8s-agent/templates/deployment.yaml` | Added `imagePullSecrets` | K8s-agent pod needs registry credentials |
-| `charts/k8s-agent/values.yaml` | `registry: infyartifactory.jfrog.io/docker-local` | Default registry |
-| `install-agent/main.go` | Added `ensureImagePullSecret()` — copies secret from kube-system before helm install | Prevents 401 race condition |
-| `litellm/deployment.yaml` | Added `imagePullSecrets`, updated image to use registry | LiteLLM pod in litellm namespace |
-
----
-
-## 4. app-charts Submodule Changes
-
-| File | Change | Why |
-|------|--------|-----|
-| `charts/sock-shop/values.yaml` | Added `global.imageRegistry` | Central registry for all sock-shop images |
-| `charts/sock-shop/templates/_helpers.tpl` | Added `sock-shop-litmus.image` helper that prefixes `global.imageRegistry` | DRY — all templates use helper |
-| 13 sock-shop deployment templates | Added `imagePullSecrets: [{name: jfrog-registry}]` | Each pod needs credentials |
-| `templates/mcptools/kubernetes-mcp-server.yaml` | Added `imagePullSecrets` | MCP pod |
-| `templates/mcptools/prometheus-mcp-server.yaml` | Added `imagePullSecrets` | MCP pod |
-| `install-app/main.go` | Added `ensureImagePullSecret()` + `ensureNamespace()` | Creates secret in target namespace before helm install |
-
----
-
-## 5. chaos-charts Submodule Changes (~50 files)
-
-| Category | Change |
-|----------|--------|
-| **Faults** (36+ `fault.yaml`) | `spec.definition.image` → `$REGISTRY/litmuschaos/go-runner:latest`; `LIB_IMAGE`, `STRESS_IMAGE`, `TC_IMAGE` env vars → registry-prefixed |
-| **Experiments** (7 files) | `install-application` image → versioned tag; `install-agent` image → versioned tag |
-
----
-
-## 6. certifier Submodule Changes
+## 7. certifier Submodule Changes
 
 | File | Change |
 |------|--------|
@@ -139,24 +212,21 @@ All manifest files had hardcoded `jfrog-registry` replaced with `#{IMAGE_PULL_SE
 
 ---
 
-## Key Design Decisions
+## Docker Images Built & Pushed
 
-| Decision | Rationale |
-|----------|-----------|
-| Single source of truth (`.env`) | Change `IMAGE_REGISTRY` in one place → all scripts/charts/code use it |
-| `IMAGE_PULL_SECRET_NAME` dynamic | Secret name configurable from `.env` → Go code reads it → manifest templates use placeholder |
-| `jfrog-secret-sync` Deployment | Auto-replicates secret to new namespaces created by experiments (race condition fix) |
-| `ensureImagePullSecret()` in Go | install-app/install-agent create secret before helm install (belt + suspenders) |
-| Credentials NOT in `.env` | Security — only in K8s secrets; provided via env vars or interactive prompt |
-| LoadBalancer with static IPs | Certifier/web/langfuse accessible externally; IPs persist across redeployments |
-| `--force` on kubectl apply | Prevents "AlreadyExists" error when jfrog-secret-sync creates secret before the script |
+| Image | Tag | Key feature |
+|-------|-----|-------------|
+| `agentcert/agentcert-graphql` | `v6-dynamic-secret` | Dynamic `IMAGE_PULL_SECRET_NAME` from env |
+| `agentcert/agentcert-install-app` | `v3-secret-fix` | Creates secret before helm install |
+| `agentcert/agentcert-install-agent` | `v3-template-fix` | Fixed registry prefix template |
 
 ---
 
-## Docker Images Built
+## Design Principles
 
-| Image | Tag | What's inside |
-|-------|-----|---------------|
-| `agentcert/agentcert-graphql` | `v6-dynamic-secret` | Dynamic `IMAGE_PULL_SECRET_NAME` + all registry injection logic |
-| `agentcert/agentcert-install-app` | `v3-secret-fix` | `ensureImagePullSecret()` + charts with `global.imageRegistry` |
-| `agentcert/agentcert-install-agent` | `v3-template-fix` | Fixed `{{- if .Registry }}` template (no leading `/`) |
+1. **Single source of truth** — `.env` file. Change `IMAGE_REGISTRY` once, everything updates.
+2. **Credentials never stored in files** — only in K8s secrets (provided via env vars or prompt).
+3. **`setup.sh` never prompts for credentials** — delegates to `apply-cluster-prereqs.sh`.
+4. **Dynamic secret name** — `IMAGE_PULL_SECRET_NAME` flows from `.env` → Helm → Go code → manifest templates.
+5. **Auto-replication** — `jfrog-secret-sync` ensures new namespaces get the secret automatically.
+6. **Belt + suspenders** — `install-app`/`install-agent` also create secrets before helm install (race condition fix).

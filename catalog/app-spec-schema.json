@@ -1,0 +1,313 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ACE AppCatalogEntry",
+  "description": "Schema for ACE catalog app.yaml files (spec §5)",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "ace.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "AppCatalogEntry"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "displayName", "version", "tier", "domain", "capabilityDomains", "maintainers"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+          "maxLength": 63,
+          "description": "Stable primary key. Kebab-case. Cannot change after experiments reference it."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "SemVer string"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["official", "community"]
+        },
+        "domain": {
+          "type": "string",
+          "description": "Must match an id in catalog/domains.yaml"
+        },
+        "capabilityDomains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "maintainers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "email"],
+            "properties": {
+              "name": { "type": "string" },
+              "email": {
+                "type": "string",
+                "format": "email"
+              }
+            }
+          }
+        },
+        "license": { "type": "string" },
+        "repository": { "type": "string", "format": "uri" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["description", "install", "healthProbe", "microservices", "faultCompatibility"],
+      "properties": {
+        "description": {
+          "type": "object",
+          "required": ["short", "long", "suitableFor"],
+          "properties": {
+            "short": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 120
+            },
+            "long": { "type": "string" },
+            "suitableFor": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string" }
+            },
+            "notSuitableFor": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "install": {
+          "type": "object",
+          "required": ["method", "namespace", "timeout"],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": ["helm", "external-helm", "manifests"]
+            },
+            "folder": { "type": "string" },
+            "chartRef": {
+              "type": "object",
+              "required": ["repo", "chart", "version"],
+              "properties": {
+                "repo": { "type": "string" },
+                "chart": { "type": "string" },
+                "version": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+",
+                  "description": "Must be pinned SemVer, no 'latest' or '*'"
+                }
+              }
+            },
+            "namespace": {
+              "type": "object",
+              "required": ["default"],
+              "properties": {
+                "default": { "type": "string" },
+                "configurable": { "type": "boolean" }
+              }
+            },
+            "timeout": {
+              "type": "string",
+              "pattern": "^[0-9]+(m|h|s)$"
+            },
+            "wait": { "type": "boolean" },
+            "additionalManifests": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "healthProbe": {
+          "type": "object",
+          "required": ["url", "expectedStatus"],
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Must contain {{.AppNamespace}}, not a hardcoded namespace"
+            },
+            "expectedStatus": {
+              "type": "string",
+              "pattern": "^[0-9]{3}$"
+            },
+            "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "loadTest": {
+          "type": "object",
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "method": {
+              "type": "string",
+              "enum": ["deployer", "job", "external"]
+            },
+            "image": { "type": "string" },
+            "args": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "installNamespace": { "type": "string" }
+          }
+        },
+        "microservices": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "k8s"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]*$"
+              },
+              "displayName": { "type": "string" },
+              "description": { "type": "string" },
+              "k8s": {
+                "type": "object",
+                "required": ["label", "kind"],
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9._/-]+=.+$",
+                    "description": "Must be key=value format"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": ["deployment", "statefulset", "daemonset"]
+                  },
+                  "namespace": { "type": "string" },
+                  "containerName": { "type": "string" }
+                }
+              },
+              "relevantFaults": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "criticality": {
+                "type": "string",
+                "enum": ["high", "medium", "low"]
+              },
+              "dependsOn": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "sla": {
+                "type": "object",
+                "properties": {
+                  "errorRateThreshold": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        "observability": {
+          "type": "object",
+          "properties": {
+            "prometheus": {
+              "type": "object",
+              "properties": {
+                "serviceMonitor": { "type": "boolean" },
+                "alertRules": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "severity": { "type": "string" },
+                      "expr": { "type": "string" },
+                      "for": { "type": "string" },
+                      "annotations": { "type": "object" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "faultCompatibility": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["faultName", "compatible"],
+            "properties": {
+              "faultName": { "type": "string" },
+              "compatible": { "type": "boolean" },
+              "notes": { "type": "string" },
+              "recommendedTargets": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "groundTruth": {
+          "type": "object",
+          "properties": {
+            "version": { "type": "string" },
+            "faultAlertMappings": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        },
+        "rbac": {
+          "type": "object",
+          "properties": {
+            "chaosRunnerPermissions": {
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "displayName", "type", "helmPath"],
+            "properties": {
+              "key": { "type": "string" },
+              "displayName": { "type": "string" },
+              "description": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["string", "integer", "boolean", "enum"]
+              },
+              "required": { "type": "boolean" },
+              "default": { "type": "string" },
+              "helmPath": { "type": "string" },
+              "values": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "min": { "type": "integer" },
+              "max": { "type": "integer" },
+              "unit": { "type": "string" },
+              "advanced": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

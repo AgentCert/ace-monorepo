@@ -1,0 +1,49 @@
+# ACE Domain Taxonomy
+# This file is the authoritative list of domains used in app.yaml metadata.domain fields.
+# Every app.yaml must reference a domain.id from this list.
+domains:
+  - id: cloud-native
+    displayName: Cloud Native
+    description: "Kubernetes-native microservices applications"
+    icon: cloud
+    exampleApps: [sock-shop, otel-demo]
+    capabilityFile: capabilities/cloud-native.yaml
+
+  - id: service-mesh
+    displayName: Service Mesh
+    description: "Applications with Istio/Envoy mesh instrumentation"
+    icon: mesh
+    exampleApps: [bookinfo]
+
+  - id: telecom
+    displayName: Telecom
+    description: "5G core, IMS, NFV workloads"
+    icon: signal
+    exampleApps: []
+    capabilityFile: capabilities/telecom.yaml
+
+  - id: health-it
+    displayName: Health IT
+    description: "FHIR, HL7 services, clinical workflows"
+    icon: health
+    exampleApps: []
+    capabilityFile: capabilities/health-it.yaml
+
+  - id: itops
+    displayName: IT Operations
+    description: "Monitoring stacks, CMDB, ticketing systems"
+    icon: ops
+    exampleApps: []
+    capabilityFile: capabilities/itops.yaml
+
+  - id: finops
+    displayName: FinOps / Financial
+    description: "Cost management, financial transaction services"
+    icon: finance
+    exampleApps: []
+    capabilityFile: capabilities/finops.yaml
+
+  - id: common
+    displayName: Common
+    description: "Cross-domain capabilities applicable to all workload types"
+    capabilityFile: capabilities/common.yaml

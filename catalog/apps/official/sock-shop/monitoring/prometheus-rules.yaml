@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sock-shop-alerts
+  namespace: "{{.AppNamespace}}"
+  labels:
+    app: sock-shop
+    role: alert-rules
+spec:
+  groups:
+    - name: sock-shop.availability
+      interval: 30s
+      rules:
+        - alert: HighRequestErrorRate
+          expr: |
+            sum(rate(request_duration_seconds_count{namespace="{{.AppNamespace}}",status_code=~"5.."}[1m]))
+              /
+            sum(rate(request_duration_seconds_count{namespace="{{.AppNamespace}}"}[1m])) > 0.05
+          for: 2m
+          labels:
+            severity: critical
+            app: sock-shop
+          annotations:
+            summary: "High HTTP error rate in sock-shop"
+            description: "More than 5% of requests to sock-shop (ns: {{.AppNamespace}}) are returning 5xx errors."
+
+        - alert: KubePodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="{{.AppNamespace}}",condition="true"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            app: sock-shop
+          annotations:
+            summary: "Pod not ready in sock-shop namespace"
+            description: "At least one pod in namespace {{.AppNamespace}} has been not-ready for more than 5 minutes."
+
+        - alert: NoRequestsReceived
+          expr: |
+            sum(rate(request_duration_seconds_count{namespace="{{.AppNamespace}}"}[5m])) == 0
+          for: 3m
+          labels:
+            severity: warning
+            app: sock-shop
+          annotations:
+            summary: "No traffic to sock-shop"
+            description: "No HTTP requests have been received in namespace {{.AppNamespace}} for the past 3 minutes — load generator may be down."

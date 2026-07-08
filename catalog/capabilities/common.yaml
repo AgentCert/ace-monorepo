@@ -1,0 +1,23 @@
+domain: common
+displayName: Common
+description: "Capabilities applicable across all domains"
+
+capabilities:
+  observe:
+    - key: http-probe
+      displayName: HTTP Probe
+      description: "Issue HTTP requests to check endpoint health and response content"
+      relatedFaults: [pod-network-loss, pod-network-latency, link-down-simulation]
+    - key: generic-api-query
+      displayName: Generic API Query
+      description: "Query any REST or GraphQL API for status data"
+      relatedFaults: []
+  act:
+    - key: webhook-notify
+      displayName: Webhook Notify
+      description: "Send structured notifications via webhook (Slack, PagerDuty, Teams, etc.)"
+      relatedFaults: []
+    - key: email-notify
+      displayName: Email Notify
+      description: "Send email notifications to on-call teams"
+      relatedFaults: []

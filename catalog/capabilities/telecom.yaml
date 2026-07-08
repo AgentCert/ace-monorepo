@@ -1,0 +1,51 @@
+domain: telecom
+displayName: Telecom
+description: "Capabilities for 5G core, IMS, NFV, and telecom network workloads"
+
+capabilities:
+  observe:
+    - key: snmp-query
+      displayName: SNMP Query
+      description: "Query network device OIDs via SNMP v2c/v3"
+      relatedFaults: [link-down-simulation]
+    - key: netconf-get
+      displayName: NETCONF Get
+      description: "Fetch device configuration and state via NETCONF/YANG"
+      relatedFaults: []
+    - key: alarm-query
+      displayName: Alarm Query
+      description: "Query network alarm management system for active alarms"
+      relatedFaults: [nf-restart, link-down-simulation]
+    - key: topology-traverse
+      displayName: Topology Traverse
+      description: "Navigate network topology graph to identify impact radius"
+      relatedFaults: [link-down-simulation]
+    - key: syslog-query
+      displayName: Syslog Query
+      description: "Query syslog servers for device error messages"
+      relatedFaults: []
+    - key: pm-counter-query
+      displayName: PM Counter Query
+      description: "Query 3GPP Performance Management counters"
+      relatedFaults: []
+  act:
+    - key: netconf-edit-config
+      displayName: NETCONF Edit Config
+      description: "Push configuration changes to network devices via NETCONF"
+      relatedFaults: []
+    - key: config-rollback
+      displayName: Config Rollback
+      description: "Rollback device or network function configuration to a known-good state"
+      relatedFaults: []
+    - key: interface-admin-state
+      displayName: Interface Admin State
+      description: "Administratively enable or disable a network interface"
+      relatedFaults: [link-down-simulation]
+    - key: route-policy-update
+      displayName: Route Policy Update
+      description: "Update routing policies (BGP, OSPF, SR-MPLS) for traffic engineering"
+      relatedFaults: []
+    - key: nf-restart
+      displayName: NF Restart
+      description: "Trigger restart of a containerized network function"
+      relatedFaults: [nf-restart]

@@ -1,0 +1,92 @@
+apiVersion: ace.io/v1
+kind: FaultCatalogEntry
+
+metadata:
+  name: carts-db-corrupt
+  displayName: "Carts DB Corruption"
+  version: "1.0.0"
+  tier: official
+  scope: app-specific
+  domain: null
+  targetApp: sock-shop
+  tags: [data-integrity, mongodb, sock-shop, cart-service]
+  maintainers:
+    - name: "ACE Team"
+      email: "ace@example.io"
+
+spec:
+  description:
+    short: "Corrupts documents in the carts MongoDB to simulate data-integrity failure"
+    long: |
+      Runs a one-shot MongoDB job that writes malformed BSON documents to the
+      carts collection in the Sock Shop carts-db instance. Simulates a data
+      corruption event where the carts service returns errors on cart retrieval,
+      causing the frontend to show error states for affected users.
+    suitableFor:
+      - "Sock Shop only — targets the MongoDB instance named 'carts-db'"
+      - "Testing agent detection of data-integrity errors in cart operations"
+    notSuitableFor:
+      - "Any other app — the carts-db service name is Sock Shop specific"
+
+  implementation:
+    type: script
+    image: "aceio/mongo-fault-injector:1.0.0"
+    command: ["/corrupt-carts.sh"]
+    args: []
+    envFrom: []
+
+  targetSpec:
+    required: true
+    resolutionMode: microservice-label
+
+  parameters:
+    - key: CORRUPT_PERCENTAGE
+      displayName: "% Documents to Corrupt"
+      type: integer
+      unit: percent
+      default: "10"
+      min: 1
+      max: 50
+      required: true
+      description: "Percentage of documents in the carts collection to corrupt."
+      litmusEnv: CORRUPT_PERCENTAGE
+
+    - key: CHAOS_DURATION
+      displayName: "Chaos Duration"
+      type: integer
+      unit: seconds
+      default: "60"
+      min: 15
+      max: 300
+      required: true
+      description: "Duration before corrupted documents are restored to valid state."
+      litmusEnv: CHAOS_DURATION
+
+  compatibility:
+    targetDomains: [cloud-native]
+    incompatibleApps: []
+    requiredCapabilities: []
+
+  observability:
+    expectedSymptoms:
+      - "HTTP 500 errors on GET /carts/<id> endpoint"
+      - "carts-service error log: 'Failed to decode cart document'"
+      - "Frontend shows 'Unable to load cart' for affected user sessions"
+    expectedAlerts:
+      - CartsServiceErrorRateHigh
+      - MongoDBDocumentCorruptionDetected
+    detectionWindowSecs: 30
+
+  groundTruth:
+    category: data-integrity
+    impact: medium
+    detectWithinSecs: 30
+    mitigateWithinSecs: 90
+    detectionHints:
+      - "HTTP 500 rate on /carts/* endpoints rises above 5%"
+      - "Agent tool call: check_service_error_rate or query_logs for 'Failed to decode'"
+      - "MongoDB: db.carts.find({'$where': 'this.items == null'}) returns results"
+    remediationHints:
+      - "Run db.carts.deleteMany({'items': null}) to remove corrupted documents"
+      - "Verify HTTP 500 rate returns to baseline"
+      - "Confirm no corrupted documents remain in collection"

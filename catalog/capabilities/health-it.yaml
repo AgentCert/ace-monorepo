@@ -1,0 +1,39 @@
+domain: health-it
+displayName: Health IT
+description: "Capabilities for FHIR, HL7 services, clinical workflows, and health informatics"
+
+capabilities:
+  observe:
+    - key: fhir-read
+      displayName: FHIR Read
+      description: "Read FHIR R4 resources from a FHIR server"
+      relatedFaults: [pod-network-loss, pod-network-latency]
+    - key: hl7-parse
+      displayName: HL7 Parse
+      description: "Parse HL7 v2.x messages for anomaly detection"
+      relatedFaults: []
+    - key: patient-monitor-query
+      displayName: Patient Monitor Query
+      description: "Query patient monitoring system for vital sign anomalies"
+      relatedFaults: []
+    - key: clinical-alert-query
+      displayName: Clinical Alert Query
+      description: "Query clinical decision support alert queue for unhandled alerts"
+      relatedFaults: []
+    - key: audit-log-query
+      displayName: Audit Log Query
+      description: "Query HIPAA audit logs for unauthorized access anomalies"
+      relatedFaults: []
+  act:
+    - key: fhir-write
+      displayName: FHIR Write
+      description: "Create or update FHIR resources as a remediation action"
+      relatedFaults: []
+    - key: adt-trigger
+      displayName: ADT Trigger
+      description: "Trigger Admit/Discharge/Transfer workflow in the HIS"
+      relatedFaults: []
+    - key: alert-acknowledge
+      displayName: Alert Acknowledge
+      description: "Acknowledge or escalate a clinical alert in the alert management system"
+      relatedFaults: []

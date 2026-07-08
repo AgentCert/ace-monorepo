@@ -1,0 +1,39 @@
+domain: itops
+displayName: IT Operations
+description: "Capabilities for ITSM, monitoring, CMDB, and IT operations workflows"
+
+capabilities:
+  observe:
+    - key: cmdb-query
+      displayName: CMDB Query
+      description: "Query a CMDB for asset records and configuration item relationships"
+      relatedFaults: []
+    - key: monitoring-alert-query
+      displayName: Monitoring Alert Query
+      description: "Query monitoring system (Nagios, Zabbix, Dynatrace) for active alerts"
+      relatedFaults: []
+    - key: log-aggregator-query
+      displayName: Log Aggregator Query
+      description: "Query centralized log systems (ELK, Splunk) for error patterns"
+      relatedFaults: []
+    - key: change-calendar-query
+      displayName: Change Calendar Query
+      description: "Query change management calendar for upcoming maintenance windows"
+      relatedFaults: []
+  act:
+    - key: ticket-create
+      displayName: Ticket Create
+      description: "Create incident or problem ticket in ITSM system (ServiceNow, Jira)"
+      relatedFaults: []
+    - key: ticket-update
+      displayName: Ticket Update
+      description: "Update existing incident ticket with diagnosis or resolution notes"
+      relatedFaults: []
+    - key: runbook-execute
+      displayName: Runbook Execute
+      description: "Trigger automated runbook in response to detected fault"
+      relatedFaults: []
+    - key: cmdb-update
+      displayName: CMDB Update
+      description: "Update CMDB configuration item attributes after remediation"
+      relatedFaults: []

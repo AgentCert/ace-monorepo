@@ -1,0 +1,102 @@
+apiVersion: ace.io/v1
+kind: FaultCatalogEntry
+
+metadata:
+  name: cpu-hog
+  displayName: "CPU Hog"
+  version: "1.0.0"
+  tier: official
+  scope: general
+  domain: null
+  targetApp: null
+  tags: [performance, resource-saturation, cpu]
+  maintainers:
+    - name: "ACE Team"
+      email: "ace@example.io"
+
+spec:
+  description:
+    short: "Saturates CPU on target pod(s) to simulate high load"
+    long: |
+      Consumes a configurable number of CPU cores on the target pod by running a
+      stress workload as a sidecar. Used to test agent detection of CPU saturation
+      events and remediation through scaling or alerting.
+    suitableFor:
+      - "Services that export CPU utilization metrics to Prometheus"
+      - "Testing HPA scale-out behavior under CPU load"
+      - "Agent detection of resource saturation events"
+    notSuitableFor:
+      - "Single-core pods where any CPU stress immediately causes OOM"
+
+  implementation:
+    type: litmus
+    chaosKind: ChaosEngine
+    experimentRef: pod-cpu-hog
+    namespace: litmus
+
+  targetSpec:
+    required: true
+    resolutionMode: microservice-label
+
+  parameters:
+    - key: CPU_CORES
+      displayName: "CPU Cores"
+      type: integer
+      unit: cores
+      default: "1"
+      min: 1
+      max: 8
+      required: true
+      description: "Number of CPU cores to consume on the target pod."
+      litmusEnv: CPU_CORES
+
+    - key: CHAOS_DURATION
+      displayName: "Chaos Duration"
+      type: integer
+      unit: seconds
+      default: "60"
+      min: 10
+      max: 600
+      required: true
+      description: "Duration for which CPU stress is applied."
+      litmusEnv: TOTAL_CHAOS_DURATION
+
+    - key: PODS_AFFECTED_PERC
+      displayName: "% Pods Affected"
+      type: integer
+      unit: percent
+      default: "100"
+      min: 1
+      max: 100
+      required: false
+      description: "Percentage of matching pods to target."
+      litmusEnv: PODS_AFFECTED_PERC
+
+  compatibility:
+    targetDomains: ["*"]
+    incompatibleApps: []
+    requiredCapabilities: []
+
+  observability:
+    expectedSymptoms:
+      - "container_cpu_usage_seconds_total rises sharply on target pod"
+      - "Pod CPU throttling metric (container_cpu_cfs_throttled_seconds_total) increases"
+      - "Response latency on target service increases proportionally"
+    expectedAlerts:
+      - KubePodCPUThrottlingHigh
+      - NodeCPUSaturation
+    detectionWindowSecs: 30
+
+  groundTruth:
+    category: performance
+    impact: medium
+    detectWithinSecs: 30
+    mitigateWithinSecs: 120
+    detectionHints:
+      - "Prometheus: container_cpu_usage_seconds_total spike on target pod label"
+      - "kubectl top pods -n <app-ns>: shows CPU near limit"
+      - "Agent tool call: query_prometheus with cpu_usage metric"
+    remediationHints:
+      - "Scale Deployment replicas to distribute load"
+      - "Trigger HPA if configured with CPU utilization target"
+      - "Confirm CPU normalizes after chaos window ends"

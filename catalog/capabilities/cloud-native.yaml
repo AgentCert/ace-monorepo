@@ -1,0 +1,51 @@
+domain: cloud-native
+displayName: Cloud Native
+description: "Capabilities for Kubernetes-native microservices and cloud workloads"
+
+capabilities:
+  observe:
+    - key: prometheus-query
+      displayName: Prometheus Query
+      description: "Issue PromQL queries to Prometheus to check metrics and thresholds"
+      relatedFaults: [pod-cpu-hog, pod-memory-hog, node-cpu-hog]
+    - key: kubernetes-get-pods
+      displayName: Kubernetes Get Pods
+      description: "List and describe pods in a namespace to detect anomalies"
+      relatedFaults: [pod-delete, pod-network-loss]
+    - key: kubernetes-get-events
+      displayName: Kubernetes Get Events
+      description: "List Kubernetes events to identify warning conditions"
+      relatedFaults: [pod-delete, node-drain]
+    - key: kubernetes-describe
+      displayName: Kubernetes Describe
+      description: "Describe any Kubernetes resource for state inspection"
+      relatedFaults: []
+    - key: log-query
+      displayName: Log Query
+      description: "Query container and application logs for error patterns"
+      relatedFaults: [pod-network-loss, container-kill]
+    - key: service-mesh-aware
+      displayName: Service Mesh Aware
+      description: "Query Istio/Envoy metrics, policies, and circuit breaker state"
+      relatedFaults: [pod-network-latency, pod-network-loss]
+  act:
+    - key: kubernetes-patch
+      displayName: Kubernetes Patch
+      description: "Patch Kubernetes resources to apply configuration changes"
+      relatedFaults: []
+    - key: kubernetes-delete
+      displayName: Kubernetes Delete
+      description: "Delete Kubernetes resources as a remediation action"
+      relatedFaults: [pod-delete]
+    - key: kubernetes-restart
+      displayName: Kubernetes Restart
+      description: "Rollout restart deployments or statefulsets"
+      relatedFaults: [pod-cpu-hog, pod-memory-hog]
+    - key: kubernetes-resource-quota
+      displayName: Kubernetes Resource Quota
+      description: "Manage ResourceQuota objects to prevent resource exhaustion"
+      relatedFaults: [pod-cpu-hog, pod-memory-hog]
+    - key: kubernetes-scale
+      displayName: Kubernetes Scale
+      description: "Scale Deployment or StatefulSet replicas up or down"
+      relatedFaults: [pod-delete]

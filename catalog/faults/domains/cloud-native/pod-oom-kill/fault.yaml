@@ -1,0 +1,92 @@
+apiVersion: ace.io/v1
+kind: FaultCatalogEntry
+
+metadata:
+  name: pod-oom-kill
+  displayName: "Pod OOM Kill"
+  version: "1.0.0"
+  tier: official
+  scope: domain
+  domain: cloud-native
+  targetApp: null
+  tags: [memory, oom, availability, cloud-native]
+  maintainers:
+    - name: "ACE Team"
+      email: "ace@example.io"
+
+spec:
+  description:
+    short: "Triggers an OOM kill on the target pod by exhausting memory"
+    long: |
+      Injects memory consumption on the target pod until the kernel OOM killer
+      terminates it. Tests the agent's ability to distinguish an OOM event from
+      a voluntary restart, detect the OOMKilled exit reason, and verify that
+      the pod restarts with appropriate memory limits or triggers an alert.
+    suitableFor:
+      - "Apps with memory-limit-constrained pods (resources.limits.memory set)"
+      - "Testing agent detection of OOMKilled container exit reason"
+    notSuitableFor:
+      - "Pods without memory limits set — will consume node memory unboundedly"
+      - "DaemonSets (OOM kill may disrupt node-level logging/monitoring)"
+
+  implementation:
+    type: litmus
+    chaosKind: ChaosEngine
+    experimentRef: pod-memory-hog
+    namespace: litmus
+
+  targetSpec:
+    required: true
+    resolutionMode: microservice-label
+
+  parameters:
+    - key: MEMORY_CONSUMPTION
+      displayName: "Memory Consumption (MB)"
+      type: integer
+      unit: megabytes
+      default: "500"
+      min: 100
+      max: 4096
+      required: true
+      description: "Memory in MB to consume on the target pod until OOM kill is triggered."
+      litmusEnv: MEMORY_CONSUMPTION
+
+    - key: CHAOS_DURATION
+      displayName: "Chaos Duration"
+      type: integer
+      unit: seconds
+      default: "30"
+      min: 10
+      max: 300
+      required: true
+      description: "Maximum duration before fault is cleaned up if OOM kill does not occur."
+      litmusEnv: TOTAL_CHAOS_DURATION
+
+  compatibility:
+    targetDomains: [cloud-native]
+    incompatibleApps: []
+    requiredCapabilities: []
+
+  observability:
+    expectedSymptoms:
+      - "Pod restarts with exit reason OOMKilled (exit code 137)"
+      - "kube_pod_container_status_last_terminated_reason == OOMKilled"
+      - "container_memory_usage_bytes spikes then pod disappears"
+    expectedAlerts:
+      - KubePodCrashLooping
+      - KubeContainerOOMKilled
+    detectionWindowSecs: 45
+
+  groundTruth:
+    category: availability
+    impact: high
+    detectWithinSecs: 45
+    mitigateWithinSecs: 90
+    detectionHints:
+      - "kubectl describe pod <target-pod>: Last State reason: OOMKilled"
+      - "Prometheus: kube_pod_container_status_last_terminated_reason{reason='OOMKilled'}"
+      - "Agent tool call: get_pod_events or describe_pod"
+    remediationHints:
+      - "Increase memory limits in Deployment spec"
+      - "Add or tune VPA (Vertical Pod Autoscaler) for the target service"
+      - "Confirm pod returns to Running state after restart"

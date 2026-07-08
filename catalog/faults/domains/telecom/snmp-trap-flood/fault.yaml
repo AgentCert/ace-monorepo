@@ -1,0 +1,100 @@
+apiVersion: ace.io/v1
+kind: FaultCatalogEntry
+
+metadata:
+  name: snmp-trap-flood
+  displayName: "SNMP Trap Flood"
+  version: "1.0.0"
+  tier: official
+  scope: domain
+  domain: telecom
+  targetApp: null
+  tags: [telecom, snmp, alert-storm, observability]
+  maintainers:
+    - name: "ACE Team"
+      email: "ace@example.io"
+
+spec:
+  description:
+    short: "Floods the SNMP trap receiver with high-volume synthetic traps"
+    long: |
+      Generates a high-volume synthetic SNMP trap flood targeting the app's
+      SNMP trap receiver endpoint. Used to test the agent's ability to
+      distinguish a genuine NF alarm from noise, triage alert storms without
+      false-positive remediation, and correctly identify the trap flood as
+      an injected condition rather than a real network failure.
+    suitableFor:
+      - "Telecom apps with an SNMP trap receiver (port 162/UDP)"
+      - "Testing agent storm-suppression or trap-deduplication behavior"
+    notSuitableFor:
+      - "Apps without an SNMP trap receiver"
+      - "Environments where UDP port 162 is firewalled from the fault injector pod"
+
+  implementation:
+    type: script
+    image: "aceio/snmp-fault-injector:1.0.0"
+    command: ["/inject.sh"]
+    args: []
+    envFrom: []
+
+  targetSpec:
+    required: true
+    resolutionMode: microservice-label
+
+  parameters:
+    - key: TRAP_RATE
+      displayName: "Trap Rate (traps/sec)"
+      type: integer
+      unit: "traps/second"
+      default: "100"
+      min: 10
+      max: 10000
+      required: true
+      description: "Number of SNMP traps per second to send to the target receiver."
+      litmusEnv: TRAP_RATE
+
+    - key: CHAOS_DURATION
+      displayName: "Chaos Duration"
+      type: integer
+      unit: seconds
+      default: "60"
+      min: 15
+      max: 300
+      required: true
+      description: "Duration for which the trap flood is sustained."
+      litmusEnv: CHAOS_DURATION
+
+    - key: TARGET_OID
+      displayName: "Target OID"
+      type: string
+      default: "1.3.6.1.4.1.99999.1.1"
+      required: false
+      description: "OID to include in the synthetic traps. Defaults to ACE test OID."
+      litmusEnv: TARGET_OID
+
+  compatibility:
+    targetDomains: [telecom]
+    incompatibleApps: []
+    requiredCapabilities: [snmp-trap-receiver]
+
+  observability:
+    expectedSymptoms:
+      - "SNMP trap receiver queue depth increases sharply"
+      - "Alert manager ingestion rate spikes"
+      - "Log volume on trap receiver pod increases"
+    expectedAlerts:
+      - SNMPTrapFloodDetected
+    detectionWindowSecs: 30
+
+  groundTruth:
+    category: availability
+    impact: medium
+    detectWithinSecs: 30
+    mitigateWithinSecs: 120
+    detectionHints:
+      - "Trap receiver pod logs: high ingestion rate"
+      - "Agent tool call: query_snmp_receiver_stats or check_alertmanager_queue"
+    remediationHints:
+      - "Apply trap rate-limiting at the SNMP receiver"
+      - "Filter synthetic OID from alert pipeline"
+      - "Confirm trap flood stops after CHAOS_DURATION elapses"

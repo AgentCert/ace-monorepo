@@ -1,0 +1,4 @@
+# Points to the Helm chart in app-charts/charts/sock-shop/
+# The CatalogService and install-app binary resolve this path relative to monorepo root.
+type: local
+path: "app-charts/charts/sock-shop"

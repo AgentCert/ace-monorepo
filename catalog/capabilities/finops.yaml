@@ -1,0 +1,35 @@
+domain: finops
+displayName: FinOps
+description: "Capabilities for cloud cost management, FinOps workflows, and financial operations"
+
+capabilities:
+  observe:
+    - key: cost-api-query
+      displayName: Cost API Query
+      description: "Query cloud provider cost APIs (AWS Cost Explorer, GCP Billing, OpenCost)"
+      relatedFaults: []
+    - key: budget-alert-query
+      displayName: Budget Alert Query
+      description: "Query budget thresholds and cost forecasts for breach detection"
+      relatedFaults: []
+    - key: resource-inventory-query
+      displayName: Resource Inventory Query
+      description: "Enumerate cloud resources for rightsizing analysis"
+      relatedFaults: []
+    - key: tag-compliance-check
+      displayName: Tag Compliance Check
+      description: "Identify untagged or mis-tagged cloud resources for cost allocation"
+      relatedFaults: []
+  act:
+    - key: rightsizing-apply
+      displayName: Rightsizing Apply
+      description: "Apply resource rightsizing recommendations to reduce waste"
+      relatedFaults: []
+    - key: resource-tag-update
+      displayName: Resource Tag Update
+      description: "Update cost allocation tags on cloud resources"
+      relatedFaults: []
+    - key: idle-resource-stop
+      displayName: Idle Resource Stop
+      description: "Stop or terminate idle cloud resources to reduce cost"
+      relatedFaults: []

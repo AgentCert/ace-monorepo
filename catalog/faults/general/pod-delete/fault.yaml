@@ -1,0 +1,102 @@
+apiVersion: ace.io/v1
+kind: FaultCatalogEntry
+
+metadata:
+  name: pod-delete
+  displayName: "Pod Delete"
+  version: "1.0.0"
+  tier: official
+  scope: general
+  domain: null
+  targetApp: null
+  tags: [resilience, availability, pod-lifecycle]
+  maintainers:
+    - name: "ACE Team"
+      email: "ace@example.io"
+
+spec:
+  description:
+    short: "Forcefully deletes one or more target pods"
+    long: |
+      Injects pod failure by deleting the target pod(s). Kubernetes reschedules them.
+      Used to test auto-recovery, readiness probe behavior, and the agent's ability to
+      detect pod churn and verify recovery. The chaos lasts for CHAOS_DURATION seconds
+      during which pods are periodically deleted.
+    suitableFor:
+      - "Stateless services backed by Kubernetes Deployments"
+      - "Testing agent detection of pod unavailability events"
+      - "Verifying readiness probe and liveness probe behavior"
+    notSuitableFor:
+      - "StatefulSets where pod identity matters without PVC snapshot support"
+      - "Services with very long startup times (>CHAOS_DURATION)"
+
+  implementation:
+    type: litmus
+    chaosKind: ChaosEngine
+    experimentRef: pod-delete
+    namespace: litmus
+
+  targetSpec:
+    required: true
+    resolutionMode: microservice-label
+
+  parameters:
+    - key: CHAOS_DURATION
+      displayName: "Chaos Duration"
+      type: integer
+      unit: seconds
+      default: "30"
+      min: 10
+      max: 600
+      required: true
+      description: "How long the chaos lasts. Pods are deleted repeatedly within this window."
+      litmusEnv: TOTAL_CHAOS_DURATION
+
+    - key: PODS_AFFECTED_PERC
+      displayName: "% Pods Affected"
+      type: integer
+      unit: percent
+      default: "50"
+      min: 1
+      max: 100
+      required: false
+      description: "What percentage of matching pods to delete in each iteration."
+      litmusEnv: PODS_AFFECTED_PERC
+
+    - key: FORCE_DELETE
+      displayName: "Force Delete"
+      type: boolean
+      default: "false"
+      required: false
+      description: "Skip graceful termination (SIGTERM) and force-kill immediately via SIGKILL."
+      litmusEnv: FORCE
+
+  compatibility:
+    targetDomains: ["*"]
+    incompatibleApps: []
+    requiredCapabilities: []
+
+  observability:
+    expectedSymptoms:
+      - "Target pod transitions to Terminating state"
+      - "Deployment ReplicaSet creates a replacement pod"
+      - "HTTP 503 or connection refused on target service endpoints during transition"
+      - "kube_pod_status_ready metric drops to 0 for affected pods"
+    expectedAlerts:
+      - KubePodNotReady
+      - KubeDeploymentReplicasMismatch
+    detectionWindowSecs: 60
+
+  groundTruth:
+    category: availability
+    impact: high
+    detectWithinSecs: 60
+    mitigateWithinSecs: 120
+    detectionHints:
+      - "kubectl get pods -n <app-ns>: count drops then recovers"
+      - "Prometheus: kube_pod_status_ready drops to 0 for target label"
+      - "Langfuse: agent tool call to list_pods or get_deployment_status"
+    remediationHints:
+      - "Verify Deployment replicas are restored to desired count"
+      - "Check that HPA is not preventing scale-up"
+      - "Confirm readiness probe passes on replacement pod before marking healthy"

@@ -357,11 +357,17 @@ status "Starting Authentication Service..."
 AUTH_PID=$!
 echo "$AUTH_PID" > "$PID_DIR/.agentcert-auth.pid"
 
-wait_msg "Waiting for Auth Service on port 3030..."
+wait_msg "Waiting for Auth Service on port ${GRPC_PORT}..."
 retries=0
 while [[ $retries -lt 30 ]]; do
-    if ss -tlnp 2>/dev/null | grep -q ":3030 " || netstat -tlnp 2>/dev/null | grep -q ":3030 "; then
+    listener_pid=$(ss -tlnpH "( sport = :${GRPC_PORT} )" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    if [[ -n "$listener_pid" ]] && kill -0 "$AUTH_PID" 2>/dev/null; then
         ok "Authentication Service ready (PID: $AUTH_PID)"; break
+    fi
+    if ! kill -0 "$AUTH_PID" 2>/dev/null; then
+        fail "Authentication Service process died. Check $PID_DIR/.auth.log"
+        tail -20 "$PID_DIR/.auth.log" >&2 || true
+        exit 1
     fi
     retries=$((retries + 1)); sleep 1
 done
@@ -460,15 +466,22 @@ if [[ "$SKIP_FRONTEND" == false ]]; then
             ok "Frontend certificates generated"
         fi
 
+        export FRONTEND_PORT="${FRONTEND_PORT_PRE}"
         (cd "$WEB_DIR" && yarn dev > "$PID_DIR/.frontend.log" 2>&1) &
         FE_PID=$!
         echo "$FE_PID" > "$PID_DIR/.agentcert-frontend.pid"
 
-        wait_msg "Waiting for Frontend on port 2001..."
+        wait_msg "Waiting for Frontend on port ${FRONTEND_PORT_PRE}..."
         retries=0
         while [[ $retries -lt 60 ]]; do
-            if ss -tlnp 2>/dev/null | grep -q ":2001 " || netstat -tlnp 2>/dev/null | grep -q ":2001 "; then
+            listener_pid=$(ss -tlnpH "( sport = :${FRONTEND_PORT_PRE} )" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+            if [[ -n "$listener_pid" ]] && kill -0 "$FE_PID" 2>/dev/null; then
                 ok "Frontend ready (PID: $FE_PID)"; break
+            fi
+            if ! kill -0 "$FE_PID" 2>/dev/null; then
+                fail "Frontend process died. Check $PID_DIR/.frontend.log"
+                tail -5 "$PID_DIR/.frontend.log" >&2 || true
+                break
             fi
             retries=$((retries + 1)); sleep 1
         done
@@ -488,7 +501,7 @@ echo "Services:"
 echo "  - MongoDB:        $(env_val MONGODB_HOST localhost):$(env_val MONGODB_PORT 27017)"
 echo "  - Auth Service:   localhost:${GRPC_PORT} (gRPC) / localhost:${REST_PORT} (REST)"
 echo "  - GraphQL Server: http://localhost:${GQL_REST_PORT}"
-[[ "$SKIP_FRONTEND" == false ]] && echo "  - Frontend:       https://localhost:2001"
+[[ "$SKIP_FRONTEND" == false ]] && echo "  - Frontend:       https://localhost:${FRONTEND_PORT}"
 echo ""
 echo "Login: $(env_val ADMIN_USERNAME admin) / $(env_val ADMIN_PASSWORD litmus)"
 echo ""

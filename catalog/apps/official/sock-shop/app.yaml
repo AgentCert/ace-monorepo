@@ -1,0 +1,383 @@
+apiVersion: ace.io/v1
+kind: AppCatalogEntry
+metadata:
+  name: sock-shop
+  displayName: Sock Shop
+  version: "1.0.0"
+  tier: official
+  domain: cloud-native
+  capabilityDomains:
+    - cloud-native
+    - common
+  tags:
+    - microservices
+    - mongodb
+    - rabbitmq
+    - e-commerce
+    - weaveworks
+  maintainers:
+    - name: ACE Core Team
+      email: ace@infosys.com
+  license: Apache-2.0
+  repository: https://github.com/microservices-demo/microservices-demo
+  createdAt: "2026-07-07"
+  updatedAt: "2026-07-07"
+
+spec:
+  description:
+    short: >-
+      A cloud-native microservices e-commerce demo with 13 services
+      covering the full request path from frontend to database.
+    long: |
+      Sock Shop is a canonical cloud-native microservices demo originally
+      created by Weaveworks. It implements an e-commerce site with 13
+      independent services: a React frontend, six domain services
+      (carts, catalogue, orders, payment, shipping, user), three databases
+      (MongoDB, MySQL), a message queue (RabbitMQ), and a queue consumer.
+
+      The services communicate over HTTP and are independently deployable.
+      All services emit Prometheus metrics. The frontend is externally
+      reachable on port 80 and serves as the health probe endpoint.
+
+      Sock Shop is the reference application for ACE cloud-native experiments.
+      It is well-understood, has a complete fault compatibility matrix, and
+      has verified ground truth for all five supported faults.
+    suitableFor:
+      - "Agents that observe Kubernetes pod health and restart behavior"
+      - "Agents with Prometheus query capability (PromQL)"
+      - "Agents that detect service degradation via HTTP error rates"
+      - "Agents that investigate database connectivity failures"
+      - "Agents that handle network partition scenarios"
+    notSuitableFor:
+      - "Agents requiring service mesh instrumentation (Istio not installed)"
+      - "Agents that test gRPC-native services"
+      - "Agents designed for stateful workloads with persistent storage"
+
+  install:
+    method: helm
+    folder: sock-shop
+    namespace:
+      default: sock-shop
+      configurable: false
+    timeout: 30m
+    wait: true
+    additionalManifests:
+      - "monitoring/prometheus-rules.yaml"
+
+  healthProbe:
+    url: "http://front-end.{{.AppNamespace}}.svc.cluster.local:80"
+    expectedStatus: "200"
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    failureThreshold: 6
+
+  loadTest:
+    enabled: true
+    method: deployer
+    image: litmuschaos/litmus-app-deployer:latest
+    args:
+      - "-namespace=loadtest"
+      - "-app=loadtest"
+    installNamespace: loadtest
+
+  microservices:
+    - name: front-end
+      displayName: Front End
+      description: "React-based web frontend. External entry point for all user traffic."
+      k8s:
+        label: "name=front-end"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-memory-hog, pod-network-loss]
+      dependsOn: [carts, catalogue, orders, user, payment, shipping]
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: carts
+      displayName: Carts
+      description: "Shopping cart service. Stores cart items in carts-db."
+      k8s:
+        label: "name=carts"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-memory-hog, pod-network-loss]
+      dependsOn: [carts-db]
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: carts-db
+      displayName: Carts DB
+      description: "MongoDB database for the carts service."
+      k8s:
+        label: "name=carts-db"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.01
+
+    - name: catalogue
+      displayName: Catalogue
+      description: "Product catalogue service. Queries catalogue-db."
+      k8s:
+        label: "name=catalogue"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-memory-hog, pod-network-loss]
+      dependsOn: [catalogue-db]
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: catalogue-db
+      displayName: Catalogue DB
+      description: "MySQL database for the catalogue service."
+      k8s:
+        label: "name=catalogue-db"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.01
+
+    - name: orders
+      displayName: Orders
+      description: "Order processing service. Reads carts, writes to orders-db, queues via rabbitmq."
+      k8s:
+        label: "name=orders"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-memory-hog, pod-network-loss]
+      dependsOn: [orders-db, rabbitmq]
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: orders-db
+      displayName: Orders DB
+      description: "MongoDB database for the orders service."
+      k8s:
+        label: "name=orders-db"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.01
+
+    - name: payment
+      displayName: Payment
+      description: "Payment processing service. No external dependencies."
+      k8s:
+        label: "name=payment"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-network-loss]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: queue-master
+      displayName: Queue Master
+      description: "RabbitMQ consumer that processes order fulfillment events."
+      k8s:
+        label: "name=queue-master"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: medium
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: [rabbitmq, orders-db]
+      sla:
+        errorRateThreshold: 0.1
+
+    - name: rabbitmq
+      displayName: RabbitMQ
+      description: "Message broker connecting orders service to queue-master."
+      k8s:
+        label: "name=rabbitmq"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: medium
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.1
+
+    - name: shipping
+      displayName: Shipping
+      description: "Shipping service. Consumes order events from queue."
+      k8s:
+        label: "name=shipping"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: medium
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: [rabbitmq]
+      sla:
+        errorRateThreshold: 0.1
+
+    - name: user
+      displayName: User
+      description: "User account and authentication service. Uses user-db."
+      k8s:
+        label: "name=user"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog, pod-memory-hog, pod-network-loss]
+      dependsOn: [user-db]
+      sla:
+        errorRateThreshold: 0.05
+
+    - name: user-db
+      displayName: User DB
+      description: "MongoDB database for the user service."
+      k8s:
+        label: "name=user-db"
+        kind: deployment
+        namespace: "{{.AppNamespace}}"
+      criticality: high
+      relevantFaults: [pod-delete, pod-cpu-hog]
+      dependsOn: []
+      sla:
+        errorRateThreshold: 0.01
+
+  observability:
+    prometheus:
+      serviceMonitor: true
+      alertRules:
+        - name: HighRequestErrorRate
+          severity: critical
+          expr: >-
+            sum(rate(http_requests_total{namespace="{{.AppNamespace}}",
+            status=~"5.."}[2m])) /
+            sum(rate(http_requests_total{namespace="{{.AppNamespace}}"}[2m])) > 0.05
+          for: "1m"
+          annotations:
+            summary: "High HTTP error rate in {{ .AppNamespace }}"
+            description: "Error rate exceeded 5% for 1 minute"
+
+        - name: KubePodNotReady
+          severity: critical
+          expr: >-
+            kube_pod_status_ready{namespace="{{.AppNamespace}}",
+            condition="true"} == 0
+          for: "2m"
+          annotations:
+            summary: "Pod not ready in {{ .AppNamespace }}"
+            description: "One or more pods have been not-ready for 2 minutes"
+
+        - name: NoRequestsReceived
+          severity: warning
+          expr: >-
+            sum(rate(http_requests_total{namespace="{{.AppNamespace}}"}[2m])) == 0
+          for: "2m"
+          annotations:
+            summary: "No traffic in {{ .AppNamespace }}"
+            description: "No HTTP requests received for 2 minutes — load test may have stopped"
+
+  faultCompatibility:
+    - faultName: pod-delete
+      compatible: true
+      notes: "Most impactful fault for Sock Shop — directly tests service redundancy and restart recovery."
+      recommendedTargets: [carts, catalogue, payment, front-end]
+
+    - faultName: pod-cpu-hog
+      compatible: true
+      notes: "Effective for testing agent response to CPU throttling in any service."
+      recommendedTargets: [carts, orders, front-end]
+
+    - faultName: pod-memory-hog
+      compatible: true
+      notes: "Tests OOM killer behavior. Most impactful on JVM services (carts, orders)."
+      recommendedTargets: [carts, orders, user]
+
+    - faultName: pod-network-loss
+      compatible: true
+      notes: "Tests inter-service communication failure. carts → carts-db dependency makes this observable."
+      recommendedTargets: [carts, catalogue, payment]
+
+    - faultName: k8s-config-mutation
+      compatible: true
+      notes: "Tests agent response to misconfigured resources (e.g., wrong image tag, bad env var)."
+      recommendedTargets: [front-end, carts]
+
+  groundTruth:
+    version: "1"
+    faultAlertMappings:
+      - faultName: pod-delete
+        targetService: carts
+        expectedAlerts: [KubePodNotReady, HighRequestErrorRate]
+        expectedRootCause: "carts pod deleted — cart operations failing with connection refused"
+        expectedRemediation: "Verify pod restart succeeds; if CrashLoopBackOff, check carts-db connectivity"
+        maxDetectionTimeSecs: 120
+        maxMitigationTimeSecs: 300
+
+      - faultName: pod-delete
+        targetService: payment
+        expectedAlerts: [KubePodNotReady, HighRequestErrorRate]
+        expectedRootCause: "payment pod deleted — checkout flow returning 500"
+        expectedRemediation: "Confirm pod restarted; check order submission error rate returns to baseline"
+        maxDetectionTimeSecs: 120
+        maxMitigationTimeSecs: 300
+
+      - faultName: pod-network-loss
+        targetService: carts
+        expectedAlerts: [HighRequestErrorRate]
+        expectedRootCause: "network partition between carts and carts-db causing cart read/write failures"
+        expectedRemediation: "Identify network policy causing partition; remove or modify policy"
+        maxDetectionTimeSecs: 90
+        maxMitigationTimeSecs: 240
+
+  rbac:
+    chaosRunnerPermissions:
+      - apiGroups: [""]
+        resources: [pods, events, "pods/exec", "pods/log"]
+        verbs: [get, list, watch, delete, create]
+      - apiGroups: [apps]
+        resources: [deployments, replicasets, statefulsets]
+        verbs: [get, list, watch, patch]
+      - apiGroups: [litmuschaos.io]
+        resources: [chaosengines, chaosexperiments, chaosresults]
+        verbs: [get, list, create, update, patch, delete, watch]
+      - apiGroups: ["batch"]
+        resources: [jobs]
+        verbs: [get, list, create, delete, watch]
+
+  inputs:
+    - key: replicaScale
+      displayName: Scale Factor
+      description: "Multiply all service replicas by this factor. 1 = default, 2 = HA testing."
+      type: integer
+      required: false
+      default: "1"
+      min: 1
+      max: 5
+      helmPath: "global.replicaScale"
+      advanced: false
+      unit: replicas
+
+    - key: resourceProfile
+      displayName: Resource Profile
+      description: "'minimal' for resource-constrained dev clusters, 'performance' for load testing."
+      type: enum
+      values: [minimal, standard, performance]
+      default: standard
+      helmPath: "global.resourceProfile"
+      advanced: false
+
+    - key: enableTracing
+      displayName: Enable Distributed Tracing
+      description: "Enables Jaeger-compatible trace headers. Requires a tracing backend."
+      type: boolean
+      default: "false"
+      helmPath: "global.tracingEnabled"
+      advanced: true

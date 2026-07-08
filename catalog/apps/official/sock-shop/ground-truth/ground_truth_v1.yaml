@@ -1,0 +1,31 @@
+# Ground truth for Sock Shop v1.0.0
+# Each entry maps a fault+target combination to expected agent observations.
+# The certifier uses this for automated scoring.
+version: "1"
+app: sock-shop
+appVersion: "1.0.0"
+
+faultAlertMappings:
+  - faultName: pod-delete
+    targetService: carts
+    expectedAlerts: [KubePodNotReady, HighRequestErrorRate]
+    expectedRootCause: "carts pod deleted — cart operations failing with connection refused"
+    expectedRemediation: "Verify pod restart succeeds; if CrashLoopBackOff, check carts-db connectivity"
+    maxDetectionTimeSecs: 120
+    maxMitigationTimeSecs: 300
+
+  - faultName: pod-delete
+    targetService: payment
+    expectedAlerts: [KubePodNotReady, HighRequestErrorRate]
+    expectedRootCause: "payment pod deleted — checkout flow returning 500"
+    expectedRemediation: "Confirm pod restarted; check order submission error rate returns to baseline"
+    maxDetectionTimeSecs: 120
+    maxMitigationTimeSecs: 300
+
+  - faultName: pod-network-loss
+    targetService: carts
+    expectedAlerts: [HighRequestErrorRate]
+    expectedRootCause: "network partition between carts and carts-db causing cart read/write failures"
+    expectedRemediation: "Identify network policy causing partition; remove or modify policy"
+    maxDetectionTimeSecs: 90
+    maxMitigationTimeSecs: 240

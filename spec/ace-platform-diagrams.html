@@ -1,0 +1,1163 @@
+<!--- ACE Platform Visual Spec — manager demo artifact --->
+<title>ACE Platform — Visual Spec</title>
+<style>
+/* ── Design tokens ── */
+:root {
+  --bg:        #0b0d18;
+  --bg2:       #111422;
+  --bg3:       #181c2e;
+  --border:    #252a3d;
+  --text:      #d6daf0;
+  --muted:     #6b738f;
+  --bright:    #eef0f8;
+
+  --app:       #2360e4;
+  --app-dim:   #1a3e91;
+  --teal:      #0a9680;
+  --teal-dim:  #075e52;
+  --amber:     #d68a14;
+  --amber-dim: #8a5609;
+  --violet:    #7630e8;
+  --violet-dim:#4a1a97;
+
+  --r: 4px;
+  --mono: ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:        #f0f2fa;
+    --bg2:       #e4e8f5;
+    --bg3:       #d8dcee;
+    --border:    #bcc3dc;
+    --text:      #1e2240;
+    --muted:     #5a6080;
+    --bright:    #0d1030;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0b0d18;--bg2:#111422;--bg3:#181c2e;--border:#252a3d;
+  --text:#d6daf0;--muted:#6b738f;--bright:#eef0f8;
+}
+:root[data-theme="light"] {
+  --bg:#f0f2fa;--bg2:#e4e8f5;--bg3:#d8dcee;--border:#bcc3dc;
+  --text:#1e2240;--muted:#5a6080;--bright:#0d1030;
+}
+
+/* ── Reset & base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ── Graph-paper background ── */
+body::before {
+  content: '';
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: .35;
+}
+
+/* ── Nav ── */
+nav {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 0;
+  padding: 0 1.5rem;
+  height: 48px;
+  backdrop-filter: blur(8px);
+}
+.nav-brand {
+  font-weight: 700; font-size: .8rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--bright);
+  margin-right: 2rem; white-space: nowrap;
+}
+.nav-brand span { color: var(--app); }
+nav a {
+  color: var(--muted); text-decoration: none;
+  font-size: .78rem; letter-spacing: .04em; text-transform: uppercase;
+  padding: 0 .9rem; height: 48px; display: flex; align-items: center;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+}
+nav a:hover { color: var(--text); border-bottom-color: var(--border); }
+.spacer { flex: 1; }
+#theme-btn {
+  background: none; border: 1px solid var(--border); border-radius: var(--r);
+  color: var(--muted); cursor: pointer; font-size: .75rem; padding: .3rem .7rem;
+  letter-spacing: .04em;
+}
+#theme-btn:hover { color: var(--text); border-color: var(--text); }
+
+/* ── Layout ── */
+.wrap { max-width: 1140px; margin: 0 auto; padding: 0 1.5rem; position: relative; z-index: 1; }
+section { padding: 4rem 0; }
+section + section { border-top: 1px solid var(--border); }
+
+/* ── Section header ── */
+.sec-head { margin-bottom: 2.5rem; }
+.sec-eyebrow {
+  font-size: .7rem; letter-spacing: .14em; text-transform: uppercase;
+  font-family: var(--mono); margin-bottom: .4rem;
+}
+.sec-eyebrow.app    { color: var(--app); }
+.sec-eyebrow.teal   { color: var(--teal); }
+.sec-eyebrow.amber  { color: var(--amber); }
+.sec-eyebrow.violet { color: var(--violet); }
+.sec-title { font-size: 1.6rem; font-weight: 700; color: var(--bright); text-wrap: balance; }
+.sec-sub { color: var(--muted); margin-top: .4rem; max-width: 56ch; }
+
+/* ── Cards ── */
+.card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 1.25rem 1.5rem;
+}
+.card.rail-app    { border-top: 3px solid var(--app); }
+.card.rail-teal   { border-top: 3px solid var(--teal); }
+.card.rail-amber  { border-top: 3px solid var(--amber); }
+.card.rail-violet { border-top: 3px solid var(--violet); }
+
+/* ── Phase badge ── */
+.badge {
+  display: inline-block; font-size: .68rem; font-family: var(--mono);
+  letter-spacing: .06em; text-transform: uppercase; padding: .15rem .5rem;
+  border-radius: 2px; font-weight: 600;
+}
+.badge.app    { background: var(--app-dim);    color: #90b8ff; }
+.badge.teal   { background: var(--teal-dim);   color: #6debd4; }
+.badge.amber  { background: var(--amber-dim);  color: #ffc96a; }
+.badge.violet { background: var(--violet-dim); color: #c9a0ff; }
+.badge.neutral { background: var(--bg3); color: var(--muted); }
+
+/* ── Schema boxes ── */
+.schema {
+  font-family: var(--mono); font-size: .78rem; line-height: 1.7;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 1rem 1.25rem;
+  overflow-x: auto;
+}
+.key  { color: #90b8ff; }
+.val  { color: #6debd4; }
+.cmt  { color: var(--muted); }
+.str  { color: #ffc96a; }
+.kw   { color: #c9a0ff; }
+
+/* ── Grid helpers ── */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.25rem; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem; }
+@media (max-width: 720px) {
+  .grid-2,.grid-3,.grid-4 { grid-template-columns: 1fr; }
+}
+
+/* ── Golden path flow ── */
+.gp-flow {
+  display: grid; grid-template-columns: repeat(4, 1fr) ;
+  gap: 0; position: relative; margin-top: 1rem;
+}
+@media (max-width: 780px) { .gp-flow { grid-template-columns: 1fr 1fr; } }
+.gp-node {
+  background: var(--bg2); border: 1px solid var(--border);
+  padding: 1.5rem 1.25rem 1.25rem;
+  position: relative;
+}
+.gp-node:not(:last-child)::after {
+  content: '→';
+  position: absolute; right: -12px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); font-size: 1.1rem; z-index: 2;
+}
+@media (max-width: 780px) { .gp-node::after { display: none; } }
+.gp-node:nth-child(1) { border-top: 3px solid var(--app); }
+.gp-node:nth-child(2) { border-top: 3px solid var(--teal); }
+.gp-node:nth-child(3) { border-top: 3px solid var(--amber); }
+.gp-node:nth-child(4) { border-top: 3px solid var(--violet); }
+.gp-step { font-size: .68rem; font-family: var(--mono); letter-spacing: .1em; text-transform: uppercase; margin-bottom: .5rem; }
+.gp-node:nth-child(1) .gp-step { color: var(--app); }
+.gp-node:nth-child(2) .gp-step { color: var(--teal); }
+.gp-node:nth-child(3) .gp-step { color: var(--amber); }
+.gp-node:nth-child(4) .gp-step { color: var(--violet); }
+.gp-title { font-size: 1rem; font-weight: 700; color: var(--bright); margin-bottom: .6rem; }
+.gp-facts { list-style: none; }
+.gp-facts li { font-size: .82rem; color: var(--muted); padding: .15rem 0; padding-left: .9rem; position: relative; }
+.gp-facts li::before { content: '–'; position: absolute; left: 0; color: var(--border); }
+.gp-example {
+  margin-top: .9rem; font-family: var(--mono); font-size: .72rem;
+  color: var(--muted); background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 2px; padding: .3rem .6rem;
+}
+
+/* ── Wizard stepper ── */
+.wizard {
+  display: flex; gap: 0; position: relative; margin: 1.5rem 0 2rem;
+  overflow-x: auto; padding-bottom: .5rem;
+}
+.wiz-step {
+  flex: 1; min-width: 120px; display: flex; flex-direction: column; align-items: center;
+  position: relative;
+}
+.wiz-step:not(:last-child)::after {
+  content: ''; position: absolute; top: 16px; left: 50%; width: 100%;
+  height: 2px; background: var(--border);
+}
+.wiz-num {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--bg3); border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: .8rem; font-weight: 700; color: var(--muted);
+  z-index: 1; position: relative;
+  font-family: var(--mono);
+}
+.wiz-step.active .wiz-num {
+  background: var(--teal-dim); border-color: var(--teal); color: #6debd4;
+}
+.wiz-label { font-size: .72rem; text-align: center; margin-top: .5rem; color: var(--muted); max-width: 90px; }
+.wiz-step.active .wiz-label { color: var(--teal); }
+
+/* ── Model Library flow ── */
+.ml-flow { display: flex; align-items: stretch; gap: 0; margin: 1.5rem 0; }
+.ml-box {
+  flex: 1; background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 1rem;
+}
+.ml-arrow { display: flex; align-items: center; padding: 0 .6rem; color: var(--muted); font-size: 1.2rem; }
+.ml-box-title { font-size: .72rem; font-family: var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--teal); margin-bottom: .5rem; }
+.ml-box p { font-size: .8rem; color: var(--muted); }
+.ml-box code { font-family: var(--mono); font-size: .75rem; color: var(--text); }
+
+/* ── Canvas containers ── */
+canvas { display: block; width: 100%; border-radius: var(--r); }
+.canvas-wrap {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--r); overflow: hidden; margin-top: 1.5rem;
+}
+
+/* ── Cert pipeline ── */
+.cert-flow { display: flex; align-items: stretch; gap: 0; overflow-x: auto; margin-top: 1.5rem; }
+.cert-node {
+  min-width: 150px; flex: 1;
+  background: var(--bg2); border: 1px solid var(--border);
+  padding: 1.1rem 1rem; position: relative;
+}
+.cert-node:not(:first-child) { border-left: none; }
+.cert-node:first-child { border-radius: var(--r) 0 0 var(--r); }
+.cert-node:last-child  { border-radius: 0 var(--r) var(--r) 0; }
+.cert-node.inputs { border-top: 3px solid var(--app); }
+.cert-node.p0     { border-top: 3px solid var(--muted); }
+.cert-node.p1     { border-top: 3px solid var(--amber); }
+.cert-node.p2     { border-top: 3px solid var(--teal); }
+.cert-node.p3     { border-top: 3px solid var(--violet); }
+.cert-node.output { border-top: 3px solid var(--app); }
+.cert-phase { font-size: .65rem; font-family: var(--mono); letter-spacing: .1em; text-transform: uppercase; margin-bottom: .35rem; }
+.cert-node.inputs .cert-phase { color: var(--app); }
+.cert-node.p0     .cert-phase { color: var(--muted); }
+.cert-node.p1     .cert-phase { color: var(--amber); }
+.cert-node.p2     .cert-phase { color: var(--teal); }
+.cert-node.p3     .cert-phase { color: var(--violet); }
+.cert-node.output .cert-phase { color: var(--app); }
+.cert-title { font-size: .88rem; font-weight: 700; color: var(--bright); margin-bottom: .5rem; }
+.cert-items { list-style: none; }
+.cert-items li { font-size: .75rem; color: var(--muted); padding: .15rem 0 .15rem .8rem; position: relative; }
+.cert-items li::before { content: '·'; position: absolute; left: 0; }
+.cert-arrow {
+  display: flex; align-items: center; padding: 0 .4rem;
+  color: var(--muted); font-size: 1rem; align-self: center;
+}
+
+/* ── Fault tier table ── */
+.fault-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.fault-table th {
+  text-align: left; font-size: .72rem; font-family: var(--mono); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted); padding: .5rem .75rem;
+  border-bottom: 1px solid var(--border);
+}
+.fault-table td {
+  font-size: .82rem; padding: .55rem .75rem; border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.fault-table tr:last-child td { border-bottom: none; }
+.fault-table td:first-child { font-family: var(--mono); font-size: .78rem; }
+
+/* ── Metric chips ── */
+.chip-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.chip {
+  font-family: var(--mono); font-size: .72rem; padding: .25rem .65rem;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 2px; color: var(--muted);
+}
+
+/* ── Scroll table wrapper ── */
+.tbl-wrap { overflow-x: auto; }
+
+/* ── Run modes table ── */
+.mode-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 1rem; margin-top: 1rem; }
+.mode-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r); padding: 1rem; }
+.mode-title { font-size: .8rem; font-weight: 700; color: var(--bright); margin-bottom: .35rem; }
+.mode-desc  { font-size: .78rem; color: var(--muted); }
+</style>
+
+<nav>
+  <div class="nav-brand"><span>ACE</span> Platform</div>
+  <a href="#overview">Overview</a>
+  <a href="#app">App Catalog</a>
+  <a href="#agent">Agent Registry</a>
+  <a href="#faults">Fault Taxonomy</a>
+  <a href="#experiment">Experiment</a>
+  <a href="#certifier">Certifier</a>
+  <div class="spacer"></div>
+  <button id="theme-btn" onclick="toggleTheme()">Toggle Theme</button>
+</nav>
+
+<!-- ══════════ 1. OVERVIEW ══════════ -->
+<section id="overview">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow app">Platform</div>
+    <div class="sec-title">Agent Compliance Engine</div>
+    <div class="sec-sub">Open-source certification platform for AI agents across any operational domain — cloud-native, telecom, health-IT, FinOps, ITOps.</div>
+  </div>
+
+  <div class="gp-flow">
+    <div class="gp-node">
+      <div class="gp-step">Step 1 · App Catalog</div>
+      <div class="gp-title">Register App Under Test</div>
+      <ul class="gp-facts">
+        <li>Helm chart + app.yaml</li>
+        <li>Domain tag drives fault filtering</li>
+        <li>Capability vocabulary declared</li>
+        <li>Fresh install per run</li>
+      </ul>
+      <div class="gp-example">domain: cloud-native</div>
+    </div>
+    <div class="gp-node">
+      <div class="gp-step">Step 2 · Agent Registry</div>
+      <div class="gp-title">Onboard the Agent</div>
+      <ul class="gp-facts">
+        <li>agent.yaml + Helm wrapper</li>
+        <li>Model Library picks LLM once</li>
+        <li>Sidecar auto-injects tracing</li>
+        <li>Required capabilities validated</li>
+      </ul>
+      <div class="gp-example">configRef: my-openai-gpt4o</div>
+    </div>
+    <div class="gp-node">
+      <div class="gp-step">Step 3 · Chaos Studio</div>
+      <div class="gp-title">Design Experiment</div>
+      <ul class="gp-facts">
+        <li>Fault catalog filtered by domain</li>
+        <li>Multi-step timeline builder</li>
+        <li>Ground truth per fault step</li>
+        <li>Model selection mode set</li>
+      </ul>
+      <div class="gp-example">faultRef: pod-delete</div>
+    </div>
+    <div class="gp-node">
+      <div class="gp-step">Step 4 · Certifier</div>
+      <div class="gp-title">Score &amp; Certify</div>
+      <ul class="gp-facts">
+        <li>LLM-as-judge over traces</li>
+        <li>No agent code changes needed</li>
+        <li>Metrics: TTD, TTM, efficiency</li>
+        <li>Signed certificate issued</li>
+      </ul>
+      <div class="gp-example">score: 0.87 → PASS</div>
+    </div>
+  </div>
+
+  <div style="margin-top:2rem; display:flex; gap:1rem; flex-wrap:wrap;">
+    <div class="card" style="flex:1; min-width:200px;">
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.35rem;">DATA STREAMS</div>
+      <div style="display:flex; flex-direction:column; gap:.4rem;">
+        <div style="display:flex; align-items:center; gap:.6rem;">
+          <span class="badge amber">Stream 1</span>
+          <span style="font-size:.82rem;">Experiment event log — fault injection timestamps, health probes</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:.6rem;">
+          <span class="badge teal">Stream 2</span>
+          <span style="font-size:.82rem;">LiteLLM → Langfuse traces — all tool calls, arguments, results</span>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="flex:1; min-width:200px;">
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.35rem;">SUPPORTED DOMAINS</div>
+      <div class="chip-row">
+        <span class="chip">cloud-native</span>
+        <span class="chip">telecom</span>
+        <span class="chip">health-it</span>
+        <span class="chip">finops</span>
+        <span class="chip">itops</span>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 2. APP CATALOG ══════════ -->
+<section id="app">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow app">Step 1</div>
+    <div class="sec-title">App Catalog</div>
+    <div class="sec-sub">Apps are the workloads agents operate against. Each app declares its domain and capabilities — this drives which faults appear in Chaos Studio automatically.</div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Onboarding paths -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.75rem; letter-spacing:.08em; text-transform:uppercase;">Two Onboarding Paths</div>
+      <div style="display:flex; flex-direction:column; gap:.75rem;">
+        <div class="card rail-app">
+          <div style="display:flex; align-items:center; gap:.5rem; margin-bottom:.4rem;">
+            <span class="badge app">Path A</span>
+            <strong style="font-size:.88rem;">Helm-based (recommended)</strong>
+          </div>
+          <div style="font-size:.82rem; color:var(--muted);">Provide a public Helm chart URL + values.yaml. ACE installs into a fresh namespace per run. Zero cluster state persists between experiments.</div>
+          <div class="chip-row" style="margin-top:.5rem;">
+            <span class="chip">helmRepo</span><span class="chip">chartName</span><span class="chip">values override</span>
+          </div>
+        </div>
+        <div class="card" style="border-top:3px solid var(--border);">
+          <div style="display:flex; align-items:center; gap:.5rem; margin-bottom:.4rem;">
+            <span class="badge neutral">Path B</span>
+            <strong style="font-size:.88rem;">Bring-your-own manifest</strong>
+          </div>
+          <div style="font-size:.82rem; color:var(--muted);">Raw Kubernetes YAML. ACE applies into isolated namespace. Suitable for apps not yet Helm-packaged.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- app.yaml anatomy -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.75rem; letter-spacing:.08em; text-transform:uppercase;">app.yaml anatomy</div>
+      <div class="schema">
+<span class="key">apiVersion</span>: <span class="val">ace.io/v1</span>
+<span class="key">kind</span>: <span class="val">AppCatalogEntry</span>
+<span class="key">metadata</span>:
+  <span class="key">name</span>: <span class="str">sock-shop</span>
+  <span class="key">domain</span>: <span class="str">cloud-native</span>  <span class="cmt"># fault filter key</span>
+<span class="key">spec</span>:
+  <span class="key">description</span>: <span class="str">"Microservices demo store"</span>
+  <span class="key">install</span>:
+    <span class="key">type</span>: <span class="val">helm</span>
+    <span class="key">repoURL</span>: <span class="str">"https://..."</span>
+    <span class="key">chart</span>: <span class="str">sock-shop</span>
+    <span class="key">version</span>: <span class="str">1.2.0</span>
+  <span class="key">capabilityDomains</span>:
+    - <span class="str">cloud-native</span>
+    - <span class="str">itops</span>
+  <span class="key">requiredCapabilities</span>:
+    - <span class="str">prometheus-query</span>
+    - <span class="str">kubernetes-get-pods</span>
+  <span class="key">healthCheck</span>:
+    <span class="key">endpoint</span>: <span class="str">/health</span>
+    <span class="key">timeoutSecs</span>: <span class="val">120</span></div>
+    </div>
+  </div>
+
+  <!-- Domain capability grid -->
+  <div style="margin-top:2rem;">
+    <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.75rem; letter-spacing:.08em; text-transform:uppercase;">Capability Domains → Vocabulary Files</div>
+    <div class="grid-3">
+      <div class="card rail-app">
+        <div class="badge app" style="margin-bottom:.5rem;">cloud-native</div>
+        <div style="font-size:.8rem; color:var(--muted);">Kubernetes, Prometheus, Helm, service mesh, container ops</div>
+      </div>
+      <div class="card" style="border-top:3px solid #0a9680;">
+        <div class="badge teal" style="margin-bottom:.5rem;">telecom</div>
+        <div style="font-size:.8rem; color:var(--muted);">5G NF lifecycle, VNF healing, slice management, signaling</div>
+      </div>
+      <div class="card" style="border-top:3px solid #d68a14;">
+        <div class="badge amber" style="margin-bottom:.5rem;">finops</div>
+        <div style="font-size:.8rem; color:var(--muted);">Cost anomaly detection, budget alerts, cloud spend analysis</div>
+      </div>
+      <div class="card" style="border-top:3px solid #7630e8;">
+        <div class="badge violet" style="margin-bottom:.5rem;">health-it</div>
+        <div style="font-size:.8rem; color:var(--muted);">HL7/FHIR, EHR workflows, clinical system availability</div>
+      </div>
+      <div class="card" style="border-top:3px solid var(--border);">
+        <div class="badge neutral" style="margin-bottom:.5rem;">itops</div>
+        <div style="font-size:.8rem; color:var(--muted);">Incident triage, CMDB queries, runbook execution, ticketing</div>
+      </div>
+      <div class="card" style="border-top:3px solid var(--border);">
+        <div class="badge neutral" style="margin-bottom:.5rem;">common</div>
+        <div style="font-size:.8rem; color:var(--muted);">HTTP calls, log query, metrics read — available across all domains</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 3. AGENT REGISTRY ══════════ -->
+<section id="agent">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow teal">Step 2</div>
+    <div class="sec-title">Agent Registry</div>
+    <div class="sec-sub">Onboard any third-party agent with zero code changes. ACE wraps it in a sidecar that auto-injects LiteLLM tracing without touching agent source.</div>
+  </div>
+
+  <!-- Wizard -->
+  <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">6-Step Onboarding Wizard</div>
+  <div class="wizard">
+    <div class="wiz-step"><div class="wiz-num">1</div><div class="wiz-label">Agent Identity</div></div>
+    <div class="wiz-step"><div class="wiz-num">2</div><div class="wiz-label">Capabilities</div></div>
+    <div class="wiz-step active"><div class="wiz-num">3</div><div class="wiz-label">LLM Config</div></div>
+    <div class="wiz-step"><div class="wiz-num">4</div><div class="wiz-label">Other Secrets</div></div>
+    <div class="wiz-step"><div class="wiz-num">5</div><div class="wiz-label">Helm Chart</div></div>
+    <div class="wiz-step"><div class="wiz-num">6</div><div class="wiz-label">Validate</div></div>
+  </div>
+
+  <!-- Model Library flow -->
+  <div style="font-size:.72rem; font-family:var(--mono); color:var(--teal); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Step 3 — LLM Config &amp; Model Library</div>
+  <div class="ml-flow">
+    <div class="ml-box">
+      <div class="ml-box-title">1 · User registers model</div>
+      <p>Provider + Model + API key once with an alias<br><code>my-openai-gpt4o</code></p>
+    </div>
+    <div class="ml-arrow">→</div>
+    <div class="ml-box">
+      <div class="ml-box-title">2 · ACE registers with LiteLLM</div>
+      <p>Calls LiteLLM API internally. Stores deployment ID in ACE DB. User never sees it.</p>
+    </div>
+    <div class="ml-arrow">→</div>
+    <div class="ml-box">
+      <div class="ml-box-title">3 · Agent sidecar injects</div>
+      <p>Agent sets one env var:<br><code>LITELLM_BASE_URL=localhost:4000/v1</code></p>
+    </div>
+    <div class="ml-arrow">→</div>
+    <div class="ml-box">
+      <div class="ml-box-title">4 · All traces captured</div>
+      <p>Sidecar adds <code>X-ACE-Run-ID</code> header. Every tool call tagged in Langfuse automatically.</p>
+    </div>
+  </div>
+
+  <div class="grid-2" style="margin-top:1.5rem;">
+    <!-- llmConfig block -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">llmConfig in agent.yaml</div>
+      <div class="schema">
+<span class="key">spec</span>:
+  <span class="key">llmConfig</span>:
+    <span class="key">configRef</span>: <span class="str">my-openai-gpt4o</span>
+    <span class="cmt"># OR declare inline:</span>
+    <span class="key">provider</span>: <span class="str">openai</span>
+    <span class="key">model</span>: <span class="str">gpt-4o</span>
+    <span class="key">allowUserChoice</span>: <span class="val">false</span>
+    <span class="key">allowedModels</span>:
+      - <span class="str">gpt-4o</span>
+      - <span class="str">claude-3-5-sonnet</span>
+    <span class="key">defaultModel</span>: <span class="str">gpt-4o</span>
+    <span class="key">llmDependent</span>: <span class="val">true</span></div>
+    </div>
+    <!-- agent.yaml anatomy -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">agent.yaml anatomy</div>
+      <div class="schema">
+<span class="key">apiVersion</span>: <span class="val">ace.io/v1</span>
+<span class="key">kind</span>: <span class="val">AgentRegistration</span>
+<span class="key">metadata</span>:
+  <span class="key">name</span>: <span class="str">my-cloud-agent</span>
+  <span class="key">domain</span>: <span class="str">cloud-native</span>
+<span class="key">spec</span>:
+  <span class="key">capabilities</span>:
+    - <span class="str">prometheus-query</span>
+    - <span class="str">kubernetes-get-pods</span>
+    - <span class="str">kubernetes-restart-pod</span>
+  <span class="key">llmConfig</span>:
+    <span class="key">configRef</span>: <span class="str">my-openai-gpt4o</span>
+  <span class="key">helm</span>:
+    <span class="key">repoURL</span>: <span class="str">"https://..."</span>
+    <span class="key">chart</span>: <span class="str">my-cloud-agent</span>
+  <span class="key">inputs</span>:
+    - <span class="key">name</span>: <span class="str">GRAFANA_TOKEN</span>
+      <span class="key">type</span>: <span class="str">secret</span></div>
+    </div>
+  </div>
+
+  <!-- Model Library key points -->
+  <div class="card rail-teal" style="margin-top:1.5rem;">
+    <div style="font-size:.72rem; font-family:var(--mono); color:var(--teal); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Model Library — Central LLM Registry</div>
+    <div class="grid-3">
+      <div>
+        <div style="font-size:.82rem; font-weight:600; color:var(--bright); margin-bottom:.2rem;">One-time setup</div>
+        <div style="font-size:.8rem; color:var(--muted);">Register model alias once. Reuse across all agents without re-entering API keys.</div>
+      </div>
+      <div>
+        <div style="font-size:.82rem; font-weight:600; color:var(--bright); margin-bottom:.2rem;">Key rotation</div>
+        <div style="font-size:.8rem; color:var(--muted);">Update API key in one place. All agents using the alias get the new key immediately.</div>
+      </div>
+      <div>
+        <div style="font-size:.82rem; font-weight:600; color:var(--bright); margin-bottom:.2rem;">Certifier visibility</div>
+        <div style="font-size:.8rem; color:var(--muted);">Every ExperimentRun records modelUsed + modelProvider — enables cross-model comparison.</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 4. FAULT TAXONOMY ══════════ -->
+<section id="faults">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow amber">Step 3</div>
+    <div class="sec-title">Fault Taxonomy</div>
+    <div class="sec-sub">Three scopes of faults — from universal infrastructure failures down to app-specific edge cases. Scope determines who contributes the fault and who sees it in Chaos Studio.</div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Canvas: concentric rings -->
+    <div class="canvas-wrap" style="min-height:320px;">
+      <canvas id="faultCanvas"></canvas>
+    </div>
+
+    <!-- Tier table -->
+    <div>
+      <div class="tbl-wrap">
+        <table class="fault-table">
+          <tr><th>Scope</th><th>Who contributes</th><th>Visible to</th><th>Examples</th></tr>
+          <tr>
+            <td><span class="badge neutral">general</span></td>
+            <td style="color:var(--muted)">ACE core team (PR to main repo)</td>
+            <td style="color:var(--muted)">All apps, all domains</td>
+            <td style="color:var(--muted)">pod-delete, network-delay, cpu-hog, disk-fill</td>
+          </tr>
+          <tr>
+            <td><span class="badge amber">domain</span></td>
+            <td style="color:var(--muted)">Domain SMEs (PR to capabilities/)</td>
+            <td style="color:var(--muted)">Apps in that domain</td>
+            <td style="color:var(--muted)">5g-nf-restart (telecom), cost-spike (finops), ehr-outage (health-it)</td>
+          </tr>
+          <tr>
+            <td><span class="badge app">app-specific</span></td>
+            <td style="color:var(--muted)">App owner (bundled with app.yaml)</td>
+            <td style="color:var(--muted)">That named app only</td>
+            <td style="color:var(--muted)">sock-shop/cart-db-corruption, litellm/model-timeout</td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="margin-top:1.5rem; font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Fault Spec (fault.yaml)</div>
+      <div class="schema" style="font-size:.74rem;">
+<span class="key">scope</span>: <span class="str">general</span>  <span class="cmt"># general | domain | app-specific</span>
+<span class="key">spec</span>:
+  <span class="key">implementation</span>:
+    <span class="key">type</span>: <span class="val">litmus</span>  <span class="cmt"># litmus|http-fault|script|external</span>
+    <span class="key">experimentRef</span>: <span class="str">pod-delete</span>
+  <span class="key">groundTruth</span>:
+    <span class="key">category</span>: <span class="str">availability</span>
+    <span class="key">detectWithinSecs</span>: <span class="val">60</span>
+    <span class="key">mitigateWithinSecs</span>: <span class="val">120</span></div>
+    </div>
+  </div>
+
+  <!-- Implementation types -->
+  <div style="margin-top:2rem; font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.75rem; letter-spacing:.08em; text-transform:uppercase;">Four Implementation Types</div>
+  <div class="grid-4">
+    <div class="card">
+      <div style="font-size:.75rem; font-family:var(--mono); color:var(--amber); margin-bottom:.35rem;">litmus</div>
+      <div style="font-size:.8rem; color:var(--muted);">LitmusChaos ChaosEngine CRD. Standard infra faults (pod-delete, network-latency, cpu-hog).</div>
+    </div>
+    <div class="card">
+      <div style="font-size:.75rem; font-family:var(--mono); color:var(--amber); margin-bottom:.35rem;">http-fault</div>
+      <div style="font-size:.8rem; color:var(--muted);">API-level errors injected via Envoy or Istio. 5xx responses, timeouts, malformed payloads.</div>
+    </div>
+    <div class="card">
+      <div style="font-size:.75rem; font-family:var(--mono); color:var(--amber); margin-bottom:.35rem;">script</div>
+      <div style="font-size:.8rem; color:var(--muted);">Custom injector image. Shell script or Go binary. Full control for domain-specific faults.</div>
+    </div>
+    <div class="card">
+      <div style="font-size:.75rem; font-family:var(--mono); color:var(--amber); margin-bottom:.35rem;">external</div>
+      <div style="font-size:.8rem; color:var(--muted);">Calls an external API to trigger fault. Integrates with existing chaos platforms or vendors.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 5. EXPERIMENT EXECUTION ══════════ -->
+<section id="experiment">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow amber">Step 3 cont.</div>
+    <div class="sec-title">Experiment Execution</div>
+    <div class="sec-sub">An ExperimentDefinition is a reusable blueprint. Each run is an immutable record with its own namespace, model, and Langfuse trace ID.</div>
+  </div>
+
+  <!-- Timeline canvas -->
+  <div class="canvas-wrap" style="min-height:200px;">
+    <canvas id="timelineCanvas"></canvas>
+  </div>
+
+  <div class="grid-2" style="margin-top:1.5rem;">
+    <!-- Experiment schema -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">ExperimentDefinition schema</div>
+      <div class="schema" style="font-size:.74rem;">
+<span class="key">kind</span>: <span class="val">ExperimentDefinition</span>
+<span class="key">spec</span>:
+  <span class="key">targetApp</span>: <span class="str">sock-shop</span>
+  <span class="key">hypothesis</span>: <span class="str">"Agent detects pod failure"</span>
+  <span class="key">modelSelection</span>:
+    <span class="key">mode</span>: <span class="str">agent-default</span>
+    <span class="cmt"># agent-default|fixed|user-chooses-at-run</span>
+  <span class="key">steps</span>:
+    - <span class="key">name</span>: <span class="str">baseline</span>
+      <span class="key">type</span>: <span class="val">observe</span>
+      <span class="key">duration</span>: <span class="str">30s</span>
+    - <span class="key">name</span>: <span class="str">inject-pod-fail</span>
+      <span class="key">type</span>: <span class="val">fault</span>
+      <span class="key">faultRef</span>: <span class="str">pod-delete</span>
+      <span class="key">groundTruthOverride</span>:
+        <span class="key">detectWithinSecs</span>: <span class="val">45</span>
+  <span class="key">successCriteria</span>:
+    <span class="key">overall</span>:
+      <span class="key">toolCallEfficiencyMin</span>: <span class="val">0.7</span></div>
+    </div>
+
+    <!-- Step types + model modes -->
+    <div>
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Step Types</div>
+      <div style="display:flex; flex-direction:column; gap:.5rem; margin-bottom:1rem;">
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:80px; text-align:center;">observe</span>
+          <span style="font-size:.8rem; color:var(--muted);">Agent runs freely; no fault active. Baseline window.</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge amber" style="min-width:80px; text-align:center;">fault</span>
+          <span style="font-size:.8rem; color:var(--muted);">Fault injected. Ground truth window starts.</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge teal" style="min-width:80px; text-align:center;">verify</span>
+          <span style="font-size:.8rem; color:var(--muted);">Assert health probe passes post-remediation.</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:80px; text-align:center;">wait</span>
+          <span style="font-size:.8rem; color:var(--muted);">Pause for stabilisation between steps.</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge amber" style="min-width:80px; text-align:center;">parallel-fault</span>
+          <span style="font-size:.8rem; color:var(--muted);">Multiple faults simultaneously. Cascading failure simulation.</span>
+        </div>
+      </div>
+
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Model Selection Modes</div>
+      <div class="mode-grid">
+        <div class="mode-card">
+          <div class="mode-title">agent-default</div>
+          <div class="mode-desc">Use whatever model the agent's llmConfig declares.</div>
+        </div>
+        <div class="mode-card">
+          <div class="mode-title">fixed</div>
+          <div class="mode-desc">Pin a specific model for this experiment. All runs use it.</div>
+        </div>
+        <div class="mode-card">
+          <div class="mode-title">user-chooses-at-run</div>
+          <div class="mode-desc">Run dialog shows model picker from allowedModels list.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 6. CERTIFIER ══════════ -->
+<section id="certifier">
+<div class="wrap">
+  <div class="sec-head">
+    <div class="sec-eyebrow violet">Step 4</div>
+    <div class="sec-title">Certifier Pipeline</div>
+    <div class="sec-sub">LLM-as-judge over two data streams. No agent code changes required. Third-party agents are scored purely from observable behavior.</div>
+  </div>
+
+  <!-- Cert pipeline -->
+  <div style="overflow-x:auto;">
+    <div class="cert-flow" style="min-width:900px;">
+      <div class="cert-node inputs">
+        <div class="cert-phase">Inputs</div>
+        <div class="cert-title">Two Streams</div>
+        <ul class="cert-items">
+          <li>Stream 1: fault events + timestamps</li>
+          <li>Stream 2: Langfuse tool call trace</li>
+          <li>Ground truth per fault step</li>
+          <li>ExperimentRun metadata</li>
+        </ul>
+      </div>
+      <div class="cert-arrow">→</div>
+      <div class="cert-node p0">
+        <div class="cert-phase">Phase 0</div>
+        <div class="cert-title">Bucketing</div>
+        <ul class="cert-items">
+          <li>Split trace by fault windows</li>
+          <li>Tag each call: in-fault / baseline</li>
+          <li>Build per-fault sub-traces</li>
+        </ul>
+      </div>
+      <div class="cert-arrow">→</div>
+      <div class="cert-node p1">
+        <div class="cert-phase">Phase 1</div>
+        <div class="cert-title">Classification</div>
+        <ul class="cert-items">
+          <li>LLM-as-judge per tool call</li>
+          <li>Labels: DETECT / REMEDIATE / IRRELEVANT</li>
+          <li>Match against expectedSymptoms</li>
+          <li>Identify first DETECT + REMEDIATE</li>
+        </ul>
+      </div>
+      <div class="cert-arrow">→</div>
+      <div class="cert-node p2">
+        <div class="cert-phase">Phase 2</div>
+        <div class="cert-title">Metrics</div>
+        <ul class="cert-items">
+          <li>TTD = T(first DETECT) − T₀</li>
+          <li>TTM = T(first REMEDIATE) − T₀</li>
+          <li>Tool call efficiency ratio</li>
+          <li>False positive rate</li>
+          <li>Root cause accuracy</li>
+        </ul>
+      </div>
+      <div class="cert-arrow">→</div>
+      <div class="cert-node p3">
+        <div class="cert-phase">Phase 3</div>
+        <div class="cert-title">Aggregation</div>
+        <ul class="cert-items">
+          <li>Per-fault scores weighted</li>
+          <li>Overall composite score</li>
+          <li>Compare vs successCriteria</li>
+          <li>PASS / FAIL / CONDITIONAL</li>
+        </ul>
+      </div>
+      <div class="cert-arrow">→</div>
+      <div class="cert-node output">
+        <div class="cert-phase">Output</div>
+        <div class="cert-title">Certificate</div>
+        <ul class="cert-items">
+          <li>Signed cert if PASS</li>
+          <li>Score + evidence per fault</li>
+          <li>modelUsed + modelProvider</li>
+          <li>Langfuse trace link</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Metrics + key insight -->
+  <div class="grid-2" style="margin-top:1.5rem;">
+    <div class="card rail-violet">
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--violet); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Scored Metrics</div>
+      <div class="chip-row">
+        <span class="chip">time_to_detect</span>
+        <span class="chip">time_to_mitigate</span>
+        <span class="chip">tool_call_efficiency</span>
+        <span class="chip">root_cause_accuracy</span>
+        <span class="chip">false_positive_rate</span>
+        <span class="chip">alert_correlation</span>
+      </div>
+      <div style="font-size:.8rem; color:var(--muted); margin-top:.75rem;">All metrics stored per-run. Cross-model comparison is built-in — same experiment, different modelUsed → direct A/B score view.</div>
+    </div>
+    <div class="card">
+      <div style="font-size:.72rem; font-family:var(--mono); color:var(--muted); margin-bottom:.5rem; letter-spacing:.08em; text-transform:uppercase;">Zero-Change Agent Contract</div>
+      <div style="display:flex; flex-direction:column; gap:.5rem;">
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:28px;">✓</span>
+          <span style="font-size:.8rem; color:var(--muted);">Agent sets <code style="font-family:var(--mono);">LITELLM_BASE_URL</code> — one env var, already common pattern</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:28px;">✓</span>
+          <span style="font-size:.8rem; color:var(--muted);">Sidecar adds <code style="font-family:var(--mono);">X-ACE-Run-ID</code> to every LLM request automatically</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:28px;">✓</span>
+          <span style="font-size:.8rem; color:var(--muted);">No SDK, no MCP tools, no instrumentation required in agent source</span>
+        </div>
+        <div style="display:flex; align-items:flex-start; gap:.6rem;">
+          <span class="badge neutral" style="min-width:28px;">✓</span>
+          <span style="font-size:.8rem; color:var(--muted);">Works for any LLM: OpenAI, Anthropic, Google, Azure, Ollama via LiteLLM proxy</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<footer style="text-align:center; padding:2rem; color:var(--muted); font-size:.75rem; font-family:var(--mono); position:relative; z-index:1; border-top:1px solid var(--border);">
+  ACE Platform · Agent Compliance Engine · Spec v0.1
+</footer>
+
+<script>
+/* ── Theme toggle ── */
+function toggleTheme() {
+  const r = document.documentElement;
+  const cur = r.getAttribute('data-theme');
+  if (!cur) {
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    r.setAttribute('data-theme', isDark ? 'light' : 'dark');
+  } else {
+    r.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+  }
+  drawAll();
+}
+
+function isDark() {
+  const t = document.documentElement.getAttribute('data-theme');
+  if (t) return t === 'dark';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/* ── Colors ── */
+function tok(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* ── Fault concentric rings ── */
+function drawFaultCanvas() {
+  const canvas = document.getElementById('faultCanvas');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth;
+  const H = Math.max(300, W * 0.55);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const dark = isDark();
+  const bg2 = dark ? '#111422' : '#e4e8f5';
+  const border = dark ? '#252a3d' : '#bcc3dc';
+  const bright = dark ? '#eef0f8' : '#0d1030';
+  const muted = dark ? '#6b738f' : '#5a6080';
+  const cx = W / 2, cy = H / 2;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Three rings
+  const rings = [
+    { r: Math.min(cx, cy) * 0.92, color: dark ? '#8a5609' : '#d68a14', label: 'GENERAL', opacity: 0.12 },
+    { r: Math.min(cx, cy) * 0.62, color: dark ? '#1a3e91' : '#2360e4', label: 'DOMAIN', opacity: 0.16 },
+    { r: Math.min(cx, cy) * 0.35, color: dark ? '#4a1a97' : '#7630e8', label: 'APP-SPECIFIC', opacity: 0.22 },
+  ];
+
+  rings.forEach((ring, i) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, ring.r, 0, Math.PI * 2);
+    ctx.fillStyle = ring.color + Math.round(ring.opacity * 255).toString(16).padStart(2,'0');
+    ctx.fill();
+    ctx.strokeStyle = ring.color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Label on ring edge
+    ctx.save();
+    ctx.font = `600 11px ${getComputedStyle(document.body).fontFamily}`;
+    ctx.fillStyle = ring.color;
+    ctx.textAlign = 'center';
+    const labelY = cy - ring.r + 18;
+    ctx.fillText(ring.label, cx, labelY);
+    ctx.restore();
+  });
+
+  // Example labels
+  const examples = [
+    { ring: 0, angle: 0.3, text: 'pod-delete', sub: 'general' },
+    { ring: 0, angle: -0.4, text: 'network-delay', sub: 'general' },
+    { ring: 1, angle: 0.2, text: '5g-nf-restart', sub: 'telecom' },
+    { ring: 1, angle: -0.3, text: 'cost-spike', sub: 'finops' },
+    { ring: 2, angle: 0.1, text: 'cart-db-corrupt', sub: 'sock-shop' },
+  ];
+
+  const ringRadii = [Math.min(cx,cy)*0.92, Math.min(cx,cy)*0.62, Math.min(cx,cy)*0.35];
+  const ringColors = [dark ? '#d68a14' : '#d68a14', dark ? '#2360e4' : '#2360e4', dark ? '#7630e8' : '#7630e8'];
+
+  examples.forEach(e => {
+    const prevR = e.ring === 0 ? 0 : ringRadii[e.ring - 1];
+    const r = prevR + (ringRadii[e.ring] - prevR) * 0.55;
+    const x = cx + Math.cos(e.angle + Math.PI * 0.5) * r;
+    const y = cy + Math.sin(e.angle + Math.PI * 0.5) * r;
+
+    ctx.save();
+    ctx.font = `700 10.5px ui-monospace, monospace`;
+    ctx.fillStyle = ringColors[e.ring];
+    ctx.textAlign = 'center';
+    ctx.fillText(e.text, x, y);
+    ctx.font = `10px ui-monospace, monospace`;
+    ctx.fillStyle = muted;
+    ctx.fillText(e.sub, x, y + 13);
+    ctx.restore();
+  });
+
+  // Center label
+  ctx.save();
+  ctx.font = `600 11px system-ui, sans-serif`;
+  ctx.fillStyle = muted;
+  ctx.textAlign = 'center';
+  ctx.fillText('Fault Scope', cx, cy + 4);
+  ctx.restore();
+}
+
+/* ── Experiment timeline ── */
+function drawTimeline() {
+  const canvas = document.getElementById('timelineCanvas');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth;
+  const H = 200;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const dark = isDark();
+  const muted = dark ? '#6b738f' : '#5a6080';
+  const bright = dark ? '#eef0f8' : '#0d1030';
+  const border = dark ? '#252a3d' : '#bcc3dc';
+  const amber = '#d68a14';
+  const teal = '#0a9680';
+  const app = '#2360e4';
+  const violet = '#7630e8';
+
+  ctx.clearRect(0, 0, W, H);
+
+  const PAD = 60;
+  const TW = W - PAD * 2;
+
+  // Time axis
+  const axisY = H * 0.5;
+  ctx.strokeStyle = border;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD, axisY); ctx.lineTo(W - PAD, axisY); ctx.stroke();
+
+  // Segments
+  const segs = [
+    { start: 0, end: 0.20, type: 'observe',  label: 'Baseline (30s)' },
+    { start: 0.20, end: 0.55, type: 'fault',  label: 'pod-delete injected' },
+    { start: 0.55, end: 0.75, type: 'observe', label: 'Recovery window' },
+    { start: 0.75, end: 0.90, type: 'fault', label: 'network-delay' },
+    { start: 0.90, end: 1.00, type: 'verify', label: 'Verify (health)' },
+  ];
+
+  const segColors = {
+    observe: dark ? 'rgba(37,42,61,0.6)' : 'rgba(188,195,220,0.3)',
+    fault: dark ? 'rgba(138,86,9,0.3)' : 'rgba(214,138,20,0.15)',
+    verify: dark ? 'rgba(7,94,82,0.3)' : 'rgba(10,150,128,0.15)',
+  };
+
+  segs.forEach(s => {
+    const x = PAD + s.start * TW;
+    const w = (s.end - s.start) * TW;
+    ctx.fillStyle = segColors[s.type];
+    ctx.fillRect(x, 20, w, H - 40);
+    if (s.type === 'fault') {
+      ctx.strokeStyle = amber;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x, 20, w, H - 40);
+    }
+    ctx.save();
+    ctx.font = `10px ui-monospace, monospace`;
+    ctx.fillStyle = s.type === 'fault' ? amber : muted;
+    ctx.textAlign = 'center';
+    ctx.fillText(s.label, x + w / 2, 34);
+    ctx.restore();
+  });
+
+  // Stream 1 events (fault injection dots on axis)
+  const stream1Events = [
+    { t: 0.20, label: 'fault_injected', color: amber },
+    { t: 0.55, label: 'fault_ended', color: amber },
+    { t: 0.75, label: 'fault_injected', color: amber },
+    { t: 0.90, label: 'fault_ended', color: amber },
+  ];
+
+  stream1Events.forEach(e => {
+    const x = PAD + e.t * TW;
+    ctx.beginPath(); ctx.arc(x, axisY, 5, 0, Math.PI * 2);
+    ctx.fillStyle = e.color; ctx.fill();
+    ctx.save();
+    ctx.font = `9px ui-monospace, monospace`;
+    ctx.fillStyle = amber; ctx.textAlign = 'center';
+    ctx.fillText(e.label, x, axisY + 16);
+    ctx.restore();
+  });
+
+  // Stream 2 tool call dots above axis
+  const toolCalls = [
+    { t: 0.08, label: 'list_pods', type: 'irrelevant' },
+    { t: 0.15, label: 'query_metrics', type: 'irrelevant' },
+    { t: 0.28, label: 'query_metrics', type: 'detect' },
+    { t: 0.36, label: 'get_pod_events', type: 'detect' },
+    { t: 0.44, label: 'restart_pod', type: 'remediate' },
+    { t: 0.62, label: 'check_health', type: 'irrelevant' },
+    { t: 0.80, label: 'query_metrics', type: 'detect' },
+    { t: 0.86, label: 'scale_up', type: 'remediate' },
+  ];
+
+  const typeColor = { detect: teal, remediate: app, irrelevant: dark ? '#3a4060' : '#bcc3dc' };
+  const typeLabelColor = { detect: teal, remediate: app, irrelevant: muted };
+  const callY = axisY - 28;
+
+  toolCalls.forEach(tc => {
+    const x = PAD + tc.t * TW;
+    ctx.beginPath(); ctx.arc(x, callY, 4, 0, Math.PI * 2);
+    ctx.fillStyle = typeColor[tc.type]; ctx.fill();
+    if (tc.type !== 'irrelevant') {
+      ctx.save();
+      ctx.font = `bold 9px ui-monospace, monospace`;
+      ctx.fillStyle = typeLabelColor[tc.type];
+      ctx.textAlign = 'center';
+      ctx.fillText(tc.type.toUpperCase(), x, callY - 8);
+      ctx.restore();
+    }
+  });
+
+  // Stream labels
+  ctx.save();
+  ctx.font = `10px ui-monospace, monospace`;
+  ctx.fillStyle = teal;
+  ctx.textAlign = 'left';
+  ctx.fillText('Stream 2: Tool Calls', PAD, callY - 1);
+  ctx.fillStyle = amber;
+  ctx.fillText('Stream 1: Fault Events', PAD, axisY + 30);
+  ctx.restore();
+
+  // Legend
+  const legendItems = [
+    { color: teal, label: 'DETECT' },
+    { color: app, label: 'REMEDIATE' },
+    { color: dark ? '#3a4060' : '#bcc3dc', label: 'IRRELEVANT' },
+  ];
+  let lx = W - PAD - 10;
+  legendItems.slice().reverse().forEach(li => {
+    ctx.save();
+    ctx.font = `9px ui-monospace, monospace`;
+    const tw2 = ctx.measureText(li.label).width;
+    lx -= tw2 + 18;
+    ctx.fillStyle = li.color;
+    ctx.beginPath(); ctx.arc(lx - 4, H - 15, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = muted;
+    ctx.textAlign = 'left';
+    ctx.fillText(li.label, lx + 4, H - 11);
+    ctx.restore();
+  });
+}
+
+function drawAll() {
+  drawFaultCanvas();
+  drawTimeline();
+}
+
+window.addEventListener('load', drawAll);
+window.addEventListener('resize', drawAll);
+
+const mo = new MutationObserver(drawAll);
+mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawAll);
+</script>

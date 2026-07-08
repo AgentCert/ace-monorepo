@@ -24,6 +24,18 @@ say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
 
+# --- Invocation mode ----------------------------------------------------------
+#   --setup    (default) full first-time wizard: prompts, writes .env, deploys
+#   --restart  skip all prompts and .env edits; just re-apply the stack
+SETUP_MODE="setup"
+for _arg in "$@"; do
+    case "$_arg" in
+        --restart) SETUP_MODE="restart" ;;
+        --setup)   SETUP_MODE="setup"   ;;
+    esac
+done
+unset _arg
+
 # --- prep .env -------------------------------------------------------------
 # .env must already exist (created by apply-cluster-prereqs.sh)
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -35,6 +47,18 @@ ok "Using existing .env (press Enter at each prompt to keep current values)"
 
 # current value of KEY in .env (empty if unset)
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
+
+if [[ "$SETUP_MODE" == "restart" ]]; then
+    CLUSTER_MODE="$(cur CLUSTER_MODE)"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
+    DO_BUILD=0; DH_USER=""; DH_TOKEN=""
+    declare -a SELECTED_BUILD_IMAGES=()
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  ACE restart — re-applying stack (no .env changes)${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  .env: ${ENV_FILE}${NC}"
+    echo
+fi
 
 # ask "KEY" "Prompt label" → echoes chosen value (default = current .env value)
 ask() {
@@ -48,6 +72,8 @@ ask() {
         echo "${reply}"
     fi
 }
+
+if [[ "$SETUP_MODE" == "setup" ]]; then
 
 echo
 echo -e "${CYAN}=======================================================${NC}"
@@ -161,8 +187,8 @@ echo
 
 # --- OPTIONAL: cluster + infra modes ---------------------------------------
 echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
-echo -e "   ${DIM}auto=reuse kubeconfig or create kind · local=existing cluster · fresh=new kind${NC}"
-CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/fresh)')"
+echo -e "   ${DIM}auto=reuse/create kind  local=existing cluster  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
+CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/cloud/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
@@ -194,12 +220,20 @@ detect_kind_gw() {
 {{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
 }
 
-CALLBACK_HOST="$(detect_kind_gw || true)"
-if [[ -n "${CALLBACK_HOST}" ]]; then
-    echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
+if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+    # Cloud clusters have no kind network; SUBSCRIBER_CALLBACK_URL/SERVER_ADDR will be
+    # set to K8s service DNS by k8s_env_patch, and PORTAL_ENDPOINT to the LB IP by
+    # post_cloud_setup. A placeholder is written for now and overwritten at deploy time.
+    CALLBACK_HOST=""
+    echo -e "${DIM}Cloud mode — skipping kind gateway detection; endpoints will be resolved at deploy time.${NC}"
 else
-    CALLBACK_HOST="172.26.0.1"
-    warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
+    CALLBACK_HOST="$(detect_kind_gw || true)"
+    if [[ -n "${CALLBACK_HOST}" ]]; then
+        echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
+    else
+        CALLBACK_HOST="172.26.0.1"
+        warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
+    fi
 fi
 echo
 
@@ -209,7 +243,8 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _AZ_ALIAS="$AZ_ALIAS" _AZ_APIVER="$AZ_APIVER" \
        _GEMINI_KEY="$GEMINI_KEY" _OPENROUTER_KEY="$OPENROUTER_KEY" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
-       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN"
+       _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
+       _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}"
 python3 - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
@@ -272,6 +307,11 @@ if dh_user:
     sets["DOCKERHUB_USERNAME"] = dh_user
 if dh_token:
     sets["DOCKERHUB_TOKEN"] = dh_token
+
+# ── Corporate proxy CA cert path ─────────────────────────────────────────────
+custom_ca = os.environ.get("_CUSTOM_CA_CERT_PATH", "")
+if custom_ca:
+    sets["CUSTOM_CA_CERT_PATH"] = custom_ca
 
 # Network endpoints in-cluster pods use to reach the control plane on this host
 # (so SUBSCRIBER_CALLBACK_URL is never left as the YOUR_HOST_LAN_IP placeholder).
@@ -340,8 +380,11 @@ echo -e "  Infra             : MongoDB + Langfuse + LiteLLM run locally ${DIM}(d
 echo -e "${CYAN}-------------------------------------------------------${NC}"
 echo
 echo -e "Next:  ${BOLD}./scripts/setup.sh${NC} then answer Y to deploy, or run ${BOLD}kubectl get pods -n ace${NC}"
+echo -e "       Re-deploy without re-entering values: ${BOLD}./scripts/setup.sh --restart${NC}"
 echo -e "Docs:  ${DIM}docs/setup/  ·  configuration & ports: docs/setup/configuration.md${NC}"
 echo
+
+fi  # end SETUP_MODE=setup
 
 # --- K8s deployment helpers -------------------------------------------------
 
@@ -398,6 +441,79 @@ apply_ace_env_secret() {
         --dry-run=client -o yaml \
         | kubectl apply -f - >/dev/null
     ok "ace-env Secret up to date."
+}
+
+# create_ca_configmap — create/update ace-ca-certs ConfigMap from local cert bundle.
+# If CUSTOM_CA_CERT_PATH is set in .env, uses that file; else falls back to the
+# host system bundle. The ConfigMap is mounted into the graphql clone-charts
+# initContainer so git clone works behind a corporate proxy.
+create_ca_configmap() {
+    local ns="${1:-ace}"
+    local custom_ca
+    custom_ca="$(grep -m1 '^CUSTOM_CA_CERT_PATH=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
+    local ca_src
+    if [[ -n "${custom_ca}" && -f "${custom_ca}" ]]; then
+        ca_src="${custom_ca}"
+        ok "Using custom CA cert: ${ca_src}"
+    elif [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        ca_src="/etc/ssl/certs/ca-certificates.crt"
+    else
+        warn "No CA cert bundle found — git clone may fail in proxy environments."
+        return 0
+    fi
+    kubectl create configmap ace-ca-certs \
+        --namespace "${ns}" \
+        --from-file=ca-certificates.crt="${ca_src}" \
+        --dry-run=client -o yaml \
+        | kubectl apply -f - >/dev/null
+    ok "ace-ca-certs ConfigMap up to date (${ca_src})."
+}
+
+# post_cloud_setup — after a cloud deployment, poll for the web service LoadBalancer
+# IP/hostname. The web pod's nginx is the only external entry point: browsers hit
+# <web-lb>:2001, nginx proxies /api/ → graphql:8081 and /auth/ → auth:3000 via
+# K8s service DNS. Graphql never needs to be externally reachable.
+#
+# What this function does:
+#   1. Polls the web service LB until it gets an IP/hostname.
+#   2. Adds it to ALLOWED_ORIGINS so graphql accepts the browser Origin header
+#      that nginx forwards through (Origin: http://<web-lb>:2001).
+#   3. Re-applies the ace-env Secret and restarts graphql to pick up the new regex.
+post_cloud_setup() {
+    local ns="${1:-ace}"
+    echo
+    echo -e "${DIM}Cloud mode: polling web LoadBalancer for external IP/hostname (up to 5 min)…${NC}"
+    local lb_ip="" attempts=0
+    while [[ -z "${lb_ip}" && ${attempts} -lt 60 ]]; do
+        lb_ip="$(kubectl get svc web -n "${ns}" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+        if [[ -z "${lb_ip}" ]]; then
+            lb_ip="$(kubectl get svc web -n "${ns}" \
+                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+        fi
+        if [[ -z "${lb_ip}" ]]; then sleep 5; (( attempts++ )); fi
+    done
+    if [[ -z "${lb_ip}" ]]; then
+        warn "Web LoadBalancer IP/hostname not yet assigned. Add it to ALLOWED_ORIGINS in .env, then re-run:"
+        warn "  ALLOWED_ORIGINS=<existing-value>|^(http://|https://|)<lb-ip>(:[0-9]+)?\$"
+        warn "  Then: ./scripts/setup.sh --restart"
+        return 0
+    fi
+    ok "web LoadBalancer: ${lb_ip}"
+    # Extend ALLOWED_ORIGINS so graphql accepts WebSocket upgrade requests that nginx
+    # forwards with the browser's original Origin: http://<web-lb>:2001 header.
+    local cur_origins
+    cur_origins="$(grep -m1 '^ALLOWED_ORIGINS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
+    local escaped_lb
+    escaped_lb="$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "${lb_ip}")"
+    if [[ -n "${cur_origins}" ]] && ! echo "${cur_origins}" | grep -qF "${lb_ip}"; then
+        set_env ALLOWED_ORIGINS "${cur_origins}|^(http://|https://|)${escaped_lb}(:[0-9]+)?\$"
+    fi
+    apply_ace_env_secret "${ns}"
+    # Restart graphql so it reloads ALLOWED_ORIGINS from the updated secret
+    kubectl rollout restart deployment/graphql -n "${ns}" >/dev/null 2>&1 || true
+    ok "Updated ALLOWED_ORIGINS and restarted graphql."
+    echo -e "  ${BOLD}AgentCert UI${NC}  http://${lb_ip}:2001"
 }
 
 # Patch .env so in-cluster pods use K8s service DNS names instead of host IPs.
@@ -609,11 +725,11 @@ k8s_deploy() {
     # 1) Patch .env with K8s-specific service DNS names
     k8s_env_patch
 
-    # 2) Ensure kind cluster is up (skip when pointing at an external cluster)
-    if [[ "${CLUSTER_MODE}" != "local" ]]; then
-        ensure_kind_cluster
+    # 2) Ensure kind cluster (skip for cloud/local — they supply their own kubeconfig)
+    if [[ "${CLUSTER_MODE}" == "local" || "${CLUSTER_MODE}" == "cloud" ]]; then
+        ok "CLUSTER_MODE=${CLUSTER_MODE} — skipping kind cluster creation, using existing kubeconfig."
     else
-        ok "CLUSTER_MODE=local — skipping kind cluster creation, using existing kubeconfig."
+        ensure_kind_cluster
     fi
 
     # 3) Verify kubectl is connected
@@ -627,6 +743,10 @@ k8s_deploy() {
 
     # 5) Apply namespace first
     kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
+
+    # 5b) Create CA cert ConfigMap before pods start (graphql initContainer mounts it)
+    echo -e "${DIM}Creating/updating ace-ca-certs ConfigMap…${NC}"
+    create_ca_configmap "${NS}"
 
     # 6) Create (or update) the ace-env Secret from .env
     echo -e "${DIM}Creating/updating ace-env Secret from .env…${NC}"
@@ -645,6 +765,13 @@ k8s_deploy() {
               "${K8S_DIR}"/langfuse.yaml; do
         [[ -f "$f" ]] && kubectl apply -f "$f"
     done
+    # For cloud clusters, switch the web service to LoadBalancer so browsers can reach it.
+    # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        kubectl patch svc web -n "${NS}" \
+            -p '{"spec":{"type":"LoadBalancer","ports":[{"port":2001,"targetPort":2001,"protocol":"TCP"}]}}' \
+            2>/dev/null && ok "web service patched to LoadBalancer." || true
+    fi
     ok "Manifests applied."
 
     # 9) Wait for core services to become ready (best-effort; don't abort on timeout)
@@ -659,6 +786,11 @@ k8s_deploy() {
             && ok "${svc} ready" || warn "${svc} not yet ready — check: kubectl get pods -n ${NS}"
     done
 
+    # 9b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        post_cloud_setup "${NS}"
+    fi
+
     # 10) Print access URLs
     local admu admp luser lpass
     admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
@@ -669,7 +801,11 @@ k8s_deploy() {
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "${GREEN}  ✓ ACE stack deployed to cluster${NC}"
     echo -e "${GREEN}=======================================================${NC}"
-    echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    else
+        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    fi
     echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
     echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
     echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"
@@ -677,7 +813,9 @@ k8s_deploy() {
     echo
     echo -e "  ${DIM}status:  kubectl get pods -n ace${NC}"
     echo -e "  ${DIM}logs:    kubectl logs -n ace deploy/graphql -f${NC}"
-    echo -e "  ${DIM}teardown: kind delete cluster --name ${KIND_CLUSTER_NAME:-agentcert}${NC}"
+    if [[ "${CLUSTER_MODE}" != "cloud" ]]; then
+        echo -e "  ${DIM}teardown: kind delete cluster --name ${KIND_CLUSTER_NAME:-agentcert}${NC}"
+    fi
     echo -e "${GREEN}=======================================================${NC}"
 }
 
@@ -723,7 +861,7 @@ if pull_secret:
     lines += [f"imagePullSecretName: '{pull_secret}'"]
 open(out_path, "w").write("\n".join(lines) + "\n")
 PY
-    ok "Generated values-env.yaml (env + litellm config + hostPath)."
+    ok "Generated values-env.yaml (env + litellm config)."
 }
 
 # Deploy via Helm — helm owns everything: namespace, secret, all workloads.
@@ -744,8 +882,12 @@ helm_deploy() {
     # 1) Patch .env with K8s-specific service DNS names
     k8s_env_patch
 
-    # 2) Ensure kind cluster is up with the right port mappings
-    ensure_kind_cluster
+    # 2) Ensure kind cluster (skip for cloud/local — they supply their own kubeconfig)
+    if [[ "${CLUSTER_MODE}" == "local" || "${CLUSTER_MODE}" == "cloud" ]]; then
+        ok "CLUSTER_MODE=${CLUSTER_MODE} — skipping kind cluster creation, using existing kubeconfig."
+    else
+        ensure_kind_cluster
+    fi
 
     # 3) Verify kubectl is connected
     if ! kubectl cluster-info >/dev/null 2>&1; then
@@ -768,6 +910,11 @@ helm_deploy() {
         -f "${VALUES_ENV}"
         --timeout 10m
     )
+    # Cloud clusters need the web service on a LoadBalancer so browsers can reach the UI.
+    # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        helm_cmd+=(--set web.serviceType=LoadBalancer)
+    fi
 
     echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
     echo
@@ -888,6 +1035,11 @@ helm_deploy() {
         ok "Image registries updated."
     fi
 
+    # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        post_cloud_setup "${NS}"
+    fi
+
     # 6) Print access URLs
     local admu admp luser lpass
     admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
@@ -899,7 +1051,11 @@ helm_deploy() {
     echo -e "${GREEN}  ✓ ACE stack deployed via Helm${NC}"
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "  ${BOLD}Release${NC}       ace  (namespace: ${NS})"
-    echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    else
+        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+    fi
     echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
     echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
     echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"

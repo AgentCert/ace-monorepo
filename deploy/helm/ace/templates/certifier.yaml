@@ -127,6 +127,9 @@ spec:
   selector:
     app: certifier
   type: LoadBalancer
+  {{- if .Values.staticIP.certifier }}
+  loadBalancerIP: {{ .Values.staticIP.certifier }}
+  {{- end }}
   ports:
     - port: 8000
       targetPort: 8000

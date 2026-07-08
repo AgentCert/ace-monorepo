@@ -126,6 +126,9 @@ spec:
   selector:
     app: web
   type: LoadBalancer
+  {{- if .Values.staticIP.web }}
+  loadBalancerIP: {{ .Values.staticIP.web }}
+  {{- end }}
   ports:
     - port: 2001
       targetPort: 2001

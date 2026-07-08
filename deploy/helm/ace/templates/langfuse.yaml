@@ -516,6 +516,9 @@ spec:
   selector:
     app: langfuse-web
   type: LoadBalancer
+  {{- if .Values.staticIP.langfuse }}
+  loadBalancerIP: {{ .Values.staticIP.langfuse }}
+  {{- end }}
   ports:
     - port: 3000
       targetPort: 3000

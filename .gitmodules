@@ -35,8 +35,8 @@
 	branch = main
 [submodule "chaos-charts"]
 	path = chaos-charts
-	url = https://github.com/AgentCert/chaos-charts.git
-	branch = master
+	url = https://github.com/Warsea12-ai/chaos-charts.git
+	branch = feature/itbench-scenarios
 [submodule "agent-sidecar"]
 	path = agent-sidecar
 	url = https://github.com/AgentCert/agent-sidecar.git

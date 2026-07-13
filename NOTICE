@@ -24,6 +24,26 @@ Please refer to each submodule's NOTICE for full attribution details.
 
 ---
 
+## Vendored application manifests
+
+`app-charts/charts/bookinfo` vendors Kubernetes manifests from
+[istio/istio](https://github.com/istio/istio) (tag `1.30.2`), licensed under
+the Apache License, Version 2.0. Copyright Istio Authors.
+
+`app-charts/charts/otel-demo` depends on the official
+[OpenTelemetry Demo Helm chart](https://github.com/open-telemetry/opentelemetry-helm-charts)
+(`opentelemetry-demo` @ `0.40.9`), licensed under the Apache License,
+Version 2.0. Copyright The OpenTelemetry Authors.
+
+Both applications, and the pinned versions used, were selected to match
+[ITBench](https://github.com/itbench-hub/ITBench) (also Apache License,
+Version 2.0, Copyright IBM Corp.), so that ACE's fault-injection
+experiments against them are comparable to ITBench's published SRE
+scenarios. See `it_bench_arxiv.pdf` citation in ITBench's README for the
+underlying paper.
+
+---
+
 ## Third-party dependencies
 
 This project uses third-party software. Each dependency is subject to its own

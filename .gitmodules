@@ -15,7 +15,7 @@
 	branch = main
 [submodule "app-charts"]
 	path = app-charts
-	url = https://github.com/AgentCert/app-charts.git
+	url = https://github.com/Warsea12-ai/app-charts.git
 	branch = main
 [submodule "agent-charts"]
 	path = agent-charts

@@ -23,8 +23,8 @@
 	branch = main
 [submodule "certifier"]
 	path = certifier
-	url = https://github.com/AgentCert/certifier.git
-	branch = main
+	url = https://github.com/Warsea12-ai/certifier.git
+	branch = feature/itbench-scenarios
 [submodule "flash-agent"]
 	path = flash-agent
 	url = https://github.com/AgentCert/flash-agent.git

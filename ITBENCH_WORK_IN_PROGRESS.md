@@ -1,12 +1,12 @@
-# ITBench integration — work in progress, read before continuing
+# ITBench integration — status (superseded, see below)
 
-Branch `feature/itbench-scenarios` has unfinished ITBench SRE-scenario work.
+**This file is stale.** All 30 ITBench SRE fault bundles are complete (was "2 of 6" when
+this file was last accurate). For current status and all follow-on work (CISO scorecard,
+`--include-ciso-finops` flag, open-weight-model agent certification), see
+**`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`** at the repo root.
 
-**Full continuation guide:** `chaos-charts/ITBENCH_HANDOFF.md` (in the `chaos-charts` submodule, same branch).
+Design notes / inlined ITBench source data for the fault bundles themselves remain in
+`chaos-charts/ITBENCH_HANDOFF.md` (in the `chaos-charts` submodule).
 
-Quick status:
-- `app-charts` submodule: bookinfo + otel-demo charts — **complete**.
-- `chaos-charts` submodule: 2 of 6 ITBench faults implemented as first-class ChaosHub fault bundles (`scaled-to-zero-kubernetes-workload`, `nonexistent-kubernetes-workload-container-image`); 4 remain, plus category-index registration, `experiments.yaml` regeneration, and rewriting the two app-level Argo workflows to use real `ChaosEngine` CRs. See the handoff doc for exact design notes, inlined ITBench source data, and what's been verified vs. not.
-- Check `git remote -v` in this repo and in both submodules before pushing anything — the fork URLs in `.gitmodules` may need updating if repo ownership has moved.
-
-Delete this file once the work in `chaos-charts/ITBENCH_HANDOFF.md` is finished and merged.
+Check `git remote -v` in this repo and in every submodule before pushing anything —
+ownership has moved more than once during this project.

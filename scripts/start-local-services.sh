@@ -218,9 +218,28 @@ start_langfuse() {
     fi
 
     log_info "Starting Langfuse compose stack from ${LANGFUSE_DIR} ..."
-    if ! (cd "${LANGFUSE_DIR}" && docker compose up -d); then
-        log_error "Langfuse compose up failed"
-        return 1
+    # --env-file is required here (matching start_litellm/certifier below) --
+    # without it, `docker compose up -d` only reads a .env from its own CWD
+    # (${LANGFUSE_DIR}/.env, which doesn't exist), so LANGFUSE_INIT_ORG_ID /
+    # LANGFUSE_INIT_PROJECT_PUBLIC_KEY / LANGFUSE_INIT_PROJECT_SECRET_KEY /
+    # etc. from the repo-root .env silently never reach the container --
+    # Langfuse still boots and seeds the admin USER, but auto-creates no
+    # org/project, so the API keys configured elsewhere (LANGFUSE_PUBLIC_KEY/
+    # LANGFUSE_SECRET_KEY, used by flash-agent and LiteLLM's langfuse
+    # callback) don't correspond to anything and every trace write fails
+    # with "Invalid credentials" -- silently, since it's a background
+    # callback, not a request-blocking error.
+    if [[ -f "${ENV_FILE}" ]]; then
+        if ! (cd "${LANGFUSE_DIR}" && docker compose --env-file "${ENV_FILE}" up -d); then
+            log_error "Langfuse compose up failed"
+            return 1
+        fi
+    else
+        log_warn "No env file at ${ENV_FILE} -- starting Langfuse without LANGFUSE_INIT_* vars (no org/project will be auto-created)"
+        if ! (cd "${LANGFUSE_DIR}" && docker compose up -d); then
+            log_error "Langfuse compose up failed"
+            return 1
+        fi
     fi
     log_success "Langfuse up. Web UI: http://localhost:4000"
 }

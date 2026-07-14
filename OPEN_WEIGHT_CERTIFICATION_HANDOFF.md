@@ -232,24 +232,39 @@ in-cluster otherwise); Prometheus MCP server is reached directly via its own Nod
     in `litellm_config.yaml` (commit `4651472`); verified LiteLLM forwards it (proxy health
     endpoint reports `num_ctx: 16384` for this model) and a direct completion still works.
 
-### Known open issue (unresolved as of this writing)
+14. **Two independent hardcoded 120s timeouts, both needed fixing.** After fix #13, a
+    re-run hit a *new* failure: iteration 2's LLM call exceeded the OpenAI client's own
+    hardcoded `timeout=120.0` in `flash_agent.py`'s `_create_openai_client`. Benchmarked
+    directly against Ollama (bypassing LiteLLM entirely) to confirm this wasn't
+    misconfiguration but genuine CPU-inference latency: a ~3.5K-input/~1.1K-output-token
+    completion took **271.5s** end-to-end (prompt eval ~70 tok/s, generation ~5 tok/s).
+    Fixed by making the timeout and SDK retry count configurable
+    (`LLM_REQUEST_TIMEOUT`/`LLM_MAX_RETRIES` env vars, `flash-agent@f0096b1`, defaults
+    unchanged at 120s/2 retries so hosted-API users see no behavior change) and setting
+    `LLM_REQUEST_TIMEOUT=600`/`LLM_MAX_RETRIES=1` in the local `.env`. Re-running still hit
+    a *second*, independent 120s ceiling one layer down: LiteLLM's Router (engaged
+    whenever a proxy config declares `model_list`, which this one does) enforces its own
+    `router_settings.timeout`, separate from and taking precedence over
+    `litellm_settings.request_timeout: 600` — left at its old default of 120, it killed
+    the same call with `litellm.Timeout: Connection timed out. Timeout passed=120.0`.
+    Fixed by raising `router_settings.timeout` to `600` to match
+    (`agentcert-stack@903cc47`). Verified fixed: (a) a direct completion through the proxy
+    legitimately took 2m48s and succeeded past the old 120s ceiling; (b) two full
+    flash-agent scans then ran end-to-end without any timeout or parse error — scan 1 took
+    497.1s (2 ReAct iterations, found a real `product-catalog` restart-count warning),
+    scan 2 took 311.5s (2 iterations, confirmed no remaining issues). The open-weight
+    agent's ReAct loop is now reliably producing valid, parseable structured analysis.
 
-After fix #13, a re-run hit a **new** failure mode: iteration 2's LLM call took long enough
-(two internal SDK retries at ~2min/~2min spacing) to exceed the OpenAI client's own
-120-second-plus-retries timeout budget, ending in `LLM call failed: Request timed out.`
-Raising `num_ctx` makes CPU prompt-processing meaningfully slower (attention cost scales
-with context length), so iteration 2's prompt — system prompt + tool schemas + iteration 1's
-tool results — is now large enough to blow the client timeout before Ollama finishes
-generating. Not yet diagnosed further or fixed. Candidate next steps: raise
-`_create_openai_client`'s `timeout=120.0` in `flash_agent.py`, shrink per-tool-result
-truncation below the current 8000-char cap to reduce prompt size growth per iteration, or
-both. This is the next thing to pick up.
+**Residual caveat, not a bug:** the two scans above reported health scores of 80 and 10
+for what should be a similar cluster state moments apart — some scan-to-scan scoring
+noise is expected from a 7-8B model (already flagged in `certifier/README.md`'s caveat
+about local-model reliability vs. GPT-4o/GPT-5); worth keeping an eye on once real
+fault-injection runs are underway, but not blocking.
 
 ---
 
 ## 6. Remaining work (not yet started)
 
-- Fix the timeout issue in §5's "Known open issue".
 - Verify ChaosEngine submission against the now-registered Litmus infra.
 - Run ONE end-to-end validation: single fault, single run, trace captured, certifier
   Phase 0+1 processed.

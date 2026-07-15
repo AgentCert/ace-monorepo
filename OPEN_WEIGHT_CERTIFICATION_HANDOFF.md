@@ -431,3 +431,82 @@ get ns paa` all confirm nothing remains.
 - Two upstream PRs are open-able but not yet raised: both `fix/openai-compatible-llm-fallback`
   commits on `aruscher-dev/ITBench-CISO-CAA-Agent` are pushed but no PR has been opened
   against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.
+
+---
+
+## 9. ChaosEngine submission verified — critical mistargeting bug found and fixed
+
+**Context:** none of the 29 ITBench fault bundles (nor the pre-existing generic ones) had
+ever actually been submitted as a real `ChaosEngine` against a live cluster before this —
+`ITBENCH_HANDOFF.md` explicitly flagged the `APP_NAMESPACE`/`APP_LABEL`/`APP_KIND`
+env-injection mechanism as **"NOT independently verified... verify this before trusting
+it."** This section is that verification, and it found a real, critical bug.
+
+### 9.1 What was tested
+
+`scaled-to-zero-kubernetes-workload`, targeted at `otel-demo`'s `load-generator`
+Deployment (`opentelemetry.io/name=load-generator`), via a real `ChaosEngine` submitted
+directly with `kubectl` (bypassing the ChaosCenter portal UI). Required creating RBAC
+(`ServiceAccount`/`Role`/`RoleBinding`) by hand first — **no fault bundle in this repo ships
+an `rbac.yaml`**, upstream LitmusChaos convention leaves this to the portal's own
+install flow, which direct-`kubectl` submission bypasses entirely.
+
+### 9.2 Critical bug found: `APP_NAMESPACE`/`APP_LABEL` are never populated
+
+The first submission's experiment pod logged `Resolving target deployment in ns= label=`
+— both vars empty — then resolved and **scaled down `accounting`** (a real, unrelated
+`otel-demo` service), not the intended `load-generator`. Restored `accounting` to 1
+replica immediately (confirmed back to `1/1 Running` within ~30s; no other impact).
+
+Root cause, confirmed by inspecting the experiment pod's actual injected env directly
+(`kubectl get pod ... -o jsonpath='{.spec.containers[0].env}'`): the chaos-operator on
+this cluster declares `APP_NAMESPACE`/`APP_LABEL` as env var *names* on the pod spec but
+never gives them a `value` — LitmusChaos's assumption in this handoff doc was simply
+wrong for this operator version. It instead sets one combined `TARGETS` var:
+`"deployment:otel-demo:[opentelemetry.io/name=load-generator]:union"` — format
+`<kind>:<namespace>:[<label-selector>]:<mode>`.
+
+**Fix** (`chaos-charts@342259e`): every one of the 29 fault scripts now derives
+`APP_KIND`/`APP_NAMESPACE`/`APP_LABEL` from `TARGETS` at the top of its script (falling
+back to the old vars if `TARGETS` isn't set, for forward-compat). Applied uniformly via
+a scripted patch to 27 files sharing an identical template, plus 2 individually
+(`cordoned-kubernetes-worker-node`, `kubernetes-api-server-request-surge` — same fix,
+slightly different surrounding script text). Regenerated both `experiments.yaml` catalog
+files afterward.
+
+**Re-verified after the fix:** resubmitted the same `ChaosEngine` — correctly logged
+`Resolving target deployment in ns=otel-demo label=opentelemetry.io/name=load-generator`,
+`Target=load-generator`, scaled it to 0, held for the configured duration, then correctly
+reverted it to 1. `load-generator` confirmed `1/1 Running` afterward.
+
+**Also fixed a second RBAC gap** while getting this far: `fault.yaml`'s own declared
+`permissions` list only covers what the experiment *pod* needs once running — not the
+baseline `batch/jobs create` (and a few related) permissions the chaos-runner needs to
+launch the experiment as a Job in the first place. This is a standard LitmusChaos
+convention (normally provided by a per-experiment `rbac.yaml` that this repo's fault
+bundles simply don't have); documented the full required Role in this section's test
+artifacts for future reference.
+
+### 9.3 Known gap, not fixed (non-blocking): no `ChaosResult` CR is ever created
+
+Even with the mistargeting bug fixed, the `ChaosEngine`'s `verdict` stayed `"Awaited"`
+and `kubectl get chaosresult` returned nothing — despite the experiment pod completing
+successfully (`Succeeded` phase, correct inject+revert). Standard LitmusChaos experiments
+get this for free from the `litmus-go` SDK; these are hand-written shell scripts (per
+`ITBENCH_HANDOFF.md`'s own documented design decision — no compiled Go binary exists for
+these), and none of them ever `kubectl apply` a `ChaosResult` CR themselves.
+
+**Deliberately not fixed here** — checked whether it blocks the actual certification
+pipeline first: it doesn't. `ITBENCH_HANDOFF.md` §2 already established that
+`fault_bucketing` is "pure LLM-driven trace classification with **zero dependency on
+ChaosEngine/ChaosResult CRs existing**," and `ground_truth.yaml` (also unrelated to
+ChaosResult) is optional. The only real consequence: the Litmus **ChaosCenter portal**
+won't show a pass/fail badge for any of these 29 experiments. Worth fixing eventually for
+full portal conformance, but explicitly out of scope for unblocking real certification
+runs — noted here so it isn't mistaken for an oversight.
+
+### 9.4 Cleanup
+
+All test artifacts removed: `ChaosEngine`, `ChaosExperiment`, and RBAC deleted from
+`otel-demo`. Verified `otel-demo` fully healthy afterward — every pod `1/1`/`Running`,
+`accounting` and `load-generator` both back at their original replica count of 1.

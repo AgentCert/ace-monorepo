@@ -309,3 +309,125 @@ parse (35 docs / 29 docs respectively).
 scenarios for real certification runs has its own inlined `kubectl` scripts and never
 referenced the ChaosHub catalog paths — confirmed via grep before moving anything. So §4-6
 above (the live certification effort) are unaffected by this restructure.
+
+---
+
+## 8. CrewAI CISO Agent trial (real ITBench reference agent, real CISO scenario)
+
+**Context:** ITBench ships two reference agents (not one — confirmed by reading both repos'
+READMEs directly, since the top-level ITBench README's "both built with CrewAI" claim turned
+out to be stale):
+- **SRE Agent** (`itbench-hub/ITBench-CISO-SRE-FinOps-Agent`, internally "Zero") — a wrapper
+  around OpenAI's Codex CLI, *not* CrewAI, despite the table label. Not used here.
+- **CISO Agent** (`itbench-hub/ITBench-CISO-CAA-Agent`) — genuinely built with **CrewAI +
+  LangGraph**. This is the one exercised below, per explicit instruction to use "the CrewAI
+  based agent."
+
+This is a real trial: a real Docker-containerized CrewAI agent, a real CIS Benchmark
+scenario (`Gen-CIS-b-K8s-Kyverno` — matches the `ciso_fault` category already registered in
+`certifier/configs/fault_categories.json` from the earlier CISO scorecard work), deployed
+and evaluated against this session's actual k3s cluster — not mocked, not simulated.
+
+### 8.1 What was built
+
+| Repo | Fork | Purpose |
+|---|---|---|
+| `IBM/ITBench-Scenarios` (`ciso/` subtree) | not forked (read-only reference; no changes needed) | Ansible/Makefile-driven scenario lifecycle: `deploy_bundle` (installs Kyverno via Helm), `inject_fault` (deploys a noncompliant `hostNetwork: true` nginx pod in a new `paa` namespace), `get` (goal text + scenario kubeconfig), `evaluate` (checks PolicyReports), `remove_fault`/`destroy_bundle` (cleanup). |
+| `itbench-hub/ITBench-CISO-CAA-Agent` | `aruscher-dev/ITBench-CISO-CAA-Agent`, branch `fix/openai-compatible-llm-fallback` (commits `104f83e`, `b025192`) | The CrewAI+LangGraph CISO Agent itself (`crewai==0.95.0`). Two real bugs found and fixed here — see §8.3. |
+
+Both repos were cloned/built under `ace-monorepo/.tmp/ciso-agent-trial/` (gitignored,
+persistent across the session — not the ephemeral `/tmp` scratchpad), including two Docker
+images built locally: `ciso-task-scenarios:latest` (the scenario Makefile runner) and
+`ciso-agent:latest` (the agent itself).
+
+### 8.2 Infrastructure fixes needed (new, beyond §5's list)
+
+15. **UFW blocked container→k3s-API-server traffic.** The scenario runner container needs
+    to reach the k3s API server via the docker bridge IP (`172.17.0.1:6443`) — same pattern
+    as Ollama/LiteLLM earlier, but k3s's API server is a host-native (non-containerized)
+    process, so its port genuinely goes through the host's `INPUT` iptables chain (unlike
+    Docker-published ports such as LiteLLM's 14000, which route through `FORWARD` and were
+    already reachable with no firewall change — confirmed empirically both ways). `ufw
+    status` showed an explicit `ALLOW` rule for port 11434 (added earlier for Ollama) but
+    nothing for 6443. Fixed with `sudo ufw allow 6443/tcp`.
+16. **k3s's serving certificate doesn't cover the docker bridge IP.** Even after the
+    firewall fix, TLS verification failed: `x509: certificate is valid for 10.43.0.1,
+    127.0.0.1, 192.168.28.11, ::1, not 172.17.0.1`. Rather than regenerating the *live*
+    k3s server's certificate (which would need a control-plane restart, affecting every
+    other in-progress workload on this shared cluster), set
+    `insecure-skip-tls-verify: true` on a dedicated container-facing copy of the kubeconfig
+    used only for this trial — the original `~/.kube/config` used everywhere else in this
+    session is untouched.
+
+### 8.3 Real bugs found and fixed in the CISO Agent itself (`src/ciso_agent/llm.py`)
+
+17. **`init_llm()`'s final branch only recognized `"gpt" in model.lower()`.** Any other
+    OpenAI-compatible model name (e.g. `qwen2.5-7b-instruct`, our local Ollama-served model
+    routed through the LiteLLM proxy `model_list` alias) fell through to `return None`. The
+    caller (`call_llm()`, used by the agent's "manager"/task-selector step) then fell back
+    to `ChatOpenAI(temperature=0, model=model)` with **no `api_key`/`base_url` at all**,
+    crashing with `openai.OpenAIError: The api_key client option must be set...`.
+    Reproduced directly, then fixed by widening the condition to
+    `"gpt" in model.lower() or api_url` (any endpoint with an explicit `api_url` is a
+    deliberate OpenAI-compatible target, not just OpenAI's own `gpt*` models), and by
+    passing `api_key`/`base_url` through on `call_llm()`'s own fallback too, in case
+    `init_llm()` ever legitimately returns `None` for some other model shape.
+18. **CrewAI's *native* `LLM` class needed a different model-string shape than the fix
+    above.** After fixing #17, the manager/task-selector step (LangChain `ChatOpenAI`
+    path) succeeded — but the actual `Crew.kickoff()` step (CrewAI's own `LLM` class,
+    which calls `litellm.completion()` directly) then failed with
+    `litellm.BadRequestError: LLM Provider NOT provided ... You passed
+    model=qwen2.5-7b-instruct`. Root cause: LangChain's `ChatOpenAI` sends `model` as-is
+    in the HTTP request body to `base_url` (so the bare LiteLLM-proxy alias
+    `qwen2.5-7b-instruct` is correct there), but litellm's own `get_llm_provider()`
+    (used internally by CrewAI's `LLM` class) requires an explicit provider prefix like
+    `openai/<model>` to resolve a provider **even with `base_url` set** — a genuine
+    architectural inconsistency in this codebase between its two different LLM call
+    paths, both driven by the *same* `LLM_MODEL_NAME` env var. Fixed in
+    `init_agent_llm()`'s generic-endpoint branch: prefix with `openai/` only when the
+    model string doesn't already declare a provider (checked via `"/" in model`), so a
+    single `LLM_MODEL_NAME=qwen2.5-7b-instruct` value now works correctly across both
+    code paths.
+
+### 8.4 Result: PASS
+
+With both fixes applied, one full trial run:
+1. The CrewAI `CISOCrew` (`role="Test"` agent, `RunKubectlTool` + `GenerateKyvernoTool`,
+   two sequential `Task`s) correctly generated a Kyverno `ClusterPolicy`
+   (`disallow-host-network-pods`, `validationFailureAction: Audit` — report-only, never
+   blocked anything cluster-wide) and deployed it via `kubectl apply` to the real cluster.
+2. Verified independently (not just trusting the agent's own report): `kubectl get polr -n
+   paa` showed the injected noncompliant pod/ReplicaSet/Deployment all correctly
+   **failing** the new policy (`fail=1, pass=0`).
+3. `make evaluate` (the scenario's own independent evaluation harness, reading
+   `PolicyReport`/`ClusterPolicyReport` resources directly — not the agent's self-report)
+   returned **`"pass": true`** (`generate_assessment_posture: true` — the actual
+   compliance-detection check). Two secondary sub-checks (`generate_policy`,
+   `evidence_available`) were `false` — these check for a separate "evidence archive"
+   artifact that ITBench's full official leaderboard-submission tooling produces; running
+   the raw agent container directly (as done here) doesn't produce that packaging, but it
+   isn't part of the core pass/fail determination.
+
+**Cleanup:** `remove_fault` + `destroy_bundle` (removes the fault + policy), then Kyverno's
+Helm release and both the `kyverno` and `paa` namespaces were removed manually (this
+scenario framework's `destroy_bundle` only tears down an ephemeral `kind`-provisioned
+cluster automatically; for a bring-your-own cluster like ours, Kyverno is left installed by
+design for scenario reuse — not appropriate to leave behind after a one-off trial on a
+shared host). Verified clean: `kubectl get clusterpolicy` / `kubectl get ns kyverno` / `kubectl
+get ns paa` all confirm nothing remains.
+
+### 8.5 Remaining work for this track
+
+- Only scenario 1 (`Gen-CIS-b-K8s-Kyverno`) has been trialed. Three more CISO scenario
+  types remain untested with this agent: `Gen-CIS-b-K8s-Kubectl-OPA`,
+  `Gen-CIS-b-RHEL9-Ansible-OPA` (needs a RHEL9 host, not just a Kubernetes cluster),
+  `Upd-CIS-b-K8s-Kyverno`.
+- No integration yet between this trial and the ACE certifier pipeline itself (Phase 0-3).
+  This was run as a standalone manual trial per the immediate instruction to "benchmark it
+  ... catching, correcting and noting out ... the errors"; wiring real CISO executions into
+  `certifier/metrics_extractor/scripts/ciso_metrics_adapter.py` (already built for exactly
+  this per-run doc shape, from the earlier CISO scorecard work) is separate follow-on work,
+  not yet started.
+- Two upstream PRs are open-able but not yet raised: both `fix/openai-compatible-llm-fallback`
+  commits on `aruscher-dev/ITBench-CISO-CAA-Agent` are pushed but no PR has been opened
+  against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.

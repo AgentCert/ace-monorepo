@@ -626,3 +626,114 @@ Full cluster health check before mass execution: every pod in `litmus` and `otel
 `Running`, no lingering `ChaosEngine`/`ChaosExperiment` anywhere, no stray namespaces from
 earlier trials, Langfuse/MongoDB/LiteLLM all up, other users' unrelated containers on this
 shared host untouched and healthy.
+
+---
+
+## 12. Mass execution — 137/137 runs successful, plus a critical cleanup bug found and fixed
+
+Ran the full sweep: all 29 ITBench fault bundles × 5 runs each (2 explicitly-flagged
+high-blast-radius faults — `cordoned-kubernetes-worker-node`,
+`kubernetes-api-server-request-surge` — capped at 1 run), 137 total. **Result: 137/137
+succeeded** (real fault injected, flash-agent completed a genuine scan observing it,
+correctly-tagged Langfuse trace captured for each).
+
+### 12.1 Driver
+
+A new (untracked, `.tmp/mass-execution/driver.py` — gitignored, documented here instead)
+Python driver per run: build RBAC from the fault's own declared `permissions` (plus the
+baseline chaos-runner permissions from §5 bug 15), apply the `ChaosExperiment` + a
+filled-in `ChaosEngine`, set `EXPERIMENT_ID` to the fault name in `flash-agent/.env`, run
+one scan, wait for `"Scan complete"`, clean up. Resumable via a `results.jsonl` log keyed
+by `(fault, run_index)`.
+
+**Target mapping**: extracted directly from `chaos-charts/experiments/otel-demo-itbench/
+experiment.yaml`'s already-validated `ChaosEngine.spec.appinfo` blocks (28 of 29 faults
+already had a real, tested target there) rather than guessing fresh ones; the 2 missing
+faults (`invalid-kubernetes-service-selector`, `nonexistent-kubernetes-workload-
+persistent-volume-claim`) got sensible unused otel-demo components (`currency`, `llm`).
+
+### 12.2 New bug found before launch: `ChaosEngine.spec.appinfo.appkind` is a fixed CRD enum
+
+`appinfo.appkind` is schema-validated to
+`^(^$|deployment|statefulset|daemonset|deploymentconfig|rollout|job)$` — submitting
+`service`, `configmap`, `horizontalpodautoscaler`, or `pod` (the *actual* resource kind
+for 6 of the 29 faults) is rejected outright at admission time. Fixed two ways together:
+each of those 6 fault scripts now hardcodes its own real target kind directly (instead of
+trusting `TARGETS`' kind component, per the §9.2 fix) since the kind never varies for a
+given fault; the `ChaosEngine` submission itself uses a harmless CRD-valid dummy
+`appkind: deployment` whose `applabel` still matches a real Deployment of the same
+component, so any operator-side existence check still passes.
+
+### 12.3 Two real bugs found during the first full sweep (43/101 runs "failed")
+
+14. *(continuing the numbering from §5/§9)* **Driver race condition.** The scan-completion
+    poll checked `proc.poll() is not None` *before* reading the log file. At GPU speed a
+    scan can finish and the flash-agent process can exit within the same 5-second poll
+    interval — so by the time the driver next woke up, the process had already exited
+    and the loop broke on that check alone, never getting to see that `"Scan complete"`
+    was already on disk. Caused 27 of 43 failures to be misreported as scan failures when
+    the scan had actually succeeded. Fixed: check the log content first, and even after
+    observing the process has exited, do one final log read before concluding failure.
+15. **`_parse_analysis_response()` didn't validate the parsed JSON's top-level type.**
+    `json.loads()` doesn't care whether the result is a dict or a list — both are valid
+    JSON. When the model wrapped its response in a list (`[{...}]` instead of `{...}}`),
+    parsing "succeeded" and the loop moved on, only to crash later on
+    `analysis.get("health", {})` with `AttributeError: 'list' object has no attribute
+    'get'`. Reproduced identically in exactly 15 of 43 failures, across many different
+    fault types. Fixed in `flash_agent.py` (`flash-agent@21e138d`): unwrap the common
+    one-element-list case (the model's intended object, just over-wrapped), and raise a
+    clear `ValueError` for any other shape mismatch so the existing "ask the model to
+    reformat" retry logic handles it instead of crashing the process.
+
+After both fixes, every one of the remaining/retried runs succeeded — 0 failures in the
+final 121+ attempts. Total: 137/137.
+
+### 12.4 Critical bug found *after* the sweep completed: premature `ChaosEngine` cleanup
+
+The driver waited for flash-agent's scan to finish, then immediately deleted the
+`ChaosEngine` in its `finally` block. But flash-agent's scan reliably finishes in
+**35-60 seconds** (GPU speed) — well before a fault's own `TOTAL_CHAOS_DURATION`
+(60-120s) elapses. Deleting the `ChaosEngine` at that point kills the still-running
+experiment `Job` **before it ever reaches its own revert commands**. The scan itself was
+unaffected (it observed the fault while genuinely active, before cleanup ran) — this is a
+**post-scan cleanup bug, not a corruption of the certification data** — but it left real
+damage on the live, shared cluster:
+
+- `email` and `recommendation` Deployments stuck with their fault-injected hanging/crashing
+  init containers still in the pod template (each had spawned a new, permanently-failing
+  ReplicaSet that Kubernetes correctly declined to promote over the still-healthy old one
+  — no outage, but a lingering broken half-state).
+- 5 leftover synthetic-traffic-generator pods from `chaos-mesh-http-body-tamper-replacement`,
+  still running (and presumably still generating synthetic traffic) for 2+ hours.
+- 2 leftover `NetworkPolicy` objects (`frontend-ingress-block-fault`,
+  `quote-http-abort-fault`) from the two Chaos-Mesh-replacement/ingress-blocking faults.
+- **One leftover `ResourceQuota`** (`memory`, from `insufficient-kubernetes-resource-quota`,
+  hard limits set to `20m`/`32Mi` — deliberately tiny, the fault's whole point) — this one
+  is namespace-*wide*, so it silently blocked `checkout`'s own rollout **and** an unrelated
+  `load-generator` restart from creating any new pod for over an hour, since usage was
+  already far past the quota's tiny limits.
+
+**Remediation performed:**
+1. Manually removed the two Deployments' lingering `initContainers` (`kubectl patch
+   --type=json ... remove /spec/template/spec/initContainers`).
+2. Deleted the 5 leftover pods, the `ResourceQuota`, and the 2 `NetworkPolicy` objects.
+3. `kubectl rollout restart` on `checkout` and `load-generator` once the quota block was
+   cleared.
+4. `helm upgrade otel-demo` (same chart, same values) to reconcile every remaining
+   Helm-templated field (env vars, commands, images, readiness probes, dnsPolicy, node
+   selectors, affinity rules, service selectors/ports, HPA targets, the `flagd-config`
+   ConfigMap) back to its pristine spec in one shot — first attempt failed because it ran
+   *while* the quota was still blocking new pods; succeeded once the quota was gone.
+5. Verified clean systematically, not just by symptom: full pod/deployment health,
+   `NetworkPolicy`/`ResourceQuota`/`PriorityClass` sweep across the namespace, node cordon
+   state, PVCs, ephemeral containers, and (double-checked against the chart's own rendered
+   `helm template` output, not intuition) confirmed `valkey-cart`'s `20Mi` memory limit is
+   the chart's actual intended default, not a leftover fault artifact.
+
+Final state: every otel-demo pod `1/1 Running`, every deployment `DESIRED=READY=AVAILABLE`,
+zero fault-related resources remaining anywhere on the cluster.
+
+**Driver fixed** (`.tmp/mass-execution/driver.py`, untracked but documented here): cleanup
+now polls the `ChaosEngine`'s own `status.engineStatus` and waits for it to report
+`completed`/`stopped` (bounded by `duration + 120s`, then deletes anyway rather than
+hanging forever, logging a warning if that timeout is hit) before deleting anything.

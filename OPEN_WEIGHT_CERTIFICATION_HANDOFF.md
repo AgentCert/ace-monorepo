@@ -510,3 +510,99 @@ runs — noted here so it isn't mistaken for an oversight.
 All test artifacts removed: `ChaosEngine`, `ChaosExperiment`, and RBAC deleted from
 `otel-demo`. Verified `otel-demo` fully healthy afterward — every pod `1/1`/`Running`,
 `accounting` and `load-generator` both back at their original replica count of 1.
+
+---
+
+## 10. One end-to-end validation — SUCCESS (real fault → agent → certifier Phase 0+1)
+
+Full loop, all real: `scaled-to-zero-kubernetes-workload` injected against `otel-demo`'s
+`load-generator` → flash-agent scan observes it (correctly attributing a chaos-related pod
+restart to "deliberate disturbance") → Langfuse trace → `scripts/run_certification.py
+--trace-id ... --skip-cert` → Phase 0 (fault bucketing) + Phase 1 (metric extraction) both
+completed successfully, real output files written under
+`.tmp/flash-agent-qwen2.5-7b-instruct/scaled-to-zero-kubernetes-workload/fault-bucketing/<run_id>/`.
+
+Two more real bugs found and fixed getting there:
+
+19. **flash-agent never attached certifier trace metadata at all.** `scripts/
+    run_certification.py --trace-id` requires `metadata.{agent_id,experiment_id,
+    experiment_run_id}` on the Langfuse trace; flash-agent's LLM calls set none of it.
+    Two, not one, sub-bugs surfaced fixing this (each confirmed empirically via a real
+    completion call + inspecting the resulting trace via Langfuse's API, since the
+    correct convention isn't obvious and guessing wrong wastes an expensive real
+    round-trip): (a) a bare `metadata={...}` field lands on the per-call GENERATION
+    observation (nested under `requester_metadata`), not the trace itself — LiteLLM's
+    Langfuse integration only promotes `trace_`-prefixed keys to the trace's own
+    attributes, so it must be nested as `metadata.trace_metadata`; (b) the certifier's
+    own search (`certifier/main/services/trace_service.py`'s `_list_traces`) looks for
+    the exact key `experiment_run_id`, not `run_id` — confirmed by reading that file
+    after a first attempt with the wrong key produced `TRACE_NOT_FOUND` despite the
+    single-trace `--trace-id` lookup resolving the same run's IDs correctly moments
+    earlier. Fixed in `flash_agent.py`'s new `_trace_metadata_extra_body()` helper
+    (attaches nothing when `EXPERIMENT_ID` is unset, so ad-hoc/dev runs are unaffected)
+    and three new `config.py` fields (`AGENT_ID`, `EXPERIMENT_ID`, `RUN_ID` — the last
+    auto-generates a fresh UUID per process invocation if unset).
+20. **`.tmp/` ownership regression.** The top-level `ace-monorepo/.tmp/` directory was
+    still root-owned from an earlier `sudo`-run setup step (same root cause as the
+    `.tmp/langfuse` and `.tmp/ciso-agent-trial` fixes earlier), blocking
+    `run_certification.py`'s own `mkdir`. Fixed with `sudo chown icets:icets .tmp`
+    (one level only — subdirectories it needs to create itself work fine once the
+    parent is writable).
+
+**Also found (real, but a process-management issue, not a pipeline bug):** a flash-agent
+process from an earlier validation run received `SIGTERM`, logged its full graceful-
+shutdown sequence ("shutting down gracefully" → "shut down cleanly"), yet **kept running**
+in the background for another 15+ minutes, concurrently with a newly-started run, both
+competing for Ollama's single-concurrency slot (`OLLAMA_NUM_PARALLEL=1`). Not
+investigated further (out of scope for this validation), but worth knowing: `kill`
+(SIGTERM) is not reliable for stopping flash-agent — use `kill -9` and verify the process
+list afterward, don't trust the log message alone.
+
+Both fixes pushed: `flash-agent@bbd4b61` on `feature/itbench-certification-fixes`.
+
+### Expected caveat, not a new bug
+
+Phase 1's LLM-judge steps (structured metric/qualitative extraction, routed through the
+same local Ollama-backed `configs.json` override) logged three
+`Failed to parse structured output: Expecting value: line 1 column 1 (char 0). Returning
+raw text.` warnings — handled gracefully (falls back to raw text, doesn't crash the
+pipeline) but confirms the exact caveat already documented in `certifier/README.md`: a
+7-8B CPU-served model is meaningfully less reliable at structured JSON output than
+GPT-4o/GPT-5, for the certifier's own judge calls just as much as for flash-agent's.
+
+**Timing:** Phase 0+1 took ~18 minutes end-to-end for a trivial 2-observation trace —
+three separate LLM-judge calls at CPU-inference speed. This is the same bottleneck
+documented in §5 bug 13/14, now confirmed to affect the certifier pipeline's own LLM
+calls too, not just flash-agent's. Directly motivates §11.
+
+---
+
+## 11. GPU host available — `5g-lab` (not yet migrated)
+
+Mid-session, a second host became available: `5g-lab` (SSH alias → `192.168.28.45`,
+hostname `agenticai`) — **2x NVIDIA L40 (46GB VRAM each), 64 CPU cores, 251GB RAM**,
+Ollama and Docker already installed. This is a shared lab (32 users logged in at time of
+checking; several other users' own Ollama models already present — `adept-cluster-*`,
+`adept-security`, `adept-financial`, etc.) — GPUs themselves were idle (0% util) when
+checked.
+
+**Prepared but not yet wired in:**
+- `qwen2.5:7b-instruct` pulled on `5g-lab` (matches the model validated everywhere in this
+  document, for an apples-to-apples speed comparison before considering a larger model).
+- Confirmed **no `docker` group membership and no passwordless `sudo`** on this account —
+  ruled out running a LiteLLM/compose stack directly on `5g-lab`, and ruled out editing
+  Ollama's systemd unit there to bind `0.0.0.0` (would need root). Ollama on `5g-lab` is
+  currently bound to `127.0.0.1:11434` only — **not reachable from this host's network**
+  as-is.
+- **Chosen path (not yet executed): an SSH tunnel**, entirely within this session's own
+  access rights — `ssh -f -N -L <local-port>:127.0.0.1:11434 5g-lab` run from this host,
+  then repoint `agentcert-stack/litellm-setup/litellm_config.yaml`'s
+  `qwen2.5-7b-instruct` entry's `api_base` at the tunnel's local port (via the docker
+  bridge IP, same pattern as the existing Ollama entry) instead of `172.17.0.1:11434`.
+  Needs the tunnel kept alive for the LiteLLM proxy container to keep reaching it —
+  a systemd user unit or an `autossh`-style keepalive would be more robust than a bare
+  backgrounded `ssh -f -N`, not yet decided.
+
+**Not done:** the actual tunnel, the LiteLLM config repoint, or any speed comparison
+against the CPU numbers in this document. Stopped here per explicit instruction to pause
+before mass execution.

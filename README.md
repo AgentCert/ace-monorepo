@@ -24,6 +24,9 @@
 - [About ACE](#about-ace)
 - [Documentation](#documentation)
 - [Submodules](#submodules)
+- [Agents](#agents)
+  - [Agents in `agents/`](#agents-in-agents)
+  - [Using CrewAI with a single agent](#using-crewai-with-a-single-agent)
 - [Getting the Code](#getting-the-code)
 - [Quick Start (Kubernetes)](#quick-start-kubernetes)
   - [1. Prerequisites](#1-prerequisites)
@@ -88,6 +91,64 @@ All project documentation lives in **[`docs/`](./docs)**:
 | [agentcert-stack](./agentcert-stack) | Full-stack deployment assets (LiteLLM setup, etc.) |
 | [chaos-charts](./chaos-charts) | Chaos experiment & fault definitions (tracks `master`) |
 | [litmus-go](./litmus-go) | Litmus chaos experiment executors (Go) |
+
+---
+
+## Agents
+
+### Agents in `agents/`
+
+`agents/` collects every agent implementation considered or exercised while certifying an
+open-weight model against ACE's chaos/compliance scenarios — one place to find "what
+agent, from where, running on what framework."
+
+| Agent | Location | Framework | Role |
+|---|---|---|---|
+| **flash-agent** | [`agents/flash-agent/`](./agents/flash-agent) (plain code snapshot — the canonical, live submodule is [`flash-agent/`](./flash-agent) at the repo root) | Custom ReAct loop (OpenAI-compatible SDK + MCP tools) | The primary agent under test for SRE fault scenarios. Discovers Kubernetes/Prometheus MCP tools at startup, reasons over multiple tool-calling iterations, and emits a structured JSON health analysis with remediation guidance. No native tracing of its own — relies on the LiteLLM gateway's Langfuse callback. |
+| **CISO Agent** | [`agents/ciso-agent/`](./agents/ciso-agent) (submodule, fork `aruscher-dev/ITBench-CISO-CAA-Agent` with fixes) | **CrewAI + LangGraph** | ITBench's reference CISO agent. Generates and deploys compliance policies (Kyverno `ClusterPolicy`, OPA Rego) against injected CIS Benchmark violations, then reports the deployed resource. Exercised end-to-end against a real `Gen-CIS-b-K8s-Kyverno` scenario — see [`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8 for the full trial and the two bugs found in its LLM integration. |
+| **SRE Agent ("Zero")** | [`agents/sre-agent/`](./agents/sre-agent) (submodule, upstream `itbench-hub/ITBench-CISO-SRE-FinOps-Agent`, unmodified) | Wrapper around OpenAI's **Codex CLI** | ITBench's other reference agent (despite the repo name, covers SRE/CISO/FinOps scenarios). Considered as a candidate for the SRE certification track but not the one actually exercised — flash-agent was used instead, and the CISO Agent above was used for the CISO track per explicit instruction to use "the CrewAI based agent." |
+
+### Using CrewAI with a single agent
+
+The CISO Agent trial is the reference example in this repo for pointing **CrewAI** at a
+local, OpenAI-compatible endpoint (e.g. a self-hosted open-weight model behind Ollama or
+a LiteLLM proxy) instead of a hosted API. The pattern, extracted from
+`agents/ciso-agent/src/ciso_agent/llm.py`:
+
+```python
+from crewai import Agent, Crew, Process, Task, LLM
+
+llm = LLM(
+    model="openai/qwen2.5-7b-instruct",   # see the gotcha below
+    base_url="http://127.0.0.1:14000/v1", # your OpenAI-compatible endpoint
+    api_key="sk-...",                     # any non-empty string if the endpoint doesn't check it
+    temperature=0.1,
+)
+
+agent = Agent(role="Test", goal="...", backstory="", llm=llm, verbose=True)
+task = Task(name="target_task", description="...", expected_output="...", agent=agent, tools=[...])
+crew = Crew(name="MyCrew", agents=[agent], tasks=[task], process=Process.sequential, verbose=True)
+
+result = crew.kickoff(inputs={})
+```
+
+**The gotcha:** CrewAI's `LLM` class calls `litellm.completion()` directly, which requires
+an explicit provider prefix (`openai/<model>`) to resolve a provider via
+`get_llm_provider()` — **even with `base_url` set**. A bare model name (e.g. just
+`qwen2.5-7b-instruct`, matching your proxy's own model alias) crashes with
+`litellm.BadRequestError: LLM Provider NOT provided`. This is easy to get backwards: if
+your endpoint is a raw LangChain `ChatOpenAI` call instead (a different code path,
+sometimes used for auxiliary/non-Crew LLM calls in the same codebase), the *opposite* is
+true — it sends `model` as-is to `base_url`, so the same `openai/` prefix would break
+*that* path instead. One model-string value has to work for both if your code mixes the
+two; see `agents/ciso-agent/src/ciso_agent/llm.py`'s `init_agent_llm()` vs. `init_llm()`
+for how this repo resolves it (prefix only added when the model string doesn't already
+declare a provider).
+
+Verified end-to-end with `qwen2.5:7b-instruct` served locally via Ollama, routed through
+the LiteLLM gateway described in [Submodules](#submodules) — see
+[`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8.3 for
+both real bugs found getting this working and how they were fixed.
 
 ---
 

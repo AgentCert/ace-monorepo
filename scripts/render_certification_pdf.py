@@ -264,14 +264,153 @@ def _render_assessment(blk, st):
     return out
 
 
+def _render_scope_stats(blk, st):
+    """A row of small stat cards: {value, label, sublabel, tone}."""
+    items = blk.get("items", [])
+    if not items:
+        return []
+    cells = []
+    for it in items:
+        tone = (it.get("tone") or "neutral").lower()
+        color = SEVERITY_COLOR.get(tone, ACCENT)
+        lines = [f'<font size="14" color="{color.hexval()}"><b>{_esc(it.get("value", "—"))}</b></font>']
+        lines.append(f'<br/><font size="8" color="{GREY.hexval()}">{_esc(it.get("label", ""))}</font>')
+        if it.get("sublabel"):
+            lines.append(f'<br/><font size="7" color="{GREY.hexval()}">{_esc(it["sublabel"])}</font>')
+        cells.append(Paragraph("".join(lines), ParagraphStyle("stat", alignment=1, leading=12)))
+    t = Table([cells], colWidths=[None] * len(cells))
+    t.setStyle(TableStyle([
+        ("BOX", (0,0), (-1,-1), 0.5, BORDER),
+        ("INNERGRID", (0,0), (-1,-1), 0.25, BORDER),
+        ("BACKGROUND", (0,0), (-1,-1), BG_GREY),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING", (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+    ]))
+    return [t, Spacer(1, 3*mm)]
+
+
+def _render_notice(blk, st):
+    """A colored callout box: {severity, title, body}."""
+    sev = (blk.get("severity") or "note").lower()
+    color = SEVERITY_COLOR.get(sev, NOTE)
+    title = blk.get("title", "")
+    body = blk.get("body", "")
+    text = f'<font color="{color.hexval()}"><b>{_esc(title)}</b></font>'
+    if body:
+        text += f'<br/><br/>{_esc(body)}'
+    p = Paragraph(text, ParagraphStyle("notice", fontSize=9, leading=13))
+    t = Table([[p]], colWidths=[None])
+    t.setStyle(TableStyle([
+        ("BOX", (0,0), (-1,-1), 0.75, color),
+        ("BACKGROUND", (0,0), (-1,-1), ACCENT_SOFT),
+        ("LEFTPADDING", (0,0), (-1,-1), 6),
+        ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+    ]))
+    return [t, Spacer(1, 3*mm)]
+
+
+def _render_part_banner(blk, st):
+    """A large divider marking a report Part (I/II/III/IV)."""
+    label = blk.get("label", "")
+    title = blk.get("title", "")
+    p = Paragraph(
+        f'<font color="{colors.white.hexval()}" size="10">{_esc(label)}</font><br/>'
+        f'<font color="{colors.white.hexval()}" size="16"><b>{_esc(title)}</b></font>',
+        ParagraphStyle("banner", alignment=1, leading=20),
+    )
+    t = Table([[p]], colWidths=[None])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), ACCENT),
+        ("TOPPADDING", (0,0), (-1,-1), 10),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+    ]))
+    return [Spacer(1, 4*mm), t, Spacer(1, 6*mm)]
+
+
+def _render_interpretation_scale(blk, st):
+    """A small legend of scale bands, e.g. score-range -> label."""
+    out = []
+    if blk.get("title"):
+        out.append(Paragraph(_esc(blk["title"]), st["h2_detail"]))
+    bands = blk.get("bands", [])
+    if bands:
+        out.append(Paragraph(
+            " &nbsp;·&nbsp; ".join(_esc(b) for b in bands),
+            st["muted"],
+        ))
+    out.append(Spacer(1, 2*mm))
+    return out
+
+
+def _render_category_panel(blk, st):
+    """A per-fault-category summary panel: header stats + nested assessment dimensions."""
+    out = [Paragraph(
+        f'{_esc(blk.get("category", "—"))} — {_esc(blk.get("fault", "—"))} '
+        f'<font color="{GREY.hexval()}" size="8">({blk.get("runs", "—")} runs)</font>',
+        st["h2"],
+    )]
+    stat_bits = []
+    if blk.get("detection_rate_pct") is not None:
+        stat_bits.append(f"Detection: {blk['detection_rate_pct']}%")
+    if blk.get("mitigation_rate_pct") is not None:
+        stat_bits.append(f"Mitigation: {blk['mitigation_rate_pct']}%")
+    if blk.get("reasoning_score") is not None:
+        stat_bits.append(f"Reasoning score: {blk['reasoning_score']}")
+    if stat_bits:
+        out.append(Paragraph(_esc("  |  ".join(stat_bits)), st["muted"]))
+    out.append(Spacer(1, 1*mm))
+    for dim in blk.get("dimensions", []):
+        out.extend(_render_assessment(dim, st))
+    out.append(Spacer(1, 2*mm))
+    return out
+
+
+def _render_enumerated_item(blk, st):
+    """A numbered limitation/recommendation item: severity, scope, body, tags, frequency."""
+    idx = blk.get("index", "")
+    scope = blk.get("scope", "—")
+    head = (
+        f'<b>{idx}. {_esc(scope)}</b> &nbsp; '
+    )
+    out = [Paragraph(head, ParagraphStyle("enum_head", parent=st["h2"], fontSize=10))]
+    row = [_severity_chip(blk.get("severity")), Paragraph(_esc(blk.get("body", "")), st["finding"])]
+    t = Table([row], colWidths=[18*mm, None])
+    t.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 2),
+        ("RIGHTPADDING", (0,0), (-1,-1), 2),
+        ("TOPPADDING", (0,0), (-1,-1), 1),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 1),
+    ]))
+    out.append(t)
+    footer_bits = []
+    if blk.get("frequency"):
+        footer_bits.append(f"Frequency: {blk['frequency']}")
+    if blk.get("tags"):
+        footer_bits.append(", ".join(str(tg) for tg in blk["tags"]))
+    if footer_bits:
+        out.append(Paragraph(_esc("  ·  ".join(footer_bits)), st["muted"]))
+    out.append(Spacer(1, 2*mm))
+    return out
+
+
 _DISPATCH = {
-    "heading":   _render_heading,
-    "text":      _render_text,
-    "findings":  _render_findings,
-    "card":      _render_card,
-    "table":     _render_table,
-    "chart":     _render_chart,
-    "assessment":_render_assessment,
+    "heading":              _render_heading,
+    "text":                 _render_text,
+    "findings":             _render_findings,
+    "card":                 _render_card,
+    "table":                _render_table,
+    "chart":                _render_chart,
+    "assessment":           _render_assessment,
+    "scope_stats":          _render_scope_stats,
+    "notice":               _render_notice,
+    "part_banner":          _render_part_banner,
+    "interpretation_scale": _render_interpretation_scale,
+    "category_panel":       _render_category_panel,
+    "enumerated_item":      _render_enumerated_item,
 }
 
 
@@ -414,7 +553,11 @@ def _on_page(canvas, doc, footer_text):
 def render(input_path: Path, output_path: Path) -> None:
     cert = json.loads(input_path.read_text(encoding="utf-8"))
     meta = cert.get("meta", {})
-    header = cert.get("header", {})
+    # report_assembler.py deliberately sets header=None now (its scorecard/
+    # findings content was folded into section 1, §1.3 Experiment Findings)
+    # -- dict.get()'s default only covers a missing key, not an explicit
+    # null, so this must guard against None separately.
+    header = cert.get("header") or {}
     sections = cert.get("sections", [])
     footer_text = cert.get("footer", "Agent Certification Report")
 

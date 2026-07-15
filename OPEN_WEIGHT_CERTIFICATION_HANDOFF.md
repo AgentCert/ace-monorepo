@@ -737,3 +737,212 @@ zero fault-related resources remaining anywhere on the cluster.
 now polls the `ChaosEngine`'s own `status.engineStatus` and waits for it to report
 `completed`/`stopped` (bounded by `duration + 120s`, then deletes anyway rather than
 hanging forever, logging a warning if that timeout is hit) before deleting anything.
+
+
+## 13. First full Phase 0-4 certification report — 5 real bugs found and fixed, none worked around
+
+After the mass execution (§12) completed, the user asked to stop the Phase 0+1 batch
+(114/137 runs still pending — deliberately left for later, not lost) and instead generate
+**one complete certification report** (Phase 0 → 1 → 2 → 3 → 4, including the PDF) for a
+single SRE scenario: `chaos-mesh-pod-failure-replacement`, using all 5 of its mass-execution
+runs. This was the **first time this session that Phase 3 (narrative synthesis) and
+Phase 4 (assembly + PDF) had ever been exercised against the real local open-weight
+stack** — every earlier validation in this effort stopped at Phase 0+1 (`--skip-cert`) or
+Phase 2. That gap in coverage is exactly why 5 more real, previously-latent bugs surfaced
+here, all fixed:
+
+### 13.1 `cert_builder`'s own Azure OpenAI client was still pointed at the `.env.example` placeholder
+
+`certifier/cert_builder/scripts/narratives/llm_client.py`'s `get_client()` built an
+`openai.AzureOpenAI` client from `AZURE_OPENAI_ENDPOINT`/`AZURE_OPENAI_API_KEY`, unconditionally.
+The repo-root `.env`'s `AZURE_OPENAI_ENDPOINT` was still the unfilled `.env.example` placeholder
+(`https://YOUR_RESOURCE.openai.azure.com/`) — nobody had pointed it at the local stack, because
+this was the first time any code path reading it had actually been run. Every one of Phase 3's
+6 narrative-builder LLM calls (`scope_narrative`, `key_findings`, `qualitative`, `fault_analysis`,
+`limitations`, `fairness_score`) plus the 7th sequential one (`recommendations`) failed fast with
+`LLM call failed after 3 attempts: Connection error.` (a real DNS/connection failure to a
+non-existent hostname, not a timeout — confirmed by how fast the whole 6-way concurrent batch
+"completed": 15.1s, far too fast for 6 real generations).
+
+Phase 0-2 never hit this because they use a *different*, older client
+(`utils/azure_openai_util.py`'s `AzureLLMClient`, despite the name) that already has an
+`"openai_compatible"` provider branch pointed at Ollama directly
+(`configs/configs.json`'s `"gpt-4o"`/`"gpt-5.2"` entries: `base_url: http://127.0.0.1:11434/v1`,
+`api_key: "ollama"`, `model_id: "qwen2.5:7b-instruct"`). `cert_builder`'s Phase 3 client was
+written independently and never got the same treatment.
+
+**Fix:** `get_client()` now falls back to a plain `openai.OpenAI` client against
+`http://127.0.0.1:11434/v1` (same working endpoint) whenever `AZURE_OPENAI_ENDPOINT` is unset or
+still contains the placeholder string `"YOUR_RESOURCE"`, and `call_llm()`'s deployment-name
+default switches accordingly (`isinstance(client, AzureOpenAI)` check) so it asks Ollama for its
+real model name (`qwen2.5:7b-instruct`) rather than the Azure deployment alias (`gpt-4o`).
+Verified with a direct smoke test (structured-output schema call, real 113-token completion)
+before re-running the full pipeline.
+
+### 13.2 The pipeline's own defensive fallback was itself malformed (`KeyError: 'limitation'`)
+
+`main/services/pipeline_service.py`'s `_SafeCertificationPipeline` monkey-patches
+`NarrativeAssembler.assemble()` to inject a generic placeholder (`_NARRATIVE_FALLBACKS`) for any
+narrative key missing after an LLM failure — exactly the scenario 13.1 triggered for real. But
+the placeholder for `limitations_enriched`/`recommendations_enriched` was shaped
+`{"severity", "headline", "detail"}`, while `report_assembler.py`'s `_section_limitations()` /
+`_section_recommendations()` read `item["limitation"]` / `item["recommendation"]` (plus
+`category`/`label`/`frequency`/`priority`). So the *safety net meant to prevent a crash* crashed
+instead, with `KeyError: 'limitation'` inside `_section_limitations`, killing Phase 4 Assembly.
+Fixed by reshaping both fallback entries to match what the assembler actually reads.
+
+### 13.3 Missing `reportlab` dependency
+
+Once 13.1 and 13.2 were fixed, Phase 4 Assembly succeeded but PDF rendering failed outright:
+`ERROR: reportlab is required. pip install --user reportlab` — never added to
+`certifier/requirements.txt` because PDF rendering, like Phase 3, had never actually been run
+this session. Installed into `.venv-certifier` and added to `requirements.txt`.
+
+### 13.4 PDF renderer crashed on `header: None`
+
+With `reportlab` installed, PDF rendering still failed: `'NoneType' object has no attribute
+'get'`. `report_assembler.py`'s `_build_header()` deliberately returns `None` now (a prior,
+intentional change — the old Section 3 scorecard/findings content was folded into Section 1,
+§1.3 Experiment Findings), but `scripts/render_certification_pdf.py`'s `render()` still did
+`header = cert.get("header", {})` — `.get()`'s default only covers a *missing* key, not an
+explicit `null`, so `header` was `None`, and `_scorecard(header, ...)` crashed on `header.get(...)`.
+Fixed with `header = cert.get("header") or {}`; both `_scorecard`/`_key_findings` already
+handle an empty dict gracefully (return `[]`), so this is a no-op now that the content lives in
+Section 1, not a hack.
+
+### 13.5 `total_runs: 0` and `runs_per_fault_configured: 0` in every report — two separate bugs
+
+Once the report generated cleanly end-to-end, its own header data was visibly wrong: "Total
+Runs: 0" and "Runs / fault: 0" despite 5 real runs. Traced through the full chain
+(`fault_bucketing.py` → per-run `*_metrics.json` → `aggregator/scripts/aggregation.py` →
+`report_assembler.py`'s `_build_meta()`):
+
+- **`run_id` extraction typo.** `fault_analyzer/scripts/fault_bucketing.py`'s
+  `_extract_agent_metadata()` searched each trace event's metadata for
+  `d.get("run_id") or d.get("experiment.run_id")` (dotted, matching the OTel-attribute-style
+  convention used for `"experiment.id"`) — but the real key LiteLLM's Langfuse integration
+  writes is `experiment_run_id` (underscored), confirmed directly from a raw trace event:
+  `metadata.requester_metadata.trace_metadata.experiment_run_id`. So `run_id` was `None` for
+  every single run, all along — this bug predates this session's certifier metadata fixes
+  (§5/§12.3) and was simply never exercised until a real `total_runs` count was needed.
+  Fixed the typo to `d.get("experiment_run_id")`.
+- **Missing `runs_per_fault` field.** Separately, `aggregator/scripts/aggregation.py`'s
+  `assemble_final_scorecard()` accepted a `runs_per_fault` parameter (docstring: "configured/
+  expected runs per fault (display only)") but never actually included it in its returned dict —
+  a plain omission. Added `"runs_per_fault": runs_per_fault` to the return value.
+- After both fixes, reprocessed Phase 0+1 for all 5 runs. This left one operational gotcha
+  worth recording: because `run_id` went from `None`/falsy to a real value, the per-run metrics
+  filename (`f"{fault_id}_{run_id}_metrics.json"` vs. the old falsy-run_id fallback
+  `f"{fault_id}_metrics.json"`) *changed*, leaving the **old, stale, run_id=None file
+  side-by-side with the new one** — since Phase 2's `DirectoryQueryService` globs
+  `**/*metrics.json`, this would have silently double-counted every run in aggregation had the
+  stale files not been deleted by hand before re-aggregating. Verified `total_runs: 5`,
+  `successful_runs: 5`, `runs_per_fault_configured: 5` in the final report.
+
+### 13.6 Result
+
+Final `certification.json` + `certification.pdf` (19 pages) for `chaos-mesh-pod-failure-replacement`
+generated cleanly: all 7 narrative builders produced real LLM content (not fallback stubs, not
+0-token placeholders), Phase 4 assembled without error, and the report's own metadata is now
+accurate. This is the first fully-real, fully-verified Phase 0-4 certification report produced
+in this project against the open-weight local stack.
+
+
+## 14. First real CISO certification report — genuine Phase 2-4 integration, 2 more bugs found
+
+With the SRE report (§13) done, the user asked for one CISO scenario report too. This had
+**never been done before** — earlier work in this effort (§8) only ran the CISO Agent
+standalone via `make evaluate` and confirmed a real PASS result; there was no wiring from that
+result into the certifier pipeline. Research (via a dedicated investigation) confirmed the
+integration seam already existed but had never been exercised:
+
+- `certifier/metrics_extractor/scripts/ciso_metrics_adapter.py`'s `build_ciso_metrics_doc()`
+  adapts ITBench's own CISO evaluation output (`{"pass": bool, "tasks": {...}}` etc.) into a
+  per-run metrics doc.
+- `certifier/configs/fault_categories.json` already declares a `ciso_fault` bucket with the 4
+  real ITBench CISO scenario types.
+- `main/services/pipeline_service.py` already has explicit `ciso_fault`-aware logic (only adds
+  a "CISO not implemented" note to the report when `include_ciso_finops=True` **and** no real
+  `ciso_fault` docs were actually supplied — i.e. it was already designed to do the right thing
+  once real data showed up).
+- The CISO agent traces via `langtrace`, not Langfuse, so `run_certification.py`'s
+  `--trace-id`/Langfuse-based resolution doesn't apply; the correct entry point for a
+  trace-less category is `main/cli/run_aggregation_and_certification_pipeline.py
+  --metrics-dir <dir> --include-ciso-finops`, which starts directly at Phase 2.
+
+**Path taken:** fed the real, already-captured `.tmp/ciso-agent-trial/scenario-workdir/evaluation.json`
+(`{"pass": true, "tasks": {"generate_assessment_posture": true, "generate_policy": false,
+"evidence_available": false}}` — a genuine result from the earlier CISO Agent trial, run
+`ciso-trial-run-1`) through `build_ciso_metrics_doc(scenario_type="Gen-CIS-b-K8s-Kyverno", ...)`,
+then Phase 2+3+4 via the CLI above. Two more real bugs surfaced and were fixed:
+
+### 14.1 `ciso_metrics_adapter.py` nested `agent_id`/`agent_name` under the wrong key
+
+`build_ciso_metrics_doc()`'s docstring explicitly promises output in "the same per-run doc
+shape ... every other category's per-run metrics doc uses" — but it nested identity fields
+under `doc["agent"]["agent_id"]`/`doc["agent"]["agent_name"]`, while every other category (and
+`aggregator/scripts/aggregation.py`'s own `_extract_agent_id()`/`_extract_agent_name()`) only
+ever check `doc["agent_id"]` / `doc["quantitative"]["agent_id"]` (top-level or nested under
+`quantitative`, never under `agent`). Left as-is, `query_runs_by_agent(agent_id=...)` would never
+find a single CISO doc — the exact same class of key-path mismatch bug as §5/§12.3/§13.5, in
+code that (per a repo-wide search) had no test coverage and had simply never been run
+end-to-end before. Fixed by moving `agent_id`/`agent_name`/`agent_version` to the top level of
+the returned dict, matching every other category.
+
+### 14.2 Three of seven Phase 3 narrative builders assume SRE-only fields — correctly fell back, not fixed further
+
+`key_findings`, `qualitative`, and `limitations` all read `fault_detection_success_rate` (a
+detect/mitigate concept meaningful for fault-injection scenarios, not for CISO's pass/fail
+compliance checks) and threw `KeyError: 'fault_detection_success_rate'` for the `ciso_fault`
+category. This is an honest semantic gap, not a bug to silently paper over: CISO tasks don't
+have a "detection rate." Each failure was caught by `NarrativeAssembler`'s per-builder
+`_safe_call` wrapper and correctly replaced by `_SafeCertificationPipeline`'s
+`_NARRATIVE_FALLBACKS` safety net (validated as *correctly shaped* thanks to the §13.2 fix, so
+this degraded gracefully instead of crashing Phase 4 the way it would have before that fix).
+The other 4 builders (`scope_narrative`, `fault_analysis`, `fairness_score`, `recommendations`)
+produced real, CISO-appropriate content. **Not fixed further** — writing CISO-aware
+detect/mitigate-free narrative templates for those 3 builders is a real scope-of-work item
+(building actual CISO narrative support), not a bug fix, and wasn't part of what was asked.
+Recorded here as known, real, follow-on work.
+
+### 14.3 PDF renderer was silently dropping most of both reports' content — a pre-existing, wide gap
+
+While generating the CISO PDF, `pdftotext` on the output showed several `(unrendered block:
+scope_stats)`-style placeholder lines. Checking the **already-shipped SRE PDF** (§13) found the
+exact same gap, at much larger scale — `scripts/render_certification_pdf.py`'s `_DISPATCH` table
+only had handlers for 7 of the 14 block types `report_assembler.py` actually emits. Missing:
+`scope_stats` (the cover-page stat grid), `notice` (the sample-size warning banner),
+`part_banner` (the Part I/II/III/IV section dividers), `interpretation_scale` (score-band
+legends), `category_panel` (the whole per-fault-category narrative panel — agent summary,
+reasoning quality, safety, etc.), and **`enumerated_item`** — the type used for every single
+numbered item in the Limitations and Recommendations sections. In practice this meant both
+PDFs' entire Limitations/Recommendations sections, all Part banners, and the per-category
+narrative panels were rendering as a bare one-line placeholder instead of their real content —
+a large, real defect affecting every certification PDF this pipeline has ever produced, not
+something introduced by this session's other fixes. Root cause: PDF rendering (like Phase 3
+narratives, §13.1) had simply never been exercised end-to-end before this session, so gaps
+in `render_certification_pdf.py` had never been caught.
+
+Fixed by implementing all 6 missing renderers (`_render_scope_stats`, `_render_notice`,
+`_render_part_banner`, `_render_interpretation_scale`, `_render_category_panel`,
+`_render_enumerated_item`) matching each block's real shape (confirmed against actual
+`certification.json` output, not guessed), and registering them in `_DISPATCH`. Verified via
+`pdftotext` that both the SRE and CISO PDFs are now fully clean — zero `(unrendered block: ...)`
+lines — and spot-checked that a real Limitations item renders correctly (severity chip, scope
+heading, full body text, frequency/tags footer).
+
+### 14.4 Result
+
+`.tmp/ciso-agent-trial/certifier-output/cert-builder/certification.{json,pdf}` — a genuine,
+19-page CISO certification report for `Gen-CIS-b-K8s-Kyverno` (1 real run, `ciso_task_passed:
+true`, RAI score 83.3/PASS), the first CISO report ever produced by this pipeline, alongside a
+regenerated, now fully-rendered SRE PDF (20 pages, up from 19 once `part_banner` and
+`scope_stats` blocks started rendering).
+
+**Caveat worth flagging explicitly**: the source evaluation (`evaluation.json`) has top-level
+`"pass": true` but two of its three sub-tasks are individually `false`
+(`generate_policy`/`evidence_available`) — `build_ciso_metrics_doc()` takes ITBench's own
+top-level `pass` field at face value (this is ITBench's own scoring convention, not something
+this integration changed), so the report's `ciso_task_pass_rate: 1.0` reflects that top-level
+verdict, not a task-by-task breakdown. Worth knowing when reading the report's RAI PASS
+verdict at face value.

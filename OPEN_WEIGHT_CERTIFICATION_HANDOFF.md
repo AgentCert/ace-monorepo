@@ -577,32 +577,52 @@ calls too, not just flash-agent's. Directly motivates §11.
 
 ---
 
-## 11. GPU host available — `5g-lab` (not yet migrated)
+## 11. GPU acceleration — abandoned `5g-lab`, discovered a local GPU instead
 
 Mid-session, a second host became available: `5g-lab` (SSH alias → `192.168.28.45`,
-hostname `agenticai`) — **2x NVIDIA L40 (46GB VRAM each), 64 CPU cores, 251GB RAM**,
-Ollama and Docker already installed. This is a shared lab (32 users logged in at time of
-checking; several other users' own Ollama models already present — `adept-cluster-*`,
-`adept-security`, `adept-financial`, etc.) — GPUs themselves were idle (0% util) when
-checked.
+hostname `agenticai`) — 2x NVIDIA L40 (46GB VRAM each), 64 CPU cores, 251GB RAM, Ollama
+and Docker already installed. `qwen2.5:7b-instruct` was pulled there and the migration
+path was scoped (an SSH tunnel, since the account had no `docker` group membership or
+passwordless `sudo` there, and Ollama was bound to `127.0.0.1` only).
 
-**Prepared but not yet wired in:**
-- `qwen2.5:7b-instruct` pulled on `5g-lab` (matches the model validated everywhere in this
-  document, for an apples-to-apples speed comparison before considering a larger model).
-- Confirmed **no `docker` group membership and no passwordless `sudo`** on this account —
-  ruled out running a LiteLLM/compose stack directly on `5g-lab`, and ruled out editing
-  Ollama's systemd unit there to bind `0.0.0.0` (would need root). Ollama on `5g-lab` is
-  currently bound to `127.0.0.1:11434` only — **not reachable from this host's network**
-  as-is.
-- **Chosen path (not yet executed): an SSH tunnel**, entirely within this session's own
-  access rights — `ssh -f -N -L <local-port>:127.0.0.1:11434 5g-lab` run from this host,
-  then repoint `agentcert-stack/litellm-setup/litellm_config.yaml`'s
-  `qwen2.5-7b-instruct` entry's `api_base` at the tunnel's local port (via the docker
-  bridge IP, same pattern as the existing Ollama entry) instead of `172.17.0.1:11434`.
-  Needs the tunnel kept alive for the LiteLLM proxy container to keep reaching it —
-  a systemd user unit or an `autossh`-style keepalive would be more robust than a bare
-  backgrounded `ssh -f -N`, not yet decided.
+**Superseded by explicit instruction: stop using `5g-lab`, stay on this host.** Checking
+*this* host's own GPU access (never checked before this point in the session) found it
+already has an **NVIDIA RTX A6000 (49GB VRAM)**, completely idle, with drivers/CUDA
+already installed (`nvidia-smi` works, driver 580.159.03, CUDA 13.0) — apparently made
+available around the same time as `5g-lab`, explaining why every benchmark earlier in
+this document measured CPU-only speeds despite a GPU being physically present.
 
-**Not done:** the actual tunnel, the LiteLLM config repoint, or any speed comparison
-against the CPU numbers in this document. Stopped here per explicit instruction to pause
-before mass execution.
+Ollama (already running on this host as a plain background process, not a systemd
+service) auto-detected the GPU correctly on restart with zero configuration changes:
+`inference compute id=0 ... library=CUDA compute=8.6 name=CUDA0 description="NVIDIA RTX
+A6000" total="47.4 GiB"`. **No LiteLLM/litellm_config.yaml changes were needed at all** —
+Ollama still runs on this same host at the same address (`172.17.0.1:11434` from the
+LiteLLM container's perspective), just GPU-accelerated now instead of CPU-only.
+
+**Verified speedup** (same model, same host, only the compute backend changed):
+- First call after restart: prompt eval 43 tokens in 26.25s (one-time VRAM/context
+  allocation overhead) — this is why the *second* call is the real number:
+- Second call (GPU warm): 44 prompt tokens in **0.0155s** (≈2832 tok/s, vs. ≈70 tok/s on
+  CPU — **~40x**), 371 completion tokens in **3.45s** (≈107.6 tok/s vs. ≈5.1 tok/s on
+  CPU — **~21x**). A full LiteLLM-proxied chat completion round-trip: **3.56 seconds**
+  total, versus the multi-minute-to-8-minute-cold-start calls measured everywhere earlier
+  in this document.
+
+This changes the mass-execution time budget from "the dominant cost is LLM inference,
+measured in minutes per call" to "the dominant cost shifts to k8s/chaos orchestration
+overhead" — the original ~145-run estimate that looked like a multi-day undertaking on
+CPU is now realistically a same-session undertaking.
+
+**Also found while checking "no issue remains" before mass execution:** the
+`litellm-proxy` container had been reporting Docker-level `unhealthy` for 20+ hours
+straight — its `HEALTHCHECK` shells out to `curl`, which isn't installed in the
+`litellm/litellm:v1.82.0-stable` image, so the check itself failed to *execute* (not a
+real service failure; verified the proxy served correct completions the entire time).
+Fixed by switching the healthcheck to a `python3`-based HTTP GET (`python3` is present in
+the image) — `agentcert-stack@b56a5cf`. Recreated the container and reconfirmed both
+health (`"status":"healthy"`) and a real completion afterward.
+
+Full cluster health check before mass execution: every pod in `litmus` and `otel-demo`
+`Running`, no lingering `ChaosEngine`/`ChaosExperiment` anywhere, no stray namespaces from
+earlier trials, Langfuse/MongoDB/LiteLLM all up, other users' unrelated containers on this
+shared host untouched and healthy.

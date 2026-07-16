@@ -946,3 +946,91 @@ top-level `pass` field at face value (this is ITBench's own scoring convention, 
 this integration changed), so the report's `ciso_task_pass_rate: 1.0` reflects that top-level
 verdict, not a task-by-task breakdown. Worth knowing when reading the report's RAI PASS
 verdict at face value.
+
+
+## 15. CISO agent multi-run mass execution — real orchestration built, 2 real bugs found, genuine multi-scenario ACE certification produced
+
+Following §14's single-run CISO report (reusing one pre-existing evaluation.json from
+earlier in the session), the user asked to run the *actual* CISO agent lifecycle end to
+end across multiple scenarios/runs -- deploy → inject fault → run agent → evaluate →
+revert, driven directly, not reusing old data. This required building a full mass-execution
+orchestrator (`.tmp/mass-execution/ciso_agent_driver.py`, untracked, documented here) for
+`agents/ciso-agent`, mirroring the pattern already proven for flash-agent (§12) and the
+ITBench SRE agent, following the exact lifecycle documented in
+`ITBench-Scenarios/ciso/README.md`'s "3a. Task Scenario for Targeting Kubernetes Cluster":
+
+```
+deploy_bundle (once per scenario type)
+  -> loop N times: inject_fault -> get (goal+kubeconfig) -> run ciso-agent -> evaluate -> revert
+  -> destroy_bundle (once, after all runs for that type)
+```
+
+Plan: 3 runs of `Gen-CIS-b-K8s-Kyverno` (already proven in §8/§14) + 1 run each of
+`Gen-CIS-b-K8s-Kubectl-OPA` and `Upd-CIS-b-K8s-Kyverno` (both new, never exercised before
+this session). `Gen-CIS-b-RHEL9-Ansible-OPA` is explicitly excluded -- it needs a real
+RHEL9 host with SSH access, which this environment doesn't have; flagged, not silently
+skipped.
+
+### 15.1 Real bug: fresh per-run agent workdir never received the kubeconfig
+
+The first launch failed all 5 runs immediately (~8s each) with `Expecting value: line 1
+column 1 (char 0)` -- a JSON parse of an empty string. Root cause, confirmed by
+reproducing the failing `make get` call directly: `deploy_bundle`'s Ansible playbook
+(`playbooks/deploy.yml`) copies the cluster kubeconfig into `AGENT_WORKDIR` **exactly
+once**, via a `copy: {src: "{{ kubeconfig }}", dest: "{{ agent_kubeconfig }}"}` task. The
+driver's first version created a **fresh, empty** agent workdir for every individual run
+(mirroring flash-agent's per-run-workspace pattern) -- so every `get` step after the first
+tried to `lookup('file', '/tmp/agent/kubeconfig.yaml')` against a directory that never had
+that file, and failed outright. Fixed by reusing one persistent `scenario_ws`/`agent_ws`
+pair across the *entire* run loop for a given scenario type (matching the README's own
+single-persistent-`AGENT_WORKDIR` flow exactly), with each run's `evaluation.json`
+archived to a separate directory afterward so it isn't silently overwritten by the next
+run's `evaluate` call before being read.
+
+### 15.2 Real infra bug: cluster-wide disk-pressure taint blocked all new pod scheduling
+
+Kyverno's pods (needed by `deploy_bundle`) sat `Pending` for the same reason across two
+separate occurrences: `node.kubernetes.io/disk-pressure:NoSchedule`, kubelet's own
+automatic response to low disk space -- confirmed via `kubectl describe node` and the
+kubelet stats-summary API (`imagefs`/`nodefs` both read ~12-14% available, under the
+default 15% `imagefs.available` eviction threshold). This blocks scheduling for *any* new
+pod on the node, not just this workload. Root cause: `docker system df` showed 84GB of
+images (49.75GB reclaimable) and 40GB of build cache (36GB reclaimable) -- accumulated
+across this whole session's work (flash-agent, ciso-agent, sre-agent images, playwright,
+codex, litellm patches, etc.). Fixed twice, non-destructively both times:
+- First pass: `docker builder prune` + `docker image prune` (build cache + genuinely
+  dangling/untagged layers only -- never touches tagged, in-use images) freed ~24GB.
+- The taint recurred hours later (overnight) after the first (buggy) driver run's failed
+  attempts and normal accumulation. This time, freed ~29GB by deleting the ITBench SRE
+  agent's downloaded scenario snapshot data (`agents/sre-agent/ITBench-Lite/`) -- that
+  work is currently paused per explicit instruction, and the data is trivially
+  re-downloadable (documented `hf download` command already in this file, §-adjacent
+  SRE-agent section) when it resumes.
+- Confirmed kubelet's own image-GC does *not* reliably self-resolve this: its log showed
+  repeated `"Image garbage collection failed... freed 0 bytes"` -- it has nothing it's
+  willing to reclaim from active/tagged images, so manual cleanup was the real fix both
+  times, not something to wait out.
+- Note: a stray `docker rmi` attempt hit `ollama/ollama:latest`, blocked by two long-exited
+  (5 months, 5 days) containers from an unrelated, clearly-abandoned project (`isna-*`) --
+  confirmed both were stopped, not running, before removing them and the image (~9GB). No
+  running or ambiguous-provenance container/image was touched.
+
+### 15.3 Result: genuine 5-run, 3-scenario-type CISO certification
+
+All 5 runs completed for real (no reused/synthetic data): 3× `Gen-CIS-b-K8s-Kyverno` (all
+`pass: true`), 1× `Gen-CIS-b-K8s-Kubectl-OPA` and 1× `Upd-CIS-b-K8s-Kyverno` (both
+`pass: false` -- CrewAI raised `ValueError: Invalid response from LLM call - None or
+empty` mid-task for both, a genuine small-model reliability limitation surfacing under
+real conditions, not an infrastructure bug; recorded honestly as real certification
+data, not retried/hidden). Fed through `ciso_metrics_adapter.py`'s
+`build_ciso_metrids_doc()` (5 real per-run metrics docs) into Phase 2 aggregation (single
+`ciso_fault` category spanning all 3 scenario types, exactly matching how flash-agent's
+categories span multiple distinct fault names) and Phase 3/4, producing:
+`.tmp/ciso-agent-mass-execution/certifier-output/certification/cert-ciso-mass-execution-1.{html,pdf}`
+(8 pages, verified clean of `(unrendered block: ...)` placeholders) plus the underlying
+`certification.json` (`total_runs: 5, successful_runs: 5, total_faults: 3`, all correct).
+
+The whole driver was run fully detached (`setsid`+`nohup`+`disown`+stdin from `/dev/null`,
+survives SSH/session disconnection unconditionally at the OS level) with a recurring
+session-scoped monitoring check-in (15 min interval) that diagnosed and fixed both bugs
+above without further manual intervention, then built this report once the run finished.

@@ -1,0 +1,114 @@
+# ACE harness wrapper for agents/ciso-agent/ (itbench-hub/ITBench-CISO-CAA-Agent).
+# The agent code lives in ../../ciso-agent/ relative to this file.
+# Run setup.sh once before the first benchmark run.
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    # Locate the agent source two levels up from this harness directory.
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+    AGENT_DIR="$(cd "${HARNESS_DIR}/../../ciso-agent" && pwd)"
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    tmpdir=/tmp/agent/${timestamp}
+    mkdir -p "${tmpdir}"
+
+    cp /tmp/agent/scenario_data.json "${tmpdir}/scenario_data.json"
+
+    jq -r .goal_template        "${tmpdir}/scenario_data.json" > "${tmpdir}/goal_template.txt"
+    jq -r .vars.kubeconfig      "${tmpdir}/scenario_data.json" > "${tmpdir}/kubeconfig.yaml"
+    jq -r .vars.ansible_ini     "${tmpdir}/scenario_data.json" > "${tmpdir}/ansible.ini"
+    jq -r .vars.ansible_user_key "${tmpdir}/scenario_data.json" > "${tmpdir}/user_key"
+    chmod 600 "${tmpdir}/user_key"
+    sed -i.bak -E \
+      "s|(ansible_ssh_private_key_file=\")[^\"]*|\1${tmpdir}/user_key|" \
+      "${tmpdir}/ansible.ini"
+
+    sed "s|{{ kubeconfig }}|${tmpdir}/kubeconfig.yaml|g" \
+      "${tmpdir}/goal_template.txt" > "${tmpdir}/goal.txt"
+    sed -i.bak -E \
+      "s|\{\{ path_to_inventory \}\}|${tmpdir}/ansible.ini|g" \
+      "${tmpdir}/goal.txt"
+
+    echo "You can use \`${tmpdir}\` as your workdir." >> "${tmpdir}/goal.txt"
+
+    # ── Local sidecar ────────────────────────────────────────────────────────
+    # Same pattern as flash-agent: proxy.py intercepts LLM calls to inject
+    # trace_id / agent_id into every request for Langfuse observability.
+    # The ciso pipeline evaluates results from agent-result.json (not Langfuse
+    # traces), so this is observability only — not required for certification.
+    #
+    # Port: ACE_HARNESS_SIDECAR_PORT (default 24001).
+
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+
+    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    METADATA_DIR="${tmpdir}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"          > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "ciso-agent-v1"         > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "CISO Compliance Agent" > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "automation"            > "${METADATA_DIR}/AGENT_ROLE"
+
+    # LLM_BASE_URL is set by ace-bench.py via the .env file; strip /v1 for proxy.py.
+    SIDECAR_UPSTREAM=$(python3 -c "
+    from urllib.parse import urlparse
+    u = urlparse('${LLM_BASE_URL:-http://127.0.0.1:14000/v1}')
+    print(f'{u.scheme}://{u.netloc}')
+    ")
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24001}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="${SIDECAR_UPSTREAM}" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true' EXIT
+
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      python3 -c "
+    import socket, sys
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT}))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Run the agent in a Docker container for filesystem isolation.
+    # The container has kubectl / opa / ansible pre-installed (from the upstream Dockerfile).
+    # --network=host lets the container reach the sidecar and the experiment K8s cluster.
+    # All scenario files (kubeconfig, SSH key, goal) live in ${tmpdir} which is mounted.
+    timeout 200 docker run --rm \
+      --network=host \
+      -v "${tmpdir}:${tmpdir}:rw" \
+      -e LLM_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}/v1" \
+      -e LLM_API_KEY="${LLM_API_KEY:-${OPENAI_API_KEY:-not-needed}}" \
+      -e OPENAI_API_KEY="${OPENAI_API_KEY:-not-needed}" \
+      ace-harness/ciso-agent:local \
+      python src/ciso_agent/main.py \
+        --goal "$(cat "${tmpdir}/goal.txt")" \
+        --auto-approve \
+        -o "${tmpdir}/agent-result.json" || true
+
+    # Package any policy YAML files the agent wrote into agent_output.data so
+    # ITBench's evaluate.yml can score generate_policy and evidence_available.
+    HARNESS_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    python3 "${HARNESS_ROOT}/agents/harness/ciso-agent/package_evidence.py" "${tmpdir}"
+
+    tar -C "${tmpdir}" -cf /tmp/agent/agent_data.tar .

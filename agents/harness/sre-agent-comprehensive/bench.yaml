@@ -1,0 +1,48 @@
+# ACE bench config for sre-agent-comprehensive.
+#
+# This agent covers EVERY fault scenario in chaos-charts/faults/:
+#   itbench/   — 29 configuration-level Kubernetes faults
+#   kubernetes/ — standard LitmusChaos stress / network experiments
+#
+# Usage:
+#   python scripts/ace-bench.py sre-agent-comprehensive
+#   python scripts/ace-bench.py sre-agent-comprehensive --runs 30
+
+# --- Identity ---
+agent_id: sre-agent-comprehensive-v1
+agent_name: SRE Comprehensive Fault Remediation Agent
+
+# --- Pipeline type ---
+# itbench_sre: injects chaos-charts faults into the live K8s cluster,
+# runs the agent in online mode (live kubectl/prometheus MCP tools), and
+# evaluates via agent_output.json.
+pipeline: itbench_sre
+
+# --- Agent env ---
+# Minimal: only needs LITELLM_BASE_URL and model alias.
+# LiteLLM routes to Ollama (qwen2.5:7b-instruct) for open-weight testing.
+env_file: .tmp/sre-agent-comprehensive-trial/sre-agent-comprehensive.env
+
+# --- ITBench SRE pipeline config ---
+itbench_sre:
+  # Both fault directories — comprehensive coverage of all 40+ scenarios.
+  faults_dirs:
+    - chaos-charts/faults/itbench
+    - chaos-charts/faults/kubernetes
+
+  # Pre-generated ChaosEngine YAML files (one per fault scenario).
+  engines_dir: .tmp/mass-execution
+
+  # Open-weight model via Ollama through LiteLLM proxy.
+  model: qwen2.5-7b-instruct
+
+  # Seconds between fault injection and agent start (let fault take effect).
+  fault_settle_s: 15
+
+  # Per-scenario timeout — generous to allow the 9-phase protocol to complete.
+  per_scenario_timeout_s: 900
+
+# --- Certifier ---
+certifier:
+  venv: .venv-certifier
+  runs_per_fault: 30

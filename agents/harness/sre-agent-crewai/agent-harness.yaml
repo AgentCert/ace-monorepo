@@ -1,0 +1,81 @@
+# ACE harness for the CrewAI SRE agent.
+# Reads goal + model from scenario_data.json; runs the crewai container;
+# the container writes agent_output.json to workspace and we tar it up.
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    workspace=/tmp/agent/sre-crewai-workspace-${timestamp}
+    mkdir -p "${workspace}"
+
+    cp /tmp/agent/scenario_data.json "${workspace}/scenario_data.json"
+
+    MODEL=$(jq -r '.model'          "${workspace}/scenario_data.json")
+    GOAL=$(jq -r  '.goal_template'  "${workspace}/scenario_data.json")
+
+    # ── Sidecar ──────────────────────────────────────────────────────────────
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    METADATA_DIR="${workspace}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"                            > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "sre-agent-crewai-v1"                    > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "SRE Incident Diagnosis Agent (CrewAI/Qwen)" > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "automation"                              > "${METADATA_DIR}/AGENT_ROLE"
+
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24001}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="http://127.0.0.1:14000" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true' EXIT
+
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      python3 -c "
+    import socket, sys
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT}))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    # ── Run CrewAI agent ─────────────────────────────────────────────────────
+    # --network=host: reaches sidecar (:SIDECAR_PORT), LiteLLM (:14000),
+    #   and live MCP servers (:18081 kubernetes, :31085 prometheus).
+    CODEX_WORKSPACE="${workspace}/codex-workspace"
+    mkdir -p "${CODEX_WORKSPACE}"
+
+    timeout 600 docker run --rm \
+      --network=host \
+      -v "${workspace}:${workspace}:rw" \
+      -e LITELLM_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}" \
+      -e SRE_AGENT_LITELLM_API_KEY="ollama" \
+      -e CREWAI_TELEMETRY_OPT_OUT=true \
+      -e OTEL_SDK_DISABLED=true \
+      -e PYTHONUNBUFFERED=1 \
+      ace-harness/sre-agent-crewai:local \
+      --goal "${GOAL}" \
+      --model "${MODEL}" \
+      --workspace-dir "${CODEX_WORKSPACE}" \
+      --output "${workspace}/agent_output.json" || true
+
+    tar -C "${workspace}" -cf /tmp/agent/agent_data.tar .

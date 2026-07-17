@@ -1,0 +1,31 @@
+# ACE harness wrapper for any agent that speaks the A2A protocol and uses MCP
+# tools for environment access.
+#
+# The agent must:
+#   1. Expose an A2A-compatible HTTP endpoint (JSON-RPC 2.0, tasks/send +
+#      tasks/get methods).
+#   2. Advertise its capabilities via GET /.well-known/agent.json (Agent Card).
+#   3. Accept MCP server URLs and LLM proxy coordinates from the task message
+#      (delivered in both the text part and the structured metadata field).
+#   4. Route all LLM calls through the provided openai_base_url so that the
+#      ACE sidecar proxy can capture Langfuse traces for certification.
+#
+# The harness does NOT need to know anything about the agent's internals.
+# Agent-specific Helm values, environment variables, and chart structure are
+# the agent's responsibility on its side.
+#
+# Run setup.sh once before the first benchmark run.
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    source "${HARNESS_DIR}/.venv/bin/activate"
+
+    exec python "${HARNESS_DIR}/a2a_bridge.py"

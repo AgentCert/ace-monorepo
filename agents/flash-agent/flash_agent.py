@@ -788,7 +788,22 @@ class FlashAgent:
             if end > start:
                 content = content[start:end].strip()
         
-        return json.loads(content)
+        parsed = json.loads(content)
+        if isinstance(parsed, list):
+            # A small model will sometimes wrap the single expected object in a
+            # list. json.loads() happily accepts that (it's valid JSON), so
+            # this used to reach the caller as-is and crash later on
+            # `analysis.get(...)` (AttributeError: 'list' object has no
+            # attribute 'get') -- reproduced in ~15 real mass-execution runs.
+            # Salvage the common one-element case; anything else is a genuine
+            # shape mismatch, so raise and let the existing retry-as-JSON loop
+            # ask the model to correct it instead of crashing the whole scan.
+            if len(parsed) == 1 and isinstance(parsed[0], dict):
+                return parsed[0]
+            raise ValueError(f"expected a JSON object, got a list of {len(parsed)} item(s)")
+        if not isinstance(parsed, dict):
+            raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
+        return parsed
 
     def _get_hindsight_for_prompt(self, scan_id: str) -> Optional[str]:
         """

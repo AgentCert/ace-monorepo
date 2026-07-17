@@ -1,0 +1,143 @@
+# ACE harness wrapper for sre-agent-qwen.
+# Supports two modes selected by the snapshot_dirs field in scenario_data.json:
+#   offline: snapshot_dirs is a non-empty path  → sre_react_shell_investigation.md
+#   online:  snapshot_dirs is "" or absent      → sre_react_online_base.md (live K8s)
+#
+# Differences from agents/harness/sre-agent/:
+#   - sidecar UPSTREAM_URL points to Ollama (:11434) instead of LiteLLM (:14000)
+#   - model uses Ollama naming (e.g. qwen2.5:7b-instruct)
+#   - SRE_AGENT_LITELLM_API_KEY="ollama" (Ollama needs no real key)
+# Docker image: ace-harness/sre-agent:local  (built by sre-agent/setup.sh)
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+    AGENT_DIR="$(cd "${HARNESS_DIR}/../../sre-agent" && pwd)"
+
+    # ── Capability probe layer selection ─────────────────────────────────────
+    # PROBE_LAYER=1  → overlay original (unpatched) prompt files from
+    #                  capability-probes/ to test raw model capability
+    # PROBE_LAYER=2  → use agent's own prompt files (patched, normal behavior)
+    # PROBE_OVERRIDES → semicolon-separated "src_abs:target_rel" pairs that
+    #                   identify which files to overlay (relative to AGENT_DIR)
+    PROBE_LAYER="${PROBE_LAYER:-2}"
+    DOCKER_PROMPTS_EXTRA=()
+    PROMPT_TMPDIR=""
+
+    if [ "${PROBE_LAYER}" = "1" ] && [ -n "${PROBE_OVERRIDES:-}" ]; then
+      PROMPT_TMPDIR=$(mktemp -d)
+      PROMPTS_SRC="${AGENT_DIR}/zero/zero-config/prompts"
+      PROMPTS_TMP="${PROMPT_TMPDIR}/prompts"
+      cp -r "${PROMPTS_SRC}" "${PROMPTS_TMP}"
+      IFS=';' read -ra _OVERRIDE_LIST <<< "${PROBE_OVERRIDES}"
+      for _override in "${_OVERRIDE_LIST[@]}"; do
+        [ -z "${_override}" ] && continue
+        _SRC="${_override%%:*}"
+        _TGT_REL="${_override##*:}"
+        # target_rel is relative to AGENT_DIR, e.g. zero/zero-config/prompts/data_sources/kubernetes.md
+        _PROMPTS_REL="${_TGT_REL#zero/zero-config/prompts/}"
+        _DST="${PROMPTS_TMP}/${_PROMPTS_REL}"
+        mkdir -p "$(dirname "${_DST}")"
+        cp "${_SRC}" "${_DST}"
+      done
+      DOCKER_PROMPTS_EXTRA=(-v "${PROMPTS_TMP}:${PROMPTS_SRC}:ro")
+    fi
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    workspace=/tmp/agent/sre-qwen-workspace-${timestamp}
+    mkdir -p "${workspace}"
+
+    cp /tmp/agent/scenario_data.json "${workspace}/scenario_data.json"
+
+    # Use // "" so jq returns empty string rather than "null" for missing keys.
+    SNAPSHOT_DIRS=$(jq -r '.snapshot_dirs // ""' "${workspace}/scenario_data.json")
+    MODEL=$(jq -r        '.model'               "${workspace}/scenario_data.json")
+    PROMPT_FILE=$(jq -r  '.prompt_file'         "${workspace}/scenario_data.json")
+    GOAL=$(jq -r         '.goal_template'       "${workspace}/scenario_data.json")
+
+    # Online mode: if snapshot_dirs is empty the agent collects data from the
+    # live K8s cluster via the kubernetes + prometheus MCP servers in config.toml.
+    if [ -z "${SNAPSHOT_DIRS}" ]; then
+      PROMPT_FILE="${PROMPT_FILE:-sre_react_online_base.md}"
+    fi
+
+    PROMPT_PATH="${AGENT_DIR}/zero/zero-config/prompts/${PROMPT_FILE}"
+
+    # ── Local sidecar ────────────────────────────────────────────────────────
+    # Intercepts LLM calls and injects trace_id / agent_id for Langfuse.
+    # UPSTREAM_URL points to Ollama directly (not LiteLLM).
+    # Port: ACE_HARNESS_SIDECAR_PORT (default 24001).
+
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+
+    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    METADATA_DIR="${workspace}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"              > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "sre-agent-qwen-v1"        > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "SRE Incident Diagnosis Agent (Qwen/Ollama)" > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "automation"               > "${METADATA_DIR}/AGENT_ROLE"
+
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24001}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="http://127.0.0.1:14000" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true; [ -n "${PROMPT_TMPDIR}" ] && rm -rf "${PROMPT_TMPDIR}"' EXIT
+
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      python3 -c "
+    import socket, sys
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT}))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Build --variable args for prompt template substitution.
+    # WORKSPACE_DIR: always passed so the online prompt knows where to write output.
+    # SNAPSHOT_DIRS: only in offline mode (non-empty).
+    CODEX_WORKSPACE="${workspace}/codex-workspace"
+    PROMPT_VAR_ARGS=(--variable "WORKSPACE_DIR=${CODEX_WORKSPACE}")
+    if [ -n "${SNAPSHOT_DIRS}" ]; then
+      PROMPT_VAR_ARGS+=(--variable "SNAPSHOT_DIRS=${SNAPSHOT_DIRS}")
+    fi
+
+    # Run the agent in Docker.
+    # LITELLM_BASE_URL routes through the sidecar which then proxies to LiteLLM → Ollama.
+    # SRE_AGENT_LITELLM_API_KEY: zero expects this var; Ollama/LiteLLM uses API key from env.
+    # --network=host: agent reaches sidecar at :${SIDECAR_PORT} and live K8s MCP servers.
+    timeout 600 docker run --rm \
+      --network=host \
+      -v "${workspace}:${workspace}:rw" \
+      -v "${AGENT_DIR}:${AGENT_DIR}:ro" \
+      "${DOCKER_PROMPTS_EXTRA[@]}" \
+      -e LITELLM_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}" \
+      -e SRE_AGENT_LITELLM_API_KEY="ollama" \
+      ace-harness/sre-agent:local \
+      --workspace "${CODEX_WORKSPACE}" \
+      --prompt-file "${PROMPT_PATH}" \
+      "${PROMPT_VAR_ARGS[@]}" \
+      -- exec --full-auto -m "${MODEL}" \
+      "${GOAL}" || true
+
+    tar -C "${workspace}" -cf /tmp/agent/agent_data.tar .

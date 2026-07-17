@@ -1,0 +1,19 @@
+agent_id: sre-agent-crewai-v1
+agent_name: SRE Incident Diagnosis Agent (CrewAI/Qwen)
+pipeline: itbench_sre
+env_file: .tmp/sre-agent-qwen-trial/sre-agent-qwen.env
+
+itbench_sre:
+  faults_dirs:
+    - chaos-charts/faults/itbench
+    - chaos-charts/faults/kubernetes
+  engines_dir: .tmp/mass-execution
+  model: qwen2.5-7b-instruct
+  prompt_file: sre_react_online_base.md
+  fault_settle_s: 15
+  per_scenario_timeout_s: 900
+  runs_per_fault: 30
+
+certifier:
+  venv: .venv-certifier
+  runs_per_fault: 30

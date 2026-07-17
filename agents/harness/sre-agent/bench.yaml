@@ -1,0 +1,51 @@
+# ACE bench config for sre-agent.
+# Used by: scripts/ace-bench.py sre-agent
+#
+# Paths are relative to the ace-monorepo root unless they start with /.
+
+# --- Identity ---
+agent_id: sre-agent-v1
+agent_name: SRE Incident Diagnosis Agent
+
+# --- Pipeline type ---
+pipeline: sre
+
+# --- Agent env ---
+# Key=value file loaded into the harness environment.
+# For the SRE agent the harness reads MODEL from scenario_data.json directly,
+# but OPENAI_API_KEY / OPENAI_BASE_URL are still needed if the agent calls
+# the LLM directly (zero-agent reads MODEL from scenario JSON, not env).
+# Create this file before running; minimal content:
+#   OPENAI_API_KEY=sk-agentcert-2026
+#   OPENAI_BASE_URL=http://127.0.0.1:14000/v1
+env_file: .tmp/sre-agent-trial/sre-agent.env
+
+# --- SRE-specific ---
+sre:
+  # Directory of ITBench-Lite offline snapshots.
+  # Each subdirectory named "Scenario-N" is one fault scenario.
+  # Download with:
+  #   cd agents/sre-agent
+  #   huggingface-cli download --repo-type dataset \
+  #     itbench-org/ITBench-Lite --local-dir ITBench-Lite
+  snapshots_dir: agents/sre-agent/ITBench-Lite
+
+  # LiteLLM model string passed inside scenario_data.json to the harness.
+  # Must match a model registered in your LiteLLM proxy.
+  model: openai/qwen2.5-7b-instruct
+
+  # Prompt file (relative to agents/sre-agent/zero/zero-config/prompts/).
+  prompt_file: sre_react_shell_investigation.md
+
+  # Goal string injected as goal_template in scenario_data.json.
+  goal_template: >-
+    Diagnose the incident in the Kubernetes cluster.
+    Report the root cause, affected components, and recommended remediation steps.
+
+  # Per-scenario timeout in seconds (includes agent execution + evaluation).
+  per_scenario_timeout_s: 1200
+
+# --- Certifier ---
+certifier:
+  venv: .venv-certifier
+  runs_per_fault: 1

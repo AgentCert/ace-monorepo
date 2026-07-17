@@ -1,0 +1,50 @@
+# ACE bench config for flash-agent.
+# Used by: scripts/ace-bench.py flash-agent
+#
+# Paths are relative to the ace-monorepo root unless they start with /.
+
+# --- Identity ---
+agent_id: flash-agent-v1
+agent_name: Flash Agent (LitmusChaos + Langfuse)
+
+# --- Pipeline type ---
+# trace_based: LitmusChaos fault injection → agent scan → Langfuse traces
+#              → Phase 0+1 per fault → Phase 2+3+4 across all faults
+pipeline: trace_based
+
+# --- Agent env ---
+# Key=value file with OPENAI_API_KEY, OPENAI_BASE_URL, and any MODEL_ALIAS.
+# Minimal content:
+#   OPENAI_API_KEY=sk-agentcert-2026
+#   OPENAI_BASE_URL=http://127.0.0.1:14000/v1
+#   MODEL_ALIAS=qwen2.5-7b-instruct
+env_file: .tmp/flash-agent-trial/flash-agent.env
+
+# --- Trace-based-specific ---
+trace_based:
+  # Directory containing ChaosEngine YAML files named engine-<fault>.yaml.
+  # Optionally paired with rbac-<fault>.yaml files.
+  engines_dir: .tmp/mass-execution
+
+  # Langfuse base URL (used to verify connectivity before running).
+  langfuse_base_url: http://127.0.0.1:4001
+
+  # Comma-separated MCP endpoint URLs injected into scenario_data.json.
+  mcp_urls: "http://localhost:8186/mcp,http://localhost:31085/mcp"
+
+  # Query passed to the agent as scan_query in scenario_data.json.
+  scan_query: >-
+    Analyse Kubernetes cluster health and report all detected issues,
+    including their probable root causes and recommended remediation.
+
+  # Per-fault agent timeout in seconds.
+  agent_timeout_s: 600
+
+  # Seconds to wait after applying the ChaosEngine before starting the agent.
+  # Gives the litmuschaos/k8s:latest experiment pod time to pull and inject.
+  fault_settle_s: 15
+
+# --- Certifier ---
+certifier:
+  venv: .venv-certifier
+  runs_per_fault: 1

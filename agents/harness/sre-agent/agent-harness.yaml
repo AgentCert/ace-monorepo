@@ -1,0 +1,98 @@
+# ACE harness wrapper for agents/sre-agent/ (itbench-hub/ITBench-CISO-SRE-FinOps-Agent).
+# The agent code lives in ../../sre-agent/ relative to this file.
+# Run setup.sh once before the first benchmark run.
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+    AGENT_DIR="$(cd "${HARNESS_DIR}/../../sre-agent" && pwd)"
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    workspace=/tmp/agent/sre-workspace-${timestamp}
+    mkdir -p "${workspace}"
+
+    cp /tmp/agent/scenario_data.json "${workspace}/scenario_data.json"
+
+    # Extract fields from the scenario JSON provided by ITBench.
+    SNAPSHOT_DIRS=$(jq -r '.snapshot_dirs'  "${workspace}/scenario_data.json")
+    MODEL=$(jq -r        '.model'           "${workspace}/scenario_data.json")
+    PROMPT_FILE=$(jq -r  '.prompt_file'     "${workspace}/scenario_data.json")
+    GOAL=$(jq -r         '.goal_template'   "${workspace}/scenario_data.json")
+
+    PROMPT_PATH="${AGENT_DIR}/zero/zero-config/prompts/${PROMPT_FILE}"
+
+    # ── Local sidecar ────────────────────────────────────────────────────────
+    # zero reads LITELLM_BASE_URL from the environment via _substitute_env_vars
+    # in zero/config.py (the config.toml template uses ${LITELLM_BASE_URL}).
+    # Pointing it at the local sidecar instead of LiteLLM directly injects
+    # trace_id / agent_id into every LLM call for Langfuse observability.
+    #
+    # Port: ACE_HARNESS_SIDECAR_PORT (default 24001).
+
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+
+    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    METADATA_DIR="${workspace}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"      > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "sre-agent-v1"      > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "SRE Incident Diagnosis Agent" > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "automation"        > "${METADATA_DIR}/AGENT_ROLE"
+
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24001}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="http://127.0.0.1:14000" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true' EXIT
+
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      python3 -c "
+    import socket, sys
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT}))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Run the agent in a Docker container for filesystem isolation.
+    # --network=host: reaches sidecar at localhost:${SIDECAR_PORT} and LiteLLM.
+    # ${AGENT_DIR} mounted read-only: provides prompt files + ITBench-Lite snapshots.
+    # ${workspace} mounted read-write: zero's codex-workspace lives here.
+    # Note: snapshot dirs must be under ${AGENT_DIR} (the default ITBench-Lite layout).
+    #       If SNAPSHOT_DIRS points elsewhere, add an extra -v mount below.
+    CODEX_WORKSPACE="${workspace}/codex-workspace"
+    timeout 600 docker run --rm \
+      --network=host \
+      -v "${workspace}:${workspace}:rw" \
+      -v "${AGENT_DIR}:${AGENT_DIR}:ro" \
+      -e LITELLM_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}" \
+      ace-harness/sre-agent:local \
+      --workspace "${CODEX_WORKSPACE}" \
+      --prompt-file "${PROMPT_PATH}" \
+      --variable "WORKSPACE_DIR=${CODEX_WORKSPACE}" \
+      --variable "SNAPSHOT_DIRS=${SNAPSHOT_DIRS}" \
+      -- exec --full-auto -m "${MODEL}" \
+      "${GOAL}" || true
+
+    # Package results: agent_output.json + any artefacts in the workspace.
+    tar -C "${workspace}" -cf /tmp/agent/agent_data.tar .

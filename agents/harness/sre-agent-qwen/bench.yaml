@@ -1,0 +1,80 @@
+# ACE bench config for sre-agent-qwen.
+# Second variant of the SRE agent that uses qwen2.5:7b-instruct via Ollama
+# (local inference, no LiteLLM proxy required).
+#
+# Usage:
+#   python scripts/ace-bench.py sre-agent-qwen
+
+# --- Identity ---
+agent_id: sre-agent-qwen-v1
+agent_name: SRE Incident Diagnosis Agent (Qwen/Ollama)
+
+# --- Pipeline type ---
+# itbench_sre: injects chaos-charts itbench faults into the live K8s cluster,
+# runs the SRE agent in online mode (live kubectl/prometheus MCP tools), and
+# evaluates via agent_output.json.
+pipeline: itbench_sre
+
+# --- Agent env ---
+# Minimal: Ollama needs no real API key.
+env_file: .tmp/sre-agent-qwen-trial/sre-agent-qwen.env
+
+# --- ITBench SRE pipeline config ---
+itbench_sre:
+  # Directory containing itbench fault subdirectories (each with ground_truth.yaml).
+  faults_dir: chaos-charts/faults/itbench
+
+  # Directory with pre-generated engine-*.yaml and rbac-*.yaml for each fault.
+  engines_dir: .tmp/mass-execution
+
+  # LiteLLM model alias — LiteLLM routes this to Ollama (qwen2.5:7b-instruct
+  # via ollama_chat/) so inference still runs locally, but /responses endpoint
+  # handling and tool-call format translation go through LiteLLM.
+  model: qwen2.5-7b-instruct
+
+  # Online mode prompt (agent uses live K8s + Prometheus MCP servers).
+  # sre_react_online.md is the composite entry-point: it uses {{include:}}
+  # directives to assemble sre_react_online_base.md + data_sources/kubernetes.md.
+  # Using the base fragment directly (old value) bypassed the include system,
+  # silently omitting the RBAC-scope warning in kubernetes.md from the agent prompt.
+  prompt_file: sre_react_online.md
+
+  # Seconds between fault injection and agent start (let fault take effect).
+  fault_settle_s: 15
+
+  # Per-scenario timeout in seconds.
+  per_scenario_timeout_s: 900
+
+# --- Capability probes ---
+# Two-layer evaluation: Layer 1 uses original (unpatched) prompt files to
+# measure raw model capability; Layer 2 applies the patch if Layer 1 triggers
+# a known failure signal.  See §16.4a in OPEN_WEIGHT_CERTIFICATION_HANDOFF.md.
+capability_probes:
+  - id: rbac_namespace_scope_awareness
+    description: >-
+      Does the model use namespace-scoped K8s tools (pods_list_in_namespace)
+      without an explicit hint? Failure: model calls pods_list (cluster-wide),
+      rejected by the namespace-scoped Role with "Permission denied".
+    failure_signal_regex: "check RBAC permissions for pods_list|Permission denied.*pods_list"
+    layer1_overrides:
+      - source: capability-probes/kubernetes-layer1.md
+        target_rel: zero/zero-config/prompts/data_sources/kubernetes.md
+      # Also revert the base prompt so the MANDATORY GATE patch does not bleed
+      # into a Layer 1 run via the {{include:}} chain in sre_react_online.md.
+      - source: capability-probes/sre_react_online_base-layer1.md
+        target_rel: zero/zero-config/prompts/sre_react_online_base.md
+
+  - id: online_first_tool_ordering
+    description: >-
+      Does the model make live K8s/Prometheus calls before offline analysis tools?
+      Failure: model calls offline_incident_analysis with placeholder/non-existent
+      paths before any live data collection (confirmed 134-call loop on first run).
+    failure_signal_regex: 'path/to/otel_logs_raw\.tsv|offline_incident_analysis.*path.*\.tsv'
+    layer1_overrides:
+      - source: capability-probes/sre_react_online_base-layer1.md
+        target_rel: zero/zero-config/prompts/sre_react_online_base.md
+
+# --- Certifier ---
+certifier:
+  venv: .venv-certifier
+  runs_per_fault: 1

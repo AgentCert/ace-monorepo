@@ -1,0 +1,111 @@
+# ACE harness wrapper for agents/sre-agent-comprehensive/.
+#
+# Reads goal + model + namespace from scenario_data.json.
+# Starts the ACE agent-sidecar proxy to stamp LLM calls with trace metadata.
+# Runs the agent in Docker with --network=host so it can reach:
+#   - agent-sidecar proxy      :ACE_HARNESS_SIDECAR_PORT (default 24001)
+#   - LiteLLM proxy            :14000
+#   - Kubernetes MCP server    :18081
+#   - Prometheus MCP server    :31085
+#
+# scenario_data.json schema:
+#   {
+#     "goal_template": "Diagnose and remediate all faults in the Kubernetes cluster.",
+#     "model":         "qwen2.5-7b-instruct",
+#     "namespace":     "otel-demo"          (optional, default otel-demo)
+#   }
+
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+    AGENT_DIR="$(cd "${HARNESS_DIR}/../../sre-agent-comprehensive" && pwd)"
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    workspace=/tmp/agent/sre-comprehensive-workspace-${timestamp}
+    mkdir -p "${workspace}"
+
+    cp /tmp/agent/scenario_data.json "${workspace}/scenario_data.json"
+
+    # Read fields from scenario_data.json (use // "" so jq returns "" not "null")
+    GOAL=$(jq -r      '.goal_template // "Diagnose and remediate all Kubernetes faults."' \
+                      "${workspace}/scenario_data.json")
+    MODEL=$(jq -r     '.model // "qwen2.5-7b-instruct"' \
+                      "${workspace}/scenario_data.json")
+    NAMESPACE=$(jq -r '.namespace // "otel-demo"' \
+                      "${workspace}/scenario_data.json")
+
+    # ── Local agent-sidecar ──────────────────────────────────────────────────
+    # Intercepts LLM calls and injects NOTIFY_ID (trace_id) + agent metadata
+    # so the certifier can correlate Langfuse traces to this harness run.
+
+    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+    METADATA_DIR="${workspace}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"                               > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "sre-agent-comprehensive-v1"                 > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "SRE Comprehensive Fault Remediation Agent"  > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "automation"                                  > "${METADATA_DIR}/AGENT_ROLE"
+
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24001}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="http://127.0.0.1:14000" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true' EXIT
+
+    # Wait up to 5 s for sidecar port to be ready
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+      python3 -c "
+    import socket, sys
+    s = socket.socket()
+    s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT}))
+        s.close()
+        sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    # Emit trace_id — ace-bench.py's _extract_trace_id() reads this line.
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    # ── Run the agent ────────────────────────────────────────────────────────
+    CODEX_WORKSPACE="${workspace}/codex-workspace"
+    mkdir -p "${CODEX_WORKSPACE}"
+
+    # --network=host: agent reaches sidecar (:SIDECAR_PORT), LiteLLM (:14000),
+    # K8s MCP (:18081), and Prometheus MCP (:31085) all on localhost.
+    timeout 800 docker run --rm \
+      --network=host \
+      -v "${workspace}:${workspace}:rw" \
+      -e LITELLM_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}" \
+      -e SRE_AGENT_LITELLM_API_KEY="ollama" \
+      -e K8S_MCP_URL="http://127.0.0.1:18081/mcp" \
+      -e PROM_MCP_URL="http://127.0.0.1:31085/mcp" \
+      -e TARGET_NAMESPACE="${NAMESPACE}" \
+      -e CREWAI_TELEMETRY_OPT_OUT=true \
+      -e OTEL_SDK_DISABLED=true \
+      -e PYTHONUNBUFFERED=1 \
+      ace-harness/sre-agent-comprehensive:local \
+      --goal "${GOAL}" \
+      --model "${MODEL}" \
+      --namespace "${NAMESPACE}" \
+      --workspace-dir "${CODEX_WORKSPACE}" \
+      --output "${workspace}/agent_output.json" || true
+
+    tar -C "${workspace}" -cf /tmp/agent/agent_data.tar .

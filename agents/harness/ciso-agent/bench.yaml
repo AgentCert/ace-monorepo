@@ -1,0 +1,54 @@
+# ACE bench config for ciso-agent.
+# Used by: scripts/ace-bench.py ciso-agent
+#
+# Paths are relative to the ace-monorepo root unless they start with /.
+
+# --- Identity ---
+agent_id: ciso-agent-v1
+agent_name: CISO Compliance Automation Agent
+
+# --- Pipeline type ---
+# "ciso" | "sre" | "trace_based"
+pipeline: ciso
+
+# --- Agent env ---
+# Key=value file loaded into the harness environment.
+# Must define: LLM_MODEL_NAME, LLM_BASE_URL, LLM_API_KEY, LLM_TEMPERATURE
+env_file: .tmp/ciso-agent-trial/ciso-agent.env
+
+# --- CISO-specific ---
+ciso:
+  # Docker image that exposes make inject_fault / evaluate / revert / get
+  scenario_image: ciso-task-scenarios:latest
+
+  # Path to the checked-out ITBench-Scenarios/ciso directory
+  scenarios_repo: .tmp/ciso-agent-trial/repos/ITBench-Scenarios/ciso
+
+  # Kubeconfig for the target cluster (mounted into the scenario container)
+  kubeconfig: .tmp/ciso-agent-trial/kubeconfig/kubeconfig.yaml
+
+  # Scenarios to run.  Each entry: dir (relative to scenarios_repo), type label,
+  # and number of independent runs (for pass-rate estimation).
+  plan:
+    - dir: 1.gen-cis-b-k8s-kyverno
+      type: Gen-CIS-b-K8s-Kyverno
+      runs: 3
+
+    - dir: 2.gen-cis-b-k8s-kubectl-opa
+      type: Gen-CIS-b-K8s-Kubectl-OPA
+      runs: 1
+
+    - dir: 4.upd-cis-b-k8s-kyverno
+      type: Upd-CIS-b-K8s-Kyverno
+      runs: 1
+
+# --- Certifier ---
+certifier:
+  # Python venv with certifier deps installed (relative to repo root)
+  venv: .venv-certifier
+
+  # Total runs across all scenario types (for certifier aggregation)
+  runs_per_fault: 5
+
+  # Pass --include-ciso-finops to the aggregation pipeline
+  include_ciso_finops: false

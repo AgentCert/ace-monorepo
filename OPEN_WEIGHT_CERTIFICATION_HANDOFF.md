@@ -263,19 +263,54 @@ fault-injection runs are underway, but not blocking.
 
 ---
 
-## 6. Remaining work (not yet started)
+## 6. Remaining work
 
-- Verify ChaosEngine submission against the now-registered Litmus infra.
-- Run ONE end-to-end validation: single fault, single run, trace captured, certifier
-  Phase 0+1 processed.
-- Scale to mass execution: 5 runs × all ~29 SRE fault bundles (~145 runs total, per revised
-  scope — originally 30 was discussed, reduced from 30 runs/bundle to 5), as a
-  resource-capped background loop.
-- Run certifier Phase 2+3 (aggregation + certification) once sufficient runs exist.
-- Continue fixing real issues as they surface — this has been, and is expected to remain,
-  an iterative process.
-- Throughout: keep respecting the ~50%-of-host resource cap and shared-host safety
-  (verify ownership of any port/process/namespace before touching it).
+*Updated at §16. Earlier items in this list (ChaosEngine verification, single end-to-end
+validation, mass execution, Phase 2+3 report, CISO trial) are all complete — see §9–§16.*
+
+- **Phase 0+1 batch processing:** 114 of the 137 SRE runs still have pending Phase 0+1
+  (Langfuse trace ingestion + LLM-judge scoring). Deliberately paused mid-session; all
+  137 Langfuse traces are intact and correctly tagged. Resuming Phase 0+1 at scale is the
+  prerequisite for the full-fleet SRE report below.
+
+- **Full SRE certification report:** Phase 2+3+4 across all 29 fault bundles × 5 runs
+  (was only run on a single 5-run fault in §13). Blocked on Phase 0+1 completion above.
+
+- **CISO remaining scenarios:** `Gen-CIS-b-K8s-Kubectl-OPA` and `Upd-CIS-b-K8s-Kyverno`
+  both failed with `ValueError: Invalid response from LLM call - None or empty` during
+  CrewAI execution (§15). Genuine small-model reliability failures — worth retrying or
+  investigating whether prompt changes help. `Gen-CIS-b-RHEL9-Ansible-OPA` is explicitly
+  out of scope (requires a real RHEL9 host with SSH access, not present in this environment).
+
+- **Upstream PRs:**
+  - `fix/openai-compatible-llm-fallback` is pushed to `aruscher-dev/ITBench-CISO-CAA-Agent`
+    but no PR has been opened against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.
+  - `agents/sre-agent`'s live-mode compatibility fixes (§16) are committed locally at
+    `agents/sre-agent@2d31052` but **not pushed** — the submodule's `origin` points at the
+    real `itbench-hub/ITBench-CISO-SRE-FinOps-Agent` upstream (not a fork like ciso-agent
+    uses), so pushing needs an explicit decision before being taken.
+
+- **`ChaosResult` CR:** None of the 29 ITBench fault scripts applies a `ChaosResult` CR
+  (they are hand-written shell scripts, not litmus-go SDK outputs). The Litmus portal won't
+  show pass/fail badges for any of them. Doesn't block certification runs, but needed for
+  full Litmus portal conformance.
+
+- **CISO narrative templates:** `key_findings`, `qualitative`, and `limitations` Phase 3
+  builders crash on `KeyError: 'fault_detection_success_rate'` for CISO runs — that field
+  is SRE-only (detect/mitigate timeline has no meaning for a CISO compliance pass/fail).
+  The crashes are caught and fall back to placeholder stubs gracefully. Writing real,
+  CISO-aware templates for these three builders is genuine follow-on scope, not a one-line
+  fix.
+
+- **SRE agent small-model capability limits (§16.5, §16.6):** Two issues confirmed in live
+  validation that are outside this session's ability to fix — Codex's own compiled Rust JSON
+  parser chokes on trailing-garbage tool-call arguments from qwen2.5:7b (same class as the
+  litellm-layer fix in §15, different layer); and the model tends to fixate on output-file
+  busywork after a retry nudge rather than resuming real investigation. Both recorded as
+  honest certification findings, not infrastructure problems.
+
+- **Throughout:** keep respecting ≤50% of this shared host's CPU/memory; verify ownership
+  of any port/process/namespace before touching it.
 
 ---
 

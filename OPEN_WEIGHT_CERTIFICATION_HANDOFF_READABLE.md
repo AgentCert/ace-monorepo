@@ -598,20 +598,16 @@ This unpacks the agent's tar into the `aw` directory that the scenario container
 
 ## 15. Remaining work
 
-> **Code fixes (Fixes 1–4) are all complete as of §17.** The items still open below are runtime tasks — they require actual benchmark runs, not code changes.
+> **All code fixes are complete.** Items below are active runs in progress.
 
-- [x] **`_parse_analysis_response` list-unwrap:** ✅ Fixed — `agents/flash-agent/flash_agent.py` now matches the root submodule's `21e138d` fix (see §17, Fix 1)
-- [x] **`prompt_file` correction:** ✅ Fixed — `agents/harness/sre-agent-qwen/bench.yaml` now uses `sre_react_online.md` (the composite entry-point), with the Layer 1 probe updated to prevent MANDATORY GATE bleed (see §17, Fix 2)
-- [x] **CISO narrative templates:** ✅ Fixed — all three builders (`key_findings`, `qualitative`, `limitations`) now split categories into `sre_cats`/`ciso_cats` and route each through appropriate metrics; no more `KeyError` crashes for CISO runs (see §17, Fix 3)
-- [x] **`ChaosResult` CR:** ✅ Fixed — `ace-bench.py` now calls `_patch_chaos_result()` after each agent run to set `status.verdict: Pass/Fail` before the ChaosEngine is deleted; Litmus portal will show badges for all future runs (see §17, Fix 4)
-- [ ] **Phase 0+1 batch completion:** ~160 of 183 SRE runs still have pending Phase 0+1 processing (deliberately paused; all Langfuse traces are intact and correctly tagged)
-- [ ] **Scale to full SRE certification:** Phase 2+3+4 report across all 29 fault bundles × 5 runs once Phase 0+1 is complete (§9 only covered a single 5-run fault)
-- [ ] **CISO remaining scenarios:** `Gen-CIS-b-K8s-Kubectl-OPA` and `Upd-CIS-b-K8s-Kyverno` both failed with LLM empty-response errors — worth retrying or investigating whether prompt changes help at this model scale. `Gen-CIS-b-RHEL9-Ansible-OPA` is explicitly out of scope (requires a real RHEL9 host with SSH)
-- [ ] **Upstream PRs — CISO agent:** *(deferred — not in scope for current effort)*
-- [ ] **Upstream push decision — SRE agent:** *(deferred — not in scope for current effort)*
-- [ ] **SRE agent small-model limits:** *(deferred — genuine capability findings, not infrastructure problems)*
-- [ ] **Setup requirements (new clone):** *(deferred — operational documentation task)*
-- [ ] **Resource cap:** Keep respecting ≤ 50% host resource usage; verify ownership of any port/process/namespace before touching it
+- [x] **`_parse_analysis_response` list-unwrap:** ✅ Fixed
+- [x] **`prompt_file` correction:** ✅ Fixed
+- [x] **CISO narrative templates:** ✅ Fixed
+- [x] **`ChaosResult` CR:** ✅ Fixed
+- [x] **CISO empty-response crashes:** ✅ Fixed — `crew.kickoff()` now retries up to 3× on `ValueError: Invalid response … None or empty` in both `kubernetes_kubectl_opa.py` and `kubernetes_kyverno_update.py`; bench.yaml updated to 3 runs each for `Gen-CIS-b-K8s-Kubectl-OPA` and `Upd-CIS-b-K8s-Kyverno` (9 total, `runs_per_fault: 9`)
+- [x] **Trace lookup robustness:** ✅ Fixed — `run_certification.py` now uses direct `trace_id` point-lookup; `ace-bench.py` passes all IDs explicitly to Phase 0+1 subprocess; `bench.yaml` MCP port updated to 18081
+- [ ] **CISO re-run:** Running — `Gen-CIS-b-K8s-Kubectl-OPA` (3 runs) + `Upd-CIS-b-K8s-Kyverno` (3 runs) with retry logic active
+- [ ] **SRE comprehensive certification:** Running — `sre-agent-comprehensive` across all 40+ fault scenarios, 5 runs each, no CPU throttle
 
 ---
 

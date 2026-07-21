@@ -36,11 +36,11 @@ ciso:
 
     - dir: 2.gen-cis-b-k8s-kubectl-opa
       type: Gen-CIS-b-K8s-Kubectl-OPA
-      runs: 1
+      runs: 3
 
     - dir: 4.upd-cis-b-k8s-kyverno
       type: Upd-CIS-b-K8s-Kyverno
-      runs: 1
+      runs: 3
 
 # --- Certifier ---
 certifier:
@@ -48,7 +48,7 @@ certifier:
   venv: .venv-certifier
 
   # Total runs across all scenario types (for certifier aggregation)
-  runs_per_fault: 5
+  runs_per_fault: 9
 
   # Pass --include-ciso-finops to the aggregation pipeline
   include_ciso_finops: false

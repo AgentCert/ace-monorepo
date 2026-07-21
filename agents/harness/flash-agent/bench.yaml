@@ -30,7 +30,7 @@ trace_based:
   langfuse_base_url: http://127.0.0.1:4001
 
   # Comma-separated MCP endpoint URLs injected into scenario_data.json.
-  mcp_urls: "http://localhost:8186/mcp,http://localhost:31085/mcp"
+  mcp_urls: "http://localhost:18081/mcp,http://localhost:31085/mcp"
 
   # Query passed to the agent as scan_query in scenario_data.json.
   scan_query: >-

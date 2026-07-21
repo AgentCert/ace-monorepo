@@ -187,8 +187,8 @@ def run_certifier(cfg: dict, metrics_dir: Path, output_dir: Path,
     log("Running certifier pipeline (Phase 2→3→4) …")
     result = subprocess.run(
         [str(python), "-m", "main.cli.run_aggregation_and_certification_pipeline",
-         "--metrics-dir", str(metrics_dir),
-         "--output-dir", str(output_dir),
+         "--metrics-dir", str(metrics_dir.resolve()),
+         "--output-dir", str(output_dir.resolve()),
          "--agent-id", agent_id,
          "--agent-name", agent_name,
          "--runs-per-fault", str(runs_per_fault),
@@ -1047,11 +1047,19 @@ def run_trace_based_pipeline(cfg: dict, harness_dir: Path, output_dir: Path,
             log(f"    trace_id={trace_id} — running Phase 0+1")
             phase01_dir = metrics_dir / "phase01" / fault_name
             phase01_dir.mkdir(parents=True, exist_ok=True)
+            # Pass all known IDs explicitly so the certifier can use direct
+            # trace_id lookup.  agent-sidecar traces set experiment_run_id
+            # (= trace_id) but never experiment_id; the metadata fallback
+            # alone would fail to find the trace.
             phase01_result = subprocess.run(
                 [str(certifier_python(cfg)),
                  str(REPO / "scripts" / "run_certification.py"),
-                 "--trace-id", trace_id,
-                 "--workspace", str(phase01_dir),
+                 "--trace-id",    trace_id,
+                 "--agent-id",    cfg.get("agent_id", ""),
+                 "--agent-name",  cfg.get("agent_name", ""),
+                 "--experiment-id", fault_name,
+                 "--run-id",      trace_id,
+                 "--workspace",   str(phase01_dir),
                  "--skip-cert"],
                 capture_output=True, text=True,
             )

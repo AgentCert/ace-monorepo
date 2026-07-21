@@ -98,16 +98,13 @@ def _resolve_ids_from_trace_id(trace_id: str) -> dict:
         sys.exit(f"ERROR: Langfuse trace lookup failed for {trace_id}: {exc}")
 
     md = data.get("metadata") or {}
-    ids = {
-        "agent_id":       md.get("agent_id"),
+    # Return partial data — caller merges with CLI overrides and checks completeness.
+    return {
+        "agent_id":       md.get("agent_id") or "",
         "agent_name":     md.get("agent_name") or "unknown",
-        "experiment_id":  md.get("experiment_id"),
-        "run_id":         md.get("experiment_run_id") or md.get("run_id"),
+        "experiment_id":  md.get("experiment_id") or "",
+        "run_id":         md.get("experiment_run_id") or md.get("run_id") or "",
     }
-    missing = [k for k, v in ids.items() if k != "agent_name" and not v]
-    if missing:
-        sys.exit(f"ERROR: trace {trace_id} metadata is missing required keys: {missing}")
-    return ids
 
 
 # ── Pipeline driver ──────────────────────────────────────────────────
@@ -144,7 +141,13 @@ async def _run_pipeline(args: argparse.Namespace) -> int:
 
     # ─── Phase 0+1: trace acquisition + bucketing + extraction ──────
     print("\n[Phase 0+1] Acquiring trace from Langfuse")
-    src = LangfuseTraceSource(type="langfuse", page_size=50, max_pages=10,
+    # When trace_id is given (flash-agent / agent-sidecar traces), use direct
+    # point-lookup rather than metadata-filter search.  agent-sidecar traces tag
+    # experiment_run_id but not experiment_id, so the metadata-filter path always
+    # returns empty results for them.
+    direct_trace_id = getattr(args, "trace_id", "") or ""
+    src = LangfuseTraceSource(type="langfuse", trace_id=direct_trace_id,
+                              page_size=50, max_pages=10,
                               include_observations=True)
     try:
         trace_path, n = await TraceService().acquire_trace(
@@ -269,14 +272,19 @@ def _parse_args() -> argparse.Namespace:
 
     if args.trace_id:
         ids = _resolve_ids_from_trace_id(args.trace_id)
-        # Fill in any unprovided value from the trace metadata; explicit CLI flags win.
+        # CLI flags override trace metadata; metadata fills in what CLI did not provide.
         args.agent_id      = args.agent_id      or ids["agent_id"]
         args.agent_name    = args.agent_name    or ids["agent_name"]
         args.experiment_id = args.experiment_id or ids["experiment_id"]
-        args.run_id        = args.run_id        or ids["run_id"]
+        # run_id falls back to the trace_id itself: for agent-sidecar traces the
+        # notify_id IS the Langfuse trace_id AND the run_id simultaneously.
+        args.run_id        = args.run_id        or ids["run_id"] or args.trace_id
     elif not (args.agent_id and args.experiment_id and args.run_id):
         p.error("supply either --trace-id, or all three of "
                 "--agent-id / --experiment-id / --run-id.")
+    if args.trace_id and not all([args.agent_id, args.experiment_id, args.run_id]):
+        missing = [k for k, v in {"agent_id": args.agent_id, "experiment_id": args.experiment_id, "run_id": args.run_id}.items() if not v]
+        p.error(f"--trace-id given but these IDs could not be resolved (supply them explicitly): {missing}")
 
     args.agent_name = args.agent_name or "unknown"
     return args

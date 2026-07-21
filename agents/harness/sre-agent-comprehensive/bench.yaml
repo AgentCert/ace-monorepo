@@ -42,7 +42,10 @@ itbench_sre:
   # Per-scenario timeout — generous to allow the 9-phase protocol to complete.
   per_scenario_timeout_s: 900
 
+  # Number of successful runs to collect per fault before moving on.
+  runs_per_fault: 5
+
 # --- Certifier ---
 certifier:
   venv: .venv-certifier
-  runs_per_fault: 30
+  runs_per_fault: 5

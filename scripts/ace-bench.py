@@ -893,7 +893,7 @@ def run_trace_based_pipeline(cfg: dict, harness_dir: Path, output_dir: Path,
     """Run the trace-based pipeline (LitmusChaos fault injection + Langfuse traces).
 
     Requires:
-      - Running k3s cluster with LitmusChaos installed
+      - Running Kubernetes cluster (KinD or k3s) with LitmusChaos installed
       - Langfuse service reachable at trace_based.langfuse_base_url
       - ChaosExperiment + ChaosEngine YAML files in trace_based.engines_dir
 
@@ -928,22 +928,40 @@ def run_trace_based_pipeline(cfg: dict, harness_dir: Path, output_dir: Path,
     if not resume:
         results_file.write_text("")
 
-    done = {r["fault"]: r for r in load_results(results_file)
-            if r.get("status") == "success"}
+    # One stable session ID for this entire benchmarking run so all per-fault
+    # per-run Langfuse traces appear together under a single Langfuse session.
+    import uuid as _uuid_mod
+    session_id_file = output_dir / "benchmark_session_id.txt"
+    if resume and session_id_file.exists():
+        benchmark_session_id = session_id_file.read_text().strip()
+    else:
+        benchmark_session_id = str(_uuid_mod.uuid4())
+        session_id_file.write_text(benchmark_session_id)
+    log(f"benchmark session_id={benchmark_session_id}")
+
+    repeat_per_fault = tb_cfg.get("repeat_per_fault", 1)
+
+    done_counts: dict[str, int] = {}
+    for r in load_results(results_file):
+        if r.get("status") == "success":
+            fn = r.get("fault", "")
+            done_counts[fn] = done_counts.get(fn, 0) + 1
 
     engine_yamls = sorted(engines_dir.glob("engine-*.yaml"))
     if runs_override:
         engine_yamls = engine_yamls[:runs_override]
 
-    log(f"trace_based: {len(engine_yamls)} fault engines found under {engines_dir.name}")
+    log(f"trace_based: {len(engine_yamls)} fault engines found under {engines_dir.name}, "
+        f"{repeat_per_fault} run(s) each")
 
     # Import certifier Phase 0+1 runner
     sys.path.insert(0, str(CERTIFIER_DIR))
 
     for engine_yaml in engine_yamls:
         fault_name = engine_yaml.stem.removeprefix("engine-")
-        if fault_name in done:
-            log(f"SKIP {fault_name}")
+        n_done = done_counts.get(fault_name, 0)
+        if n_done >= repeat_per_fault:
+            log(f"SKIP {fault_name} ({n_done}/{repeat_per_fault} runs done)")
             continue
 
         rbac_yaml = engines_dir / f"rbac-{fault_name}.yaml"
@@ -971,117 +989,126 @@ def run_trace_based_pipeline(cfg: dict, harness_dir: Path, output_dir: Path,
             engine_obj_name = fault_name
             engine_ns = "litmus"
 
-        run_id = uuid.uuid4().hex[:12]
-        run_dir = workdir / f"{fault_name}-{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        t0 = time.time()
-        log(f"  fault: {fault_name}")
+        for run_idx in range(n_done, repeat_per_fault):
+            run_id = uuid.uuid4().hex[:12]
+            run_dir = workdir / f"{fault_name}-{run_id}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            t0 = time.time()
+            log(f"  fault: {fault_name} (run {run_idx + 1}/{repeat_per_fault})")
 
-        # Install ChaosExperiment CRD (itbench faults need this; kubernetes/
-        # faults already have theirs in the cluster).
-        if fault_crd is not None:
-            _r = subprocess.run(
-                ["kubectl", "apply", "-n", engine_ns, "-f", str(fault_crd)],
-                capture_output=True,
-            )
-            if _r.returncode != 0:
-                log(f"  WARN: fault.yaml apply failed for {fault_name}: "
-                    f"{_r.stderr.decode(errors='replace')[-200:]}")
+            # Install ChaosExperiment CRD (itbench faults need this; kubernetes/
+            # faults already have theirs in the cluster).
+            if fault_crd is not None:
+                _r = subprocess.run(
+                    ["kubectl", "apply", "-n", engine_ns, "-f", str(fault_crd)],
+                    capture_output=True,
+                )
+                if _r.returncode != 0:
+                    log(f"  WARN: fault.yaml apply failed for {fault_name}: "
+                        f"{_r.stderr.decode(errors='replace')[-200:]}")
 
-        # Apply RBAC + ChaosEngine
-        if rbac_yaml.exists():
-            subprocess.run(["kubectl", "apply", "-f", str(rbac_yaml)], capture_output=True)
-        subprocess.run(["kubectl", "apply", "-f", str(engine_yaml)], capture_output=True)
+            # Apply RBAC + ChaosEngine
+            if rbac_yaml.exists():
+                subprocess.run(["kubectl", "apply", "-f", str(rbac_yaml)], capture_output=True)
+            subprocess.run(["kubectl", "apply", "-f", str(engine_yaml)], capture_output=True)
 
-        # Settle pause: let the experiment pod start and inject the fault before
-        # the agent begins scanning.  Especially important for itbench faults
-        # (litmuschaos/k8s:latest image-pull + kubectl exec overhead).
-        fault_settle_s = tb_cfg.get("fault_settle_s", 15)
-        if fault_settle_s > 0:
-            log(f"    waiting {fault_settle_s}s for fault to take effect…")
-            time.sleep(fault_settle_s)
+            # Settle pause: let the experiment pod start and inject the fault before
+            # the agent begins scanning.  Especially important for itbench faults
+            # (litmuschaos/k8s:latest image-pull + kubectl exec overhead).
+            fault_settle_s = tb_cfg.get("fault_settle_s", 15)
+            if fault_settle_s > 0:
+                log(f"    waiting {fault_settle_s}s for fault to take effect…")
+                time.sleep(fault_settle_s)
 
-        # Run agent via harness
-        mcp_urls = tb_cfg.get("mcp_urls", "http://localhost:8186/mcp,http://localhost:31085/mcp")
-        scan_query = tb_cfg.get("scan_query",
-                                "Analyse Kubernetes cluster health and report all issues")
-        harness_extras = dict(env_vars)
-        harness_extras.update({
-            "EXPERIMENT_ID": fault_name,
-            "RUN_ID": run_id,
-            "_HARNESS_TIMEOUT_S": str(tb_cfg.get("agent_timeout_s", 600)),
-        })
-        scenario_data: dict[str, Any] = {
-            "mcp_urls": mcp_urls,
-            "model_alias": env_vars.get("MODEL_ALIAS", "qwen2.5-7b-instruct"),
-            "openai_base_url": env_vars.get("OPENAI_BASE_URL", "http://127.0.0.1:14000/v1"),
-            "scan_query": scan_query,
-        }
-        agent_rc, agent_log = invoke_harness(harness_dir, scenario_data,
-                                              harness_extras, run_dir)
-        (run_dir / "agent.log").write_text(agent_log)
+            # Run agent via harness
+            mcp_urls = tb_cfg.get("mcp_urls", "http://localhost:31086/mcp,http://localhost:31085/mcp")
+            scan_query = tb_cfg.get("scan_query",
+                                    "Analyse Kubernetes cluster health and report all issues")
+            # Pre-generate NOTIFY_ID here so the sidecar uses the same trace_id
+            # we record in results (harness falls back to its own UUID if unset).
+            notify_id = str(_uuid_mod.uuid4())
+            harness_extras = dict(env_vars)
+            harness_extras.update({
+                "EXPERIMENT_ID": fault_name,
+                "RUN_ID": run_id,
+                "NOTIFY_ID": notify_id,
+                "SESSION_ID": benchmark_session_id,
+                "WORKFLOW_NAME": fault_name,
+                "_HARNESS_TIMEOUT_S": str(tb_cfg.get("agent_timeout_s", 600)),
+            })
+            scenario_data: dict[str, Any] = {
+                "mcp_urls": mcp_urls,
+                "model_alias": env_vars.get("MODEL_ALIAS", "qwen2.5-7b-instruct"),
+                "openai_base_url": env_vars.get("OPENAI_BASE_URL", "http://127.0.0.1:14000/v1"),
+                "scan_query": scan_query,
+            }
+            agent_rc, agent_log = invoke_harness(harness_dir, scenario_data,
+                                                  harness_extras, run_dir)
+            (run_dir / "agent.log").write_text(agent_log)
 
-        # Extract Langfuse trace_id from agent log
-        trace_id = _extract_trace_id(agent_log)
+            # Extract Langfuse trace_id from agent log
+            trace_id = _extract_trace_id(agent_log)
 
-        # Wait for ChaosEngine to complete before cleanup.  Use the engine's own
-        # metadata.name (may differ from fault_name, e.g. -r1 suffix) and the
-        # correct namespace (otel-demo for all .tmp/mass-execution engines).
-        _wait_chaos_engine_complete(engine_obj_name, namespace=engine_ns, timeout_s=300)
-        subprocess.run(["kubectl", "delete", "-f", str(engine_yaml)],
-                       capture_output=True)
-        if rbac_yaml.exists():
-            subprocess.run(["kubectl", "delete", "-f", str(rbac_yaml)], capture_output=True)
-        # Remove the ChaosExperiment CRD we installed for this fault so the
-        # cluster is left clean for the next iteration.
-        if fault_crd is not None:
-            subprocess.run(
-                ["kubectl", "delete", "chaosexperiment", fault_name,
-                 "-n", engine_ns, "--ignore-not-found"],
-                capture_output=True,
-            )
+            # Wait for ChaosEngine to complete before cleanup.  Use the engine's own
+            # metadata.name (may differ from fault_name, e.g. -r1 suffix) and the
+            # correct namespace (otel-demo for all .tmp/mass-execution engines).
+            _wait_chaos_engine_complete(engine_obj_name, namespace=engine_ns, timeout_s=300)
+            subprocess.run(["kubectl", "delete", "-f", str(engine_yaml)],
+                           capture_output=True)
+            if rbac_yaml.exists():
+                subprocess.run(["kubectl", "delete", "-f", str(rbac_yaml)], capture_output=True)
+            # Remove the ChaosExperiment CRD we installed for this fault so the
+            # cluster is left clean for the next iteration.
+            if fault_crd is not None:
+                subprocess.run(
+                    ["kubectl", "delete", "chaosexperiment", fault_name,
+                     "-n", engine_ns, "--ignore-not-found"],
+                    capture_output=True,
+                )
 
-        dt = round(time.time() - t0, 1)
+            dt = round(time.time() - t0, 1)
 
-        if trace_id:
-            log(f"    trace_id={trace_id} — running Phase 0+1")
-            phase01_dir = metrics_dir / "phase01" / fault_name
-            phase01_dir.mkdir(parents=True, exist_ok=True)
-            # Pass all known IDs explicitly so the certifier can use direct
-            # trace_id lookup.  agent-sidecar traces set experiment_run_id
-            # (= trace_id) but never experiment_id; the metadata fallback
-            # alone would fail to find the trace.
-            phase01_result = subprocess.run(
-                [str(certifier_python(cfg)),
-                 str(REPO / "scripts" / "run_certification.py"),
-                 "--trace-id",    trace_id,
-                 "--agent-id",    cfg.get("agent_id", ""),
-                 "--agent-name",  cfg.get("agent_name", ""),
-                 "--experiment-id", fault_name,
-                 "--run-id",      trace_id,
-                 "--workspace",   str(phase01_dir),
-                 "--skip-cert"],
-                capture_output=True, text=True,
-            )
-            if phase01_result.returncode == 0:
-                # move *_metrics.json files up to metrics_dir
-                for mf in phase01_dir.rglob("*_metrics.json"):
-                    shutil.copy2(mf, metrics_dir / mf.name)
-                status = "success"
+            if trace_id:
+                log(f"    trace_id={trace_id} — running Phase 0+1")
+                phase01_dir = metrics_dir / "phase01" / fault_name
+                phase01_dir.mkdir(parents=True, exist_ok=True)
+                # Pass all known IDs explicitly so the certifier can use direct
+                # trace_id lookup.  agent-sidecar traces set experiment_run_id
+                # (= trace_id) but never experiment_id; the metadata fallback
+                # alone would fail to find the trace.
+                phase01_result = subprocess.run(
+                    [str(certifier_python(cfg)),
+                     str(REPO / "scripts" / "run_certification.py"),
+                     "--trace-id",    trace_id,
+                     "--agent-id",    cfg.get("agent_id", ""),
+                     "--agent-name",  cfg.get("agent_name", ""),
+                     "--experiment-id", fault_name,
+                     "--run-id",      trace_id,
+                     "--workspace",   str(phase01_dir),
+                     "--skip-cert"],
+                    capture_output=True, text=True,
+                )
+                if phase01_result.returncode == 0:
+                    # move *_metrics.json files up to metrics_dir, prefixed with
+                    # fault+run_id to avoid collisions across repeated runs
+                    for mf in phase01_dir.rglob("*_metrics.json"):
+                        dest_name = f"{fault_name}-{run_id}_{mf.name}"
+                        shutil.copy2(mf, metrics_dir / dest_name)
+                    status = "success"
+                else:
+                    status = "phase01_failed"
+                    log(f"    Phase 0+1 failed: {phase01_result.stderr[-200:]}")
             else:
-                status = "phase01_failed"
-                log(f"    Phase 0+1 failed: {phase01_result.stderr[-200:]}")
-        else:
-            status = "no_trace_id"
-            log("    no trace_id found in agent log")
+                status = "no_trace_id"
+                log("    no trace_id found in agent log")
 
-        record = {
-            "fault": fault_name, "run_id": run_id, "status": status,
-            "agent_status": "ok" if agent_rc == 0 else "agent_nonzero_exit",
-            "trace_id": trace_id, "duration_s": dt,
-        }
-        append_result(results_file, record)
-        log(f"  {status.upper()} {fault_name} in {dt}s")
+            record = {
+                "fault": fault_name, "run_id": run_id, "status": status,
+                "agent_status": "ok" if agent_rc == 0 else "agent_nonzero_exit",
+                "trace_id": trace_id, "duration_s": dt,
+            }
+            append_result(results_file, record)
+            log(f"  {status.upper()} {fault_name} in {dt}s")
 
     return metrics_dir
 

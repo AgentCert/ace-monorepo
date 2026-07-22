@@ -35,7 +35,10 @@ run:
     # Port: ACE_HARNESS_SIDECAR_PORT (default 24001). Override if that port is
     # in use — it must not collide with Langfuse (:4000/4001) or LiteLLM (:14000).
 
-    NOTIFY_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+    # Allow ace-bench.py to pre-set NOTIFY_ID so all LLM calls land in the
+    # correct pre-created Langfuse trace.  Falls back to a fresh UUID when
+    # invoked standalone.
+    NOTIFY_ID="${NOTIFY_ID:-$(python3 -c "import uuid; print(uuid.uuid4())")}"
 
     METADATA_DIR="${outdir}/sidecar-metadata"
     mkdir -p "${METADATA_DIR}"
@@ -43,6 +46,10 @@ run:
     printf "%s" "flash-agent-v1" > "${METADATA_DIR}/AGENT_ID"
     printf "%s" "Flash Agent"    > "${METADATA_DIR}/AGENT_NAME"
     printf "%s" "automation"     > "${METADATA_DIR}/AGENT_ROLE"
+    # SESSION_ID groups all per-run traces of one benchmarking process together.
+    # WORKFLOW_NAME (= fault name) provides a human-readable trace label.
+    [ -n "${SESSION_ID:-}"     ] && printf "%s" "${SESSION_ID}"     > "${METADATA_DIR}/SESSION_ID"
+    [ -n "${WORKFLOW_NAME:-}"  ] && printf "%s" "${WORKFLOW_NAME}"  > "${METADATA_DIR}/WORKFLOW_NAME"
 
     # proxy.py forwards to the LiteLLM base (scheme+host+port only, no /v1).
     SIDECAR_UPSTREAM=$(python3 -c "

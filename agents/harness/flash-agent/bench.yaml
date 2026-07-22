@@ -30,7 +30,7 @@ trace_based:
   langfuse_base_url: http://127.0.0.1:4001
 
   # Comma-separated MCP endpoint URLs injected into scenario_data.json.
-  mcp_urls: "http://localhost:18081/mcp,http://localhost:31085/mcp"
+  mcp_urls: "http://localhost:31086/mcp,http://localhost:31085/mcp"
 
   # Query passed to the agent as scan_query in scenario_data.json.
   scan_query: >-
@@ -44,7 +44,10 @@ trace_based:
   # Gives the litmuschaos/k8s:latest experiment pod time to pull and inject.
   fault_settle_s: 15
 
+  # Number of times to run each fault engine (for multi-run statistics).
+  repeat_per_fault: 5
+
 # --- Certifier ---
 certifier:
   venv: .venv-certifier
-  runs_per_fault: 1
+  runs_per_fault: 5

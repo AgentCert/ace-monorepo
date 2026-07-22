@@ -60,7 +60,7 @@ run:
 
     # ── Run CrewAI agent ─────────────────────────────────────────────────────
     # --network=host: reaches sidecar (:SIDECAR_PORT), LiteLLM (:14000),
-    #   and live MCP servers (:18081 kubernetes, :31085 prometheus).
+    #   and live MCP servers (:31086 kubernetes, :31085 prometheus).
     CODEX_WORKSPACE="${workspace}/codex-workspace"
     mkdir -p "${CODEX_WORKSPACE}"
 

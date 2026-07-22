@@ -47,6 +47,13 @@ nodes:
       - containerPort: 32090
         hostPort: 19090   # MinIO S3 API
         protocol: TCP
+      # ── Target-app MCP servers (otel-demo namespace) ─────────────────────
+      - containerPort: 31085
+        hostPort: 31085   # otel-demo Prometheus MCP server
+        protocol: TCP
+      - containerPort: 31086
+        hostPort: 31086   # otel-demo K8s MCP server
+        protocol: TCP
       # ── Monitoring / OIDC ─────────────────────────────────────────────────
       - containerPort: 31090
         hostPort: 31090   # Prometheus

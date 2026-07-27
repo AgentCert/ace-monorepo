@@ -101,7 +101,7 @@ ace-monorepo/
 │   ├── setup.sh                 # Interactive setup wizard: creates .env, generates Helm values, deploys
 │   ├── start-local-services.sh  # Idempotent local dev stack bringup (MongoDB, Langfuse, LiteLLM, Certifier)
 │   ├── build-and-push.sh        # Builds all 5 Docker images, pushes to Docker Hub
-│   ├── ace-bench.py             # Full benchmarking pipeline orchestrator (reads bench.yaml)
+│   ├── ace-bench.py             # Dev-tool: trace_based pipeline only (flash-agent local dev). Production orchestration uses LitmusChaos Argo Workflow.
 │   ├── run_certification.py     # End-to-end certifier runner (dev/CI, no FastAPI server needed)
 │   ├── dump_langfuse_trace.py   # Fetches Langfuse trace → raw_trace.json + trace_meta.json
 │   └── render_certification_pdf.py  # Standalone PDF render from existing certification.json
@@ -387,10 +387,11 @@ Every agent has under `agents/harness/<agent-name>/`:
 - `agent-harness.yaml` — How the harness invokes the agent (command, volumes, ports)
 - `setup.sh` — Per-agent environment setup (venv, pip deps, credentials)
 
-Invoke via:
+For flash-agent local dev, invoke via:
 ```bash
-python scripts/ace-bench.py <agent-name> [--runs N] [--resume] [--skip-certifier]
+python scripts/ace-bench.py flash-agent [--runs N] [--resume] [--skip-certifier]
 ```
+For all other agents, benchmarking is driven by the LitmusChaos Argo Workflow registered in AgentCert (canonical orchestrator).
 
 ---
 
@@ -536,7 +537,7 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 | `setup.sh` | `./scripts/setup.sh [--setup\|--restart]` — interactive wizard first time; `--restart` skips prompts |
 | `start-local-services.sh` | `./scripts/start-local-services.sh [--skip-mongo] [--skip-langfuse] [--only-certifier] [--restart] [--pull-certifier]` |
 | `build-and-push.sh` | `./scripts/build-and-push.sh [--env-file PATH]` — reads DOCKERHUB_USERNAME + DOCKERHUB_TOKEN from .env |
-| `ace-bench.py` | `python scripts/ace-bench.py <agent> [--runs N] [--runs-per-fault N] [--resume] [--skip-setup] [--skip-certifier]` |
+| `ace-bench.py` | **Dev-tool, trace_based only.** `python scripts/ace-bench.py flash-agent [--runs N] [--runs-per-fault N] [--resume] [--skip-setup] [--skip-certifier]`. Production runs use the LitmusChaos Argo Workflow. |
 | `run_certification.py` | `python scripts/run_certification.py --trace-id <UUID> [--workspace DIR] [--skip-cert] [--no-pdf] [--debug]` |
 | `dump_langfuse_trace.py` | `python scripts/dump_langfuse_trace.py --experiment-id <UUID> --run-id <UUID> [--output-dir DIR]` |
 
@@ -727,10 +728,11 @@ git submodule update --remote --merge
 ### Most Important Commands
 
 ```bash
-# Run full benchmarking pipeline for an agent
+# Canonical benchmarking: trigger experiment via LitmusChaos Argo Workflow
+# (AgentCert UI → Experiments → Run, or via GraphQL RunChaosWorkFlow mutation)
+
+# Dev-tool: run flash-agent trace_based pipeline locally (no LitmusChaos control plane)
 python scripts/ace-bench.py flash-agent --runs 30
-python scripts/ace-bench.py ciso-agent
-python scripts/ace-bench.py sre-agent --resume
 
 # Run certifier pipeline for a single trace (no FastAPI server needed)
 python scripts/run_certification.py --trace-id <LANGFUSE_UUID>

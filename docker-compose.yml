@@ -143,6 +143,8 @@ services:
     image: agentcert/agentcert-auth:latest
     container_name: agentcert-auth
     network_mode: host
+    extra_hosts:
+      - "mongodb:127.0.0.1"
     depends_on:
       mongo-init:
         condition: service_completed_successfully
@@ -165,6 +167,16 @@ services:
     image: agentcert/agentcert-graphql:latest
     container_name: agentcert-graphql
     network_mode: host
+    extra_hosts:
+      - "mongodb:127.0.0.1"
+      - "auth:127.0.0.1"
+      # graphql uses host networking, so Docker service names don't resolve via
+      # the embedded DNS. Map langfuse-web to the compose-bridge IP so Langfuse
+      # observability calls succeed without timing out.
+      - "langfuse-web:${LANGFUSE_WEB_COMPOSE_IP:-172.21.0.6}"
+      # certifier_app publishes its API on the host port (API_PORT, default 8000),
+      # so the host-networked graphql container reaches it via localhost.
+      - "certifier:127.0.0.1"
     depends_on:
       cluster-init:
         condition: service_completed_successfully
@@ -207,7 +219,11 @@ services:
       CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL:-http://localhost:8000}
       CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL:-http://localhost:8000}
       DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
+      AGENT_HUB_SOURCE_MODE: custom
       DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
+      APP_HUB_SOURCE_MODE: custom
+      DEFAULT_CHAOS_HUB_PATH: /srv/projects/ace-monorepo/chaos-charts-default/
+      HUB_SOURCE_MODE: custom
       PRE_CLEANUP_WAIT_SECONDS: ${PRE_CLEANUP_WAIT_SECONDS:-0}
       # On corporate networks the host has a custom CA bundle (SSL inspection
       # proxy) that the ubi9 base image doesn't know about.  Go checks
@@ -234,12 +250,11 @@ services:
       # Self-build dist (the repo ships no dist/); inline keeps it out of the
       # AgentCert submodule.
       dockerfile_inline: |
-        FROM node:24 AS builder
+        FROM node:20 AS builder
         WORKDIR /web
         COPY . .
-        RUN corepack enable || true
-        RUN yarn install --frozen-lockfile || yarn install
-        RUN yarn build
+        RUN npm install --legacy-peer-deps
+        RUN npm run build
         FROM registry.access.redhat.com/ubi8/ubi-minimal:8.10
         RUN microdnf update --nodocs \
             && microdnf module enable nginx:1.20 \
@@ -291,7 +306,7 @@ services:
       - litellm-data:/app/data
     command: --config /app/config.yaml --port 4000 --detailed_debug
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

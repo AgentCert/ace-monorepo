@@ -1,0 +1,43 @@
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+  
+    timestamp=$(date +%Y%m%d%H%M%S)
+    tmpdir=/tmp/agent/${timestamp}
+    mkdir -p ${tmpdir}
+
+    cat /tmp/agent/scenario_data.json > ${tmpdir}/scenario_data.json
+
+    jq -r .goal_template ${tmpdir}/scenario_data.json > ${tmpdir}/goal_template.txt
+    jq -r .vars.kubeconfig ${tmpdir}/scenario_data.json > ${tmpdir}/kubeconfig.yaml
+    jq -r .vars.ansible_ini ${tmpdir}/scenario_data.json > ${tmpdir}/ansible.ini
+    jq -r .vars.ansible_user_key ${tmpdir}/scenario_data.json > ${tmpdir}/user_key
+    chmod 600 ${tmpdir}/user_key
+    sed -i.bak -E "s|(ansible_ssh_private_key_file=\")[^\"]*|\1${tmpdir}/user_key|" ${tmpdir}/ansible.ini
+    
+    sed "s|{{ kubeconfig }}|${tmpdir}/kubeconfig.yaml|g" ${tmpdir}/goal_template.txt > ${tmpdir}/goal.txt
+    sed -i.bak -E "s|\{\{ path_to_inventory \}\}|${tmpdir}/ansible.ini|g" ${tmpdir}/goal.txt
+
+    echo "You can use \`${tmpdir}\` as your workdir." >> ${tmpdir}/goal.txt
+    source .venv/bin/activate
+
+    MANUAL="false"
+    if [ "$MANUAL" == "false" ]; then
+      timeout 200 python src/ciso_agent/main.py --goal "`cat ${tmpdir}/goal.txt`" --auto-approve -o ${tmpdir}/agent-result.json || true
+    else
+      FLAG_FILE="${tmpdir}/complete.flag"
+      while [ ! -f "$FLAG_FILE" ]; do
+        echo "Waiting for the user to complete the task..."
+        echo "To indicate completion, create the file: ${FLAG_FILE}"
+        echo "Required input data is located in: ${tmpdir}."
+        echo "Please place the agent output files in: ${tmpdir}."
+        echo ""
+        sleep 10
+      done
+    fi
+
+    tar -C ${tmpdir} -cf /tmp/agent/agent_data.tar .

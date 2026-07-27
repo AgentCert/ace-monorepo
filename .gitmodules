@@ -45,10 +45,3 @@
 	path = litmus-go
 	url = https://github.com/AgentCert/litmus-go.git
 	branch = master
-[submodule "agents/ciso-agent"]
-	path = agents/ciso-agent
-	url = https://github.com/itbench-hub/ITBench-CISO-CAA-Agent.git
-	branch = main
-[submodule "agents/sre-agent"]
-	path = agents/sre-agent
-	url = https://github.com/itbench-hub/ITBench-CISO-SRE-FinOps-Agent.git

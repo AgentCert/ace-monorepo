@@ -1,0 +1,617 @@
+# ITBench SRE Agent
+
+A modular framework for evaluating LLM agents on Site Reliability Engineering (SRE) incident diagnosis tasks using the [ITBench](https://github.com/itbench-hub/ITBench-Lite) benchmark.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           ITBench SRE Framework                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────┐                          ┌──────────────────────────┐    │
+│  │    Zero      │─────────────────────────▶│   ITBench Evaluations    │    │
+│  │ Agent Runner │                          │   (LLM-as-a-Judge)       │    │
+│  └──────────────┘                          └──────────────────────────┘    │
+│        │                                              │                     │
+│        ▼                                              ▼                     │
+│  ┌──────────────┐                          ┌──────────────────────────┐    │
+│  │   Codex CLI  │                          │   agent_output.json      │    │
+│  │  (OpenAI)    │                          │   evaluation_results.json│    │
+│  └──────────────┘                          └──────────────────────────┘    │
+│        │                                                                    │
+│        ▼                                                                    │
+│  ┌──────────────┐                                                          │
+│  │  SRE Tools   │                                                          │
+│  │ (MCP Server) │                                                          │
+│  └──────────────┘                                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+| Module | Description | Documentation |
+|--------|-------------|---------------|
+| **[Zero](./zero/)** | Thin wrapper around [Codex CLI](https://github.com/openai/codex) for running SRE agents | [zero/zero-config/README.md](./zero/zero-config/README.md) |
+| **[ITBench Evaluations](./ITBench-Evaluations/)** | LLM-as-a-Judge evaluator for agent outputs (git submodule) | [itbench-hub/ITBench-Evaluations](https://github.com/itbench-hub/ITBench-Evaluations) |
+| **[SRE Tools](./sre_tools/)** | MCP server with SRE diagnostic tools | [sre_tools/README.md](./sre_tools/README.md) |
+
+### SRE Tools Overview
+
+The SRE Tools module provides specialized MCP (Model Context Protocol) tools for incident investigation. These tools are automatically available to agents via the Zero runner.
+
+**Conditional MCP Loading**: Zero automatically loads only the MCP servers required by your prompt template. Prompt templates specify their required servers using YAML frontmatter (see [Prompt Templates](#prompt-templates)).
+
+| Tool | Description | Use Case |
+|------|-------------|----------|
+| **`alert_summary`** | High-level overview of all alerts | **Start here** - Get alert types, entities, duration, frequency |
+| **`alert_analysis`** | Detailed alert analysis with filters/grouping | Filter by severity, group by alertname, track duration |
+| **`event_analysis`** | Analyze K8s events | Find warnings, unhealthy pods, scheduling issues |
+| **`metric_analysis`** | Batch metric queries with derived metrics | CPU throttling %, memory utilization across pods |
+| **`get_metric_anomalies`** | Detect metric anomalies | Find CPU spikes, memory leaks, error rate increases |
+| **`get_trace_error_tree`** | Analyze distributed traces | Find where transactions fail in call chain |
+| **`build_topology`** | Build operational topology graph | Map service dependencies, K8s object relationships |
+| **`topology_analysis`** | Analyze entity dependencies | Find upstream/downstream services, call chains |
+| **`k8s_spec_change_analysis`** | Track K8s spec changes | Identify config drift, correlate incidents with changes |
+| **`get_context_contract`** | Aggregate full entity context | **All-in-one**: events, alerts, traces, metrics, dependencies |
+
+**Typical Investigation Flow:**
+```
+1. alert_summary → See what alerts are firing
+2. get_context_contract → Get full context for alerted entity
+3. topology_analysis → Understand dependencies
+4. metric_analysis → Check resource metrics
+5. k8s_spec_change_analysis → Look for recent changes
+```
+
+📖 **Full tool documentation**: [sre_tools/README.md](./sre_tools/README.md)
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.12 or 3.13 (avoid 3.14)
+- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+- [Node.js and npm](https://nodejs.org/) (required to install Codex CLI)
+- [Codex CLI](https://github.com/openai/codex) version **0.94.0** (REQUIRED)
+  - Install with: `npm install -g @openai/codex@0.94.0`
+  - ⚠️ **Later versions have OpenRouter compatibility issues** ([#12114](https://github.com/openai/codex/issues/12114))
+- **[Podman](https://podman.io/docs/installation) or [Docker](https://docs.docker.com/get-docker/)** (required for ClickHouse and Instana MCP servers)
+- **[OPA (Open Policy Agent)](https://www.openpolicyagent.org/)** (required for CISO compliance scenarios)
+  - macOS: `brew install opa`
+  - Linux: See [OPA installation guide](https://www.openpolicyagent.org/docs/latest/#running-opa)
+  - Windows: Download from [OPA releases](https://github.com/open-policy-agent/opa/releases)
+- API keys for your model provider (OpenRouter, Azure, etc.)
+
+> **Note:** The ClickHouse and Instana MCP servers run via Podman/Docker containers. We use the official [mcp-clickhouse](https://github.com/ClickHouse/mcp-clickhouse) and [mcp-instana](https://github.com/instana/mcp-instana) Docker images instead of Python packages to avoid dependency conflicts with `litellm[proxy]` (which requires `rich==13.7.1`, incompatible with mcp-instana's `rich>=13.9.4`).
+
+> **Container Runtime:** By default, the framework uses Podman. If you're using Docker instead, set `export CONTAINER_RUNTIME=docker` in your `.env` file (see [Environment Variables](#environment-variables) section below).
+
+### Installation
+
+```bash
+# Clone the repository with submodules
+git clone --recurse-submodules https://github.com/itbench-hub/ITBench-SRE-Agent.git
+cd ITBench-SRE-Agent
+
+# Or if already cloned, initialize submodules:
+# git submodule update --init --recursive
+
+# Install Codex CLI version 0.94.0 (REQUIRED - exact version)
+npm install -g @openai/codex@0.94.0
+
+# Install OPA (for CISO compliance scenarios)
+# macOS:
+brew install opa
+# Linux/Windows: see https://www.openpolicyagent.org/docs/latest/#running-opa
+
+# Install dependencies
+uv sync
+# or: python -m venv .venv && source .venv/bin/activate && pip install -e .
+
+# Download benchmark scenarios from Hugging Face
+# Start with a few scenarios to get started quickly (e.g., Scenario-2 and Scenario-5)
+uv run hf download \
+  ibm-research/ITBench-Lite \
+  --repo-type dataset \
+  --include "snapshots/sre/v0.2-*/Scenario-2/*" \
+  --include "snapshots/sre/v0.2-*/Scenario-5/*" \
+  --local-dir ./ITBench-Lite
+
+# Or download all SRE scenarios if you need the full benchmark:
+uv run hf download \
+  ibm-research/ITBench-Lite \
+  --repo-type dataset \
+  --include "snapshots/sre/v0.2-*/Scenario-*" \
+  --local-dir ./ITBench-Lite
+
+# Download FinOps cost anomaly scenarios:
+uv run hf download \
+  ibm-research/ITBench-Lite \
+  --repo-type dataset \
+  --include "snapshots/finops/v0.1-finops-anomaly/Scenario-*" \
+  --local-dir ./ITBench-Lite
+```
+
+### Environment Variables
+
+**Recommended**: Use the provided `.env.tmpl` template:
+
+```bash
+# Copy template and fill in your values
+cp .env.tmpl .env
+
+# Edit .env with your API keys and configuration
+# Then source it before running Zero
+source .env
+```
+
+The template includes configuration for:
+- **Container Runtime**: Choose between `podman` (default) or `docker` for MCP servers
+- **Model Provider API Keys**: OpenRouter (primary), with optional OpenAI and WatsonX
+- **ClickHouse MCP Server**: Database connection for retrieving logs, metrics, traces and Kubernetes events
+- **Kubernetes MCP Server**: Kubeconfig path for kubectl operations
+- **Judge**: LLM-as-a-Judge evaluator configuration (uses LiteLLM proxy by default)
+
+For detailed information about each variable, see the comments in [.env.tmpl](.env.tmpl).
+
+---
+
+## Running Components
+
+### 1. Running LiteLLM Proxy (Required)
+
+Before running agents, start the LiteLLM proxy in a separate terminal:
+
+```bash
+# Start LiteLLM proxy (runs on http://localhost:4000 by default)
+uv run litellm --config litellm_config.yaml
+
+# Or with a custom port
+uv run litellm --config litellm_config.yaml --port 8080
+```
+
+Keep this terminal running while executing agent runs. The proxy provides a unified OpenAI-compatible endpoint for all configured models, using the API keys set in the environment variables above.
+
+
+### 2. Run Agent Independently (Zero)
+
+Zero is a thin wrapper around Codex CLI that handles workspace setup, prompt templating, and configuration.
+
+```bash
+# Basic run with prompt template
+# Note: Use absolute paths for --read-only-dir and SNAPSHOT_DIRS should match
+# The prompt is loaded from AGENTS.md (created from the template), so we pass "Begin investigation"
+# Replace v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7 with your actual extracted directory name
+# Workspace follows the structure: outputs/agent_outputs/<incident_id>/<trial_number>
+uv run python -m zero --workspace ./outputs/agent_outputs/2/1 \
+    --read-only-dir $(pwd)/ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7/Scenario-2 \
+    --prompt-file ./zero/zero-config/prompts/sre_react_shell_investigation.md \
+    --variable "SNAPSHOT_DIRS=$(pwd)/ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7/Scenario-2" \
+    -- exec --full-auto -m "gemini-2.5-pro" "Begin investigation"
+
+# With additional user query appended to the base prompt (trial 2 of same scenario)
+uv run python -m zero --workspace ./outputs/agent_outputs/2/2 \
+    --read-only-dir $(pwd)/ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7/Scenario-2 \
+    --prompt-file ./zero/zero-config/prompts/sre_react_shell_investigation.md \
+    --variable "SNAPSHOT_DIRS=$(pwd)/ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7/Scenario-2" \
+    -- exec --full-auto -m "claude-4-5-opus-latest" \
+    "Focus on the payment service alerts"
+
+# Interactive mode (TUI) - useful for exploration and debugging
+# For quick testing without saving results, you can use /tmp/work instead
+uv run python -m zero --workspace ./outputs/agent_outputs/2/3 \
+    --read-only-dir $(pwd)/ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7/Scenario-2 \
+    -- -m "gemini-2.5-pro"
+```
+
+**FinOps Cost Anomaly Investigation:**
+
+```bash
+# Run FinOps agent on a cost anomaly scenario
+# The agent reads anomaly.json (date + account_id) and data.csv (hierarchical cost data)
+uv run python -m zero --workspace ./outputs/agent_outputs/finops/1/1 \
+    --read-only-dir $(pwd)/ITBench-Lite/snapshots/finops/v0.1-finops-anomaly/Scenario-1 \
+    --prompt-file ./zero/zero-config/prompts/finops_linear_analyses_shell_investigation.md \
+    --variable "SNAPSHOT_DIRS=$(pwd)/ITBench-Lite/snapshots/finops/v0.1-finops-anomaly/Scenario-1" \
+    -- exec --full-auto -m "gemini-2.5-pro" "Begin investigation"
+```
+
+📖 **Full documentation**: [zero/zero-config/README.md](./zero/zero-config/README.md)
+
+### Prompt Templates
+
+Prompt templates can specify which MCP servers they require using YAML frontmatter. Zero will automatically load only the specified servers.
+
+**Example: Offline Investigation** ([sre_react_shell_investigation.md](zero/zero-config/prompts/sre_react_shell_investigation.md))
+```markdown
+---
+mcp_servers:
+  - offline_incident_analysis
+---
+
+**Task**: Investigate incident from OFFLINE snapshot data...
+```
+
+**Example: FinOps Cost Anomaly** ([finops_linear_analyses_shell_investigation.md](zero/zero-config/prompts/finops_linear_analyses_shell_investigation.md))
+```markdown
+**Task**: Investigate cost anomalies from offline snapshot data...
+```
+No MCP servers required — the agent uses shell tools to analyze `anomaly.json` and `data.csv` directly.
+
+**Example: Online Investigation** ([sre_react_online.md](zero/zero-config/prompts/sre_react_online.md))
+```markdown
+---
+mcp_servers:
+  - offline_incident_analysis
+  - clickhouse
+  - kubernetes
+---
+
+**Task**: Investigate incident from LIVE data sources...
+```
+
+**How it works**:
+1. Agent queries ClickHouse and Kubernetes to collect live data
+2. Writes collected data to workspace files (matching snapshot format)
+3. Uses `offline_incident_analysis` tools on the collected data
+4. Generates diagnosis using the same workflow as offline scenarios
+
+**Note**: Templates without frontmatter will load all configured MCP servers (backward compatible).
+
+---
+
+### Setting Up MCP Servers (Docker/Podman)
+
+Some MCP servers run in Docker/Podman containers to avoid Python dependency conflicts with `litellm[proxy]`.
+
+#### Pull/Build MCP Server Images
+
+**ClickHouse MCP (pre-built image available):**
+```bash
+# Pull ClickHouse MCP server (for live environment metrics/logs)
+podman pull docker.io/mcp/clickhouse:latest
+# (or: docker pull docker.io/mcp/clickhouse:latest)
+```
+
+**Instana MCP (requires local build - no pre-built image):**
+```bash
+# Initialize the submodule (included in this repository)
+git submodule update --init --recursive
+
+# Build Instana MCP server (for Instana APM integration - optional)
+cd sre_tools/instana_mcp/mcp-instana
+podman build -t mcp-instana:latest .
+# (or: docker build -t mcp-instana:latest .)
+cd ../../..
+```
+
+**Verify images:**
+```bash
+podman images | grep -E "mcp/clickhouse|mcp-instana"
+# (or: docker images | grep -E "mcp/clickhouse|mcp-instana")
+```
+
+> **Note:** Examples use Podman (recommended). If using Docker instead, you have two options:
+> 1. **Preferred**: Set `export CONTAINER_RUNTIME=docker` in your `.env` file - the framework will automatically use Docker for MCP servers
+> 2. **Manual**: Replace `podman` with `docker` in all commands above, or create an alias: `alias podman=docker`
+
+#### How Zero Manages MCP Servers
+
+**Important:** Docker images must be pre-pulled before running Zero (see commands above). Zero does not automatically download images.
+
+Zero manages Docker-based MCP servers through the workspace `config.toml`:
+
+**Automatic Start via Codex**: When you run Zero with a prompt template that requires `clickhouse` or `instana_mcp` servers, the Codex CLI will:
+   - Start the container with appropriate environment variables (from your `.env` file)
+   - Connect to the MCP server via stdio
+   - Clean up the container when the agent finishes
+
+**ClickHouse MCP:**
+```bash
+# Start ClickHouse MCP server
+podman run -d --name mcp-clickhouse \
+  -p 3000:3000 \
+  -e CLICKHOUSE_HOST=$CLICKHOUSE_HOST \
+  -e CLICKHOUSE_PORT=$CLICKHOUSE_PORT \
+  -e CLICKHOUSE_USER=$CLICKHOUSE_USER \
+  -e CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD \
+  -e CLICKHOUSE_PROXY_PATH=$CLICKHOUSE_PROXY_PATH \
+  -e CLICKHOUSE_SECURE=$CLICKHOUSE_SECURE \
+  -e CLICKHOUSE_VERIFY=$CLICKHOUSE_VERIFY \
+  docker.io/mcp/clickhouse:latest
+# (or: use 'docker run' instead of 'podman run')
+
+# Check logs
+podman logs mcp-clickhouse
+# (or: docker logs mcp-clickhouse)
+
+# Stop when done
+podman stop mcp-clickhouse && podman rm mcp-clickhouse
+# (or: docker stop mcp-clickhouse && docker rm mcp-clickhouse)
+```
+
+**Instana MCP:**
+```bash
+# Note: Instana MCP manual start is NOT recommended as Codex expects stdio transport
+# This example shows HTTP mode (port 8080) which requires different client configuration
+
+# Start Instana MCP server in HTTP mode (for debugging/testing only)
+podman run -d --name mcp-instana \
+  -p 8080:8080 \
+  -e INSTANA_BASE_URL=$INSTANA_BASE_URL \
+  -e INSTANA_API_TOKEN=$INSTANA_API_TOKEN \
+  mcp-instana:latest
+  # Note: HTTP mode is the default; stdio mode cannot run in detached mode
+# (or: use 'docker run' instead of 'podman run')
+
+# Check logs
+podman logs mcp-instana
+# (or: docker logs mcp-instana)
+
+# Stop when done
+podman stop mcp-instana && podman rm mcp-instana
+# (or: docker stop mcp-instana && docker rm mcp-instana)
+```
+
+**Important:**
+- For ClickHouse: Manual start requires updating port numbers in [zero/zero-config/config.toml](zero/zero-config/config.toml)
+- For Instana: Manual start is NOT recommended - let Codex manage it in stdio mode automatically
+
+---
+
+### Running Against Live Environments
+
+To investigate incidents in live environments, you can use different observability backends:
+
+- **[sre_react_online.md](zero/zero-config/prompts/sre_react_online.md)** - ClickHouse + Kubernetes
+- **[sre_react_online_instana.md](zero/zero-config/prompts/sre_react_online_instana.md)** - Instana APM + Kubernetes
+
+**For ClickHouse setup:** Instructions for setting up a live ITBench environment with ClickHouse, see: https://github.com/itbench-hub/ITBench/tree/main/scenarios/sre
+
+**For Instana setup:** Use your existing Instana APM instance and configure the API credentials below.
+
+#### Prerequisites
+
+**Option 1: ClickHouse Backend**
+1. **ClickHouse database** with observability data (logs, metrics, traces, events)
+2. **Kubernetes cluster** with appropriate kubeconfig access
+3. **Podman or Docker** running (for ClickHouse MCP server)
+
+**Option 2: Instana Backend**
+1. **Instana APM instance** with API access
+2. **Kubernetes cluster** with appropriate kubeconfig access
+3. **Instana API token** (from Instana UI: Settings → API Tokens)
+
+#### Setup Steps
+
+1. **Configure environment variables** in `.env`:
+
+**For ClickHouse backend:**
+```bash
+# ClickHouse connection
+export CLICKHOUSE_HOST=localhost
+export CLICKHOUSE_PORT=80
+export CLICKHOUSE_USER=default
+export CLICKHOUSE_PASSWORD=your-password
+export CLICKHOUSE_PROXY_PATH=/clickhouse/clickhouse  # Optional: if behind reverse proxy
+export CLICKHOUSE_SECURE=false  # Set to 'true' for HTTPS
+export CLICKHOUSE_VERIFY=true   # SSL certificate verification
+
+# Kubernetes (optional - defaults to ~/.kube/config)
+export KUBECONFIG=/path/to/your/kubeconfig
+```
+
+**For Instana backend:**
+```bash
+# Instana APM connection
+export INSTANA_BASE_URL=https://your-instana-instance.instana.io
+export INSTANA_API_TOKEN=your-instana-api-token
+
+# Kubernetes (optional - defaults to ~/.kube/config)
+export KUBECONFIG=/path/to/your/kubeconfig
+```
+
+2. **Load environment variables**:
+
+```bash
+# Source the .env file to export variables
+source .env
+
+# Verify they're loaded
+echo "CLICKHOUSE_HOST: $CLICKHOUSE_HOST"
+echo "CLICKHOUSE_PROXY_PATH: $CLICKHOUSE_PROXY_PATH"
+echo "KUBECONFIG: $KUBECONFIG"
+```
+
+3. **Run Zero with online investigation prompt**:
+
+**For ClickHouse backend:**
+```bash
+# Run agent against live environment
+# Zero will automatically start the ClickHouse and Kubernetes MCP servers
+uv run python -m zero --workspace ./outputs/agent_outputs/23/1 \
+    --prompt-file ./zero/zero-config/prompts/sre_react_online.md \
+    -- exec --full-auto -m "gemini-2.5-pro" "Begin investigation"
+```
+
+**For Instana backend:**
+```bash
+# Run agent against live environment
+# Zero will automatically start the Instana and Kubernetes MCP servers
+uv run python -m zero --workspace ./outputs/agent_outputs/instana_outputs/1 \
+    --prompt-file ./zero/zero-config/prompts/sre_react_online_instana.md \
+    -- exec --full-auto -m "gemini-2.5-pro" "Begin investigation"
+```
+
+---
+
+### 3. Evaluate Agent Output
+
+Evaluate agent outputs against ground truth using the [ITBench Evaluations](./ITBench-Evaluations/) judge (LLM-as-a-Judge). For detailed documentation on ground-truth formats, agent output structure, available metrics, and CLI options, see the [ITBench Evaluations README](./ITBench-Evaluations/README.md).
+
+**SRE Evaluation:**
+
+```bash
+# Evaluate SRE agent outputs against ground truth
+# Make sure judge environment variables are set (see Environment Variables section)
+JUDGE_BASE_URL="https://openrouter.ai/api/v1" \
+JUDGE_API_KEY="$OPENROUTER_API_KEY" \
+JUDGE_MODEL="google/gemini-2.5-pro" \
+uv run itbench-eval \
+  --ground-truth ./ITBench-Lite/snapshots/sre/v0.2-B96DF826-4BB2-4B62-97AB-6D84254C53D7 \
+  --outputs ./outputs/agent_outputs \
+  --eval-criteria ROOT_CAUSE_ENTITY ROOT_CAUSE_REASONING \
+  --result-file ./outputs/evaluation_results.json
+```
+
+**FinOps Evaluation:**
+
+```bash
+# Evaluate FinOps agent outputs against ground truth
+JUDGE_BASE_URL="https://openrouter.ai/api/v1" \
+JUDGE_API_KEY="$OPENROUTER_API_KEY" \
+JUDGE_MODEL="google/gemini-2.5-pro" \
+uv run itbench-eval \
+  --domain finops \
+  --ground-truth ./ITBench-Lite/snapshots/finops/v0.1-finops-anomaly \
+  --outputs ./outputs/agent_outputs/finops \
+  --eval-criteria ROOT_CAUSE_RESOURCE \
+  --result-file ./outputs/finops_evaluation_results.json
+```
+
+---
+
+## Output Structure
+
+The framework uses a consolidated `outputs/` directory structure:
+
+```
+outputs/
+├── agent_outputs/              # All agent run workspaces
+│   └── <incident_id>/          # e.g., 2/ for Scenario-2
+│       └── <trial_number>/     # e.g., 1/, 2/, 3/
+│           ├── agent_output.json       # Agent's incident diagnosis
+│           ├── config.toml             # Codex configuration
+│           ├── AGENTS.md               # System prompt
+│           ├── agent_generated_code/   # Python scripts generated by agent
+│           └── traces/
+│               ├── traces.jsonl        # OTEL traces
+│               └── stdout.log          # Console output
+└── evaluation_results.json     # Judge scores and statistics
+```
+
+---
+
+## Metrics
+
+The judge evaluates agent outputs on metrics including root cause entity identification (precision/recall/F1), reasoning correctness, propagation chain scoring, fault localization, and proximity-based scoring. All metrics are produced as floats in [0,1].
+
+For the full list of metrics and their descriptions, see the [ITBench Evaluations README](./ITBench-Evaluations/README.md#metrics-covered).
+
+---
+
+## Project Structure
+
+```
+ITBench-SRE-Agent/
+├── README.md                      # This file
+├── model_leaderboard.toml         # Example configuration
+├── litellm_config.yaml            # LiteLLM proxy config
+├── pyproject.toml                 # Python project config
+│
+├── zero/                          # Agent runner (Codex wrapper)
+│   ├── cli.py                     # CLI entry point
+│   ├── config.py                  # Workspace setup
+│   ├── runner.py                  # Codex execution
+│   └── zero-config/               # Bundled config
+│       ├── README.md              # Zero documentation
+│       ├── config.toml            # Codex config template
+│       └── prompts/               # Prompt templates
+│           ├── sre_react_shell_investigation.md     # SRE incident diagnosis prompt
+│           └── finops_linear_analyses_shell_investigation.md  # FinOps cost anomaly prompt
+│
+├── ITBench-Evaluations/           # LLM-as-a-Judge (git submodule)
+│   ├── README.md                  # Evaluations documentation
+│   ├── pyproject.toml             # Package configuration
+│   └── itbench_evaluations/       # Evaluation toolkit
+│       ├── __main__.py            # `itbench-evaluations` CLI entrypoint
+│       ├── agent.py               # Judge workflow and evaluation logic
+│       ├── loader.py              # GT/output loaders
+│       ├── aggregator.py          # Statistics
+│       └── prompts/               # Judge prompts
+│
+├── sre_tools/                     # MCP tools for SRE
+│   ├── README.md                  # Full tool documentation
+│   ├── utils.py                   # Shared utilities
+│   └── offline_incident_analysis/ # Tool implementations
+│       └── tools.py               # All SRE analysis tools
+│
+└── ITBench-Lite/                  # Benchmark data (downloaded from HF)
+    └── snapshots/
+        ├── sre/...                # SRE incident diagnosis scenarios
+        └── finops/...             # FinOps cost anomaly scenarios
+```
+
+---
+
+## Development
+
+```bash
+# Install dev dependencies
+uv sync --extra dev
+
+# Format code
+uv run black .
+uv run isort .
+
+# Run single agent test
+uv run python -m zero --workspace /tmp/test --dry-run \
+    --prompt-file ./zero/zero-config/prompts/sre_react_shell_investigation.md \
+    --variable "SNAPSHOT_DIRS=/path/to/scenario" \
+    -- exec -m "gpt-5.2"
+```
+
+---
+
+## Troubleshooting
+
+### "401 Unauthorized" error from chatgpt.com
+
+When running Zero, you may see this error message:
+
+```
+ERROR codex_core::models_manager::manager: failed to refresh available models: unexpected status 401 Unauthorized: {"detail":"Unauthorized"}, url: https://chatgpt.com/backend-api/codex/models?client_version=0.91.0, request id: ...
+```
+
+**This error can be safely ignored.** It occurs because Codex CLI tries to fetch available models from ChatGPT's backend for the model picker UI, but this doesn't affect agent execution when:
+1. You specify a model explicitly with `-m "model-name"`
+2. Your LiteLLM proxy is running and configured correctly
+
+### Agent produces no output
+
+1. Check `traces/stdout.log` for errors
+2. Verify API key is set correctly
+3. Check `wire_api` setting matches model provider
+4. Try with `--verbose` flag
+
+### Judge gives 0 scores
+
+1. Verify `agent_output.json` has correct format
+2. Check `judge_output.json` for error messages
+3. Verify ground truth file exists
+
+### Leaderboard skips scenarios
+
+The leaderboard only skips scenarios where `agent_output.json` exists. Failed runs (missing output) will be re-run automatically.
+
+---
+
+## References
+
+- [ITBench Benchmark](https://github.com/itbench-hub/ITBench-Lite)
+- [Codex CLI](https://github.com/openai/codex)
+- [Codex Configuration](https://github.com/openai/codex/blob/main/docs/config.md)

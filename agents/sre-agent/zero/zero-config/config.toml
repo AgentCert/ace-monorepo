@@ -1,0 +1,124 @@
+# Zero Configuration
+# This file is copied to workspace/config.toml when running Zero
+
+profile = "sre_support_engineer"
+
+[profiles.sre_support_engineer]
+model_provider = "litellm"
+model_reasoning_effort = "low"
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+
+[profiles.sre_support_engineer.sandbox_workspace_write]
+writable_roots = []
+network_access = true  # Required for ClickHouse and Kubernetes MCP servers
+
+# ============================================================================
+# MCP Servers
+# ============================================================================
+
+[mcp_servers.offline_incident_analysis]
+command = "python"
+args = ["-m", "sre_tools.offline_incident_analysis"]
+
+[mcp_servers.offline_incident_analysis.env]
+PYTHONPATH = "python"
+
+# ClickHouse MCP Server (Official Python mcp-clickhouse via Docker)
+# Running in Docker container to avoid dependency conflicts with litellm[proxy]
+# Supports PROXY_PATH for ClickHouse servers behind reverse proxies
+# NOTE: Image must be pre-pulled: docker/podman pull docker.io/mcp/clickhouse:latest
+[mcp_servers.clickhouse]
+command = "${CONTAINER_RUNTIME}"
+args = [
+    "run", "--rm", "-i",
+    "-e", "CLICKHOUSE_HOST=${CLICKHOUSE_HOST}",
+    "-e", "CLICKHOUSE_PORT=${CLICKHOUSE_PORT}",
+    "-e", "CLICKHOUSE_USER=${CLICKHOUSE_USER}",
+    "-e", "CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}",
+    "-e", "CLICKHOUSE_PROXY_PATH=${CLICKHOUSE_PROXY_PATH}",
+    "-e", "CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE}",
+    "-e", "CLICKHOUSE_VERIFY=${CLICKHOUSE_VERIFY}",
+    "docker.io/mcp/clickhouse:latest"
+]
+
+# Note: ClickHouse credentials are substituted from environment variables
+# Set these in your .env file (see .env.tmpl):
+#   CLICKHOUSE_HOST (hostname only, e.g., elb.amazonaws.com)
+#   CLICKHOUSE_PORT (default: 8123 or 80 for HTTP)
+#   CLICKHOUSE_USER (default: default)
+#   CLICKHOUSE_PASSWORD (default: empty)
+#   CLICKHOUSE_PROXY_PATH (for reverse proxy paths, e.g., /clickhouse/clickhouse)
+#   CLICKHOUSE_SECURE (true/false for HTTPS, default: false)
+#   CLICKHOUSE_VERIFY (true/false for SSL verification, default: true)
+
+# Kubernetes MCP Server -- points at the REAL kubernetes-mcp-server already
+# deployed inside the otel-demo namespace (github.com/containers/kubernetes-mcp-server,
+# the same one flash-agent uses), not a locally-spawned generic uvx server.
+# It's a ClusterIP service (ports_list/get/log/exec, resources_*, events_list,
+# nodes_*), so it's only reachable from this host via a kubectl port-forward
+# kept running for the duration of the investigation -- see
+# scripts/start_live_mcp_portforwards.sh, run once before invoking zero with
+# a live/online prompt template.
+[mcp_servers.kubernetes]
+url = "http://127.0.0.1:18081/mcp"
+
+# Prometheus MCP Server -- points at the REAL prometheus-mcp-server already
+# deployed inside the otel-demo namespace (NodePort 31085, directly reachable,
+# no port-forward needed). This is otel-demo's actual live metrics backend;
+# the certifier/flash-agent stack has never had a ClickHouse instance
+# populated with otel-demo telemetry (the only ClickHouse in this whole
+# environment is Langfuse's own internal one, a completely different schema),
+# so live-mode investigations use this instead of the clickhouse MCP server
+# below.
+[mcp_servers.prometheus]
+url = "http://127.0.0.1:31085/mcp"
+
+# Instana MCP Server (Docker-based from instana/mcp-instana)
+# Running in Docker container to avoid dependency conflicts with litellm[proxy]
+# Provides observability and APM data for SRE investigations
+# IMPORTANT: Image must be built locally (no pre-built image available)
+# Repository included as submodule at: sre_tools/instana_mcp/mcp-instana
+# Build instructions:
+#   git submodule update --init --recursive
+#   cd sre_tools/instana_mcp/mcp-instana
+#   ${CONTAINER_RUNTIME} build -t mcp-instana:latest .
+[mcp_servers.instana]
+command = "${CONTAINER_RUNTIME}"
+args = [
+    "run", "--rm", "-i",
+    "-e", "INSTANA_BASE_URL=${INSTANA_BASE_URL}",
+    "-e", "INSTANA_API_TOKEN=${INSTANA_API_TOKEN}",
+    "mcp-instana:latest",
+    "--transport", "stdio"
+]
+
+# Note: Instana credentials are substituted from environment variables
+# Set these in your .env file (see .env.tmpl):
+#   INSTANA_BASE_URL (your Instana instance URL, e.g., https://example.instana.io)
+#   INSTANA_API_TOKEN (your API token from Instana UI: Settings → API Tokens)
+
+# ============================================================================
+# Model Provider - Local LiteLLM Proxy
+# ============================================================================
+# LiteLLM routes to OpenRouter (o3-mini, claude, gemini, etc.)
+# Run: uv run litellm --config config.yaml
+
+[model_providers.litellm]
+name = "LiteLLM Proxy"
+# Points at the already-running agentcert-stack LiteLLM proxy (Ollama-backed,
+# open-weight qwen2.5-7b-instruct model) instead of spinning up a second,
+# redundant LiteLLM instance on :4000 -- that port is already occupied by an
+# unrelated AgentLab Docker service on this host, confirmed via a port check.
+base_url = "${LITELLM_BASE_URL}"
+env_key = "SRE_AGENT_LITELLM_API_KEY"
+# "chat" made Codex 0.94.0 hit /chat/completions while still sending its
+# tool defs in Responses-API shape (top-level "name", not nested inside
+# "function") -- Ollama/LiteLLM's chat-completions layer silently ignored
+# these as malformed, so the agent only ever narrated actions in prose and
+# never actually called a tool. LiteLLM's /v1/responses endpoint correctly
+# parses that exact shape (verified directly) and returns real
+# "function_call" output, so route there instead.
+wire_api = "responses"
+max_output_tokens = 16384
+

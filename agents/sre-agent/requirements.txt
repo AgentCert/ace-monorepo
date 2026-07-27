@@ -1,0 +1,24 @@
+# ITBench SRE Agent Dependencies
+# Install with: pip install -r requirements.txt
+# Common
+litellm>=1.80.7
+litellm[proxy]>=1.80.7
+
+# Judge (LLM-as-a-Judge evaluation)
+openai>=1.0.0
+pyyaml>=6.0.0
+asteval>=1.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# MCP Tools (SRE analysis tools)
+mcp>=1.0.0
+pandas>=2.0.0
+drain3>=0.9.11  # Log pattern mining (Drain algorithm)
+opentelemetry-proto>=1.24.0  # OTLP protobuf decoding
+
+# Leaderboard (connection testing)
+requests>=2.28.0
+
+# Config parsing (tomllib is built-in for Python 3.11+)
+tomli>=2.0.0;python_version<"3.11"

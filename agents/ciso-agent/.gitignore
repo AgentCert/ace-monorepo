@@ -1,0 +1,12 @@
+.env
+venv
+.venv
+__pycache__/
+
+poetry.lock
+policy_report_summary.txt
+report.md
+run_result.txt
+fix_policy_report.md
+playbook.yml
+graph.png

@@ -1777,3 +1777,133 @@ logged; the pipeline continues regardless. If the ChaosResult CR has already bee
 collected (unlikely at this call site, but possible on a very fast cluster), the
 `kubectl patch` will return a non-zero exit code and log a warning; no other code is
 affected.
+
+---
+
+## 20. Infrastructure maintenance session — 2026-07-23
+
+### Summary of changes
+
+| # | Area | Resource / File | Change |
+|---|------|-----------------|--------|
+| 1 | K8s ConfigMap | `litellm-config` (ns: `ace`) | Added `qwen2.5:32b-instruct` as `gpt-4o` backend; changed `default_model` |
+| 2 | K8s Deployments | `certifier`, `web` (ns: `ace`) | Patched `imagePullPolicy` from `IfNotPresent` to `Always` |
+| 3 | K8s Deployments | `langfuse-web`, `langfuse-worker` (ns: `ace`) | Rolled out to pull newer `langfuse/langfuse:3` / `langfuse/langfuse-worker:3` images |
+| 4 | K3s Node | Docker daemon image store | Purged redundant Docker images to resolve disk-pressure taint |
+| 5 | K8s / MongoDB | MongoDB replica set (ns: `ace`) | Monitored self-recovery of RS PRIMARY after disk-pressure pod disruption |
+| 6 | Docker Compose | `agentcert-stack/litellm-setup/litellm_config.yaml` | Set `enable_pre_call_checks: false` under `router_settings` |
+| 7 | MongoDB | `auth.users` (mongodb-0, ns: `ace`) | Reset admin bcrypt hash + set `is_initial_login: false` to restore port-2001 login |
+
+---
+
+### Change 1 — LiteLLM ConfigMap: qwen2.5:32b-instruct as gpt-4o backend
+
+**Resource:** Kubernetes ConfigMap `litellm-config`, namespace `ace`
+
+**Motivation:** `qwen2.5-7b-instruct` was timing out during complex SRE benchmarks. The 32B model handles multi-step reasoning correctly within the RTX A6000's 49 GB VRAM (28.5 GB used).
+
+**Changes inside the ConfigMap:**
+- Added model alias `gpt-4o` → `ollama_chat/qwen2.5:32b-instruct` at `http://172.17.0.1:11434`, `num_ctx: 32768`
+- Added direct model name `qwen2.5-32b-instruct` → same backend
+- Changed `default_model` from `qwen2.5-7b-instruct` to `qwen2.5-32b-instruct`
+- Corrected 7B model description comment from "CPU" to "GPU"
+
+```bash
+kubectl create configmap litellm-config \
+  --from-file=config.yaml=litellm_config.yaml \
+  -n ace --dry-run=client -o yaml | kubectl apply -f -
+kubectl rollout restart deployment/litellm -n ace
+```
+
+---
+
+### Change 2 — imagePullPolicy patched to Always
+
+**Resources:** Deployments `certifier` and `web`, namespace `ace`
+
+**Motivation:** Helm installed `imagePullPolicy: IfNotPresent`, causing K8s to silently reuse stale cached images and ignore newer Docker Hub pushes.
+
+```bash
+kubectl patch deployment certifier -n ace \
+  --type='json' \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Always"}]'
+kubectl patch deployment web -n ace \
+  --type='json' \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Always"}]'
+```
+
+---
+
+### Change 3 — Langfuse image update
+
+**Resources:** Deployments `langfuse-web` and `langfuse-worker`, namespace `ace`
+
+**Motivation:** Running images were behind the current `langfuse/langfuse:3` and `langfuse/langfuse-worker:3` tags.
+
+```bash
+kubectl rollout restart deployment/langfuse-web deployment/langfuse-worker -n ace
+```
+
+**Side effect:** Pulling new images pushed disk usage from 87% → 94%, triggering the disk-pressure cascade described in Change 4.
+
+---
+
+### Change 4 — Disk-pressure resolution
+
+**Symptom:** Node taint `node.kubernetes.io/disk-pressure:NoSchedule`; all ace-namespace pods entered Pending or Error state.
+
+**Root cause:** New Langfuse image pulls into containerd's store (K3s runtime) pushed disk from 87% to 94%. The K3s node also had a separate Docker daemon image store (`dockerd`, not used by K3s at runtime) containing large redundant blobs.
+
+**Fix:** Pruned Docker daemon images (not the containerd store used by K3s). Removed: all `agentcert/*` images, `clickhouse`, `minio`, `postgres:17`, `redis:7`, `docker:dind`, `bitnami/kubectl`, `ubuntu`, `alpine`, `rancher/k3s`, all `localhost:5000/*` images.
+
+**Result:** Disk freed from 94% → 84% (69 GB free). Kubelet cleared the disk-pressure taint automatically within ~15 minutes.
+
+---
+
+### Change 5 — MongoDB replica-set recovery (monitoring only)
+
+**Symptom:** After pod restarts post-disk-pressure, `graphql` (Init:1/2) and `certifier` (Init:0/2) were stuck — `wait-for-mongodb` init containers looping with no PRIMARY available. The `mongodb-rs-init` Helm post-install Job had TTL-expired (600 s after Monday's initial install) and could not re-run.
+
+**Action:** No manual intervention. Monitored RS state. MongoDB self-elected PRIMARY at ~07:18 UTC (term 3). Both pods then progressed to Running without data loss.
+
+---
+
+### Change 6 — Docker Compose LiteLLM: disable background health checks
+
+**File:** `agentcert-stack/litellm-setup/litellm_config.yaml`
+
+```yaml
+# router_settings section — before / after
+router_settings:
+-  enable_pre_call_checks: true
++  enable_pre_call_checks: false   # Disabled: with callbacks: ["langfuse"], every
++                                  # background health probe (every ~5 min) is logged
++                                  # as a spurious trace tagged litellm-internal-health-check.
+```
+
+**Motivation:** In LiteLLM v1.82.0, `enable_pre_call_checks: true` starts a background scheduler pinging all configured models every ~5 minutes. With `callbacks: ["langfuse"]` set, each probe was recorded in the Docker Compose Langfuse instance (port 4001) as a trace tagged `litellm-internal-health-check`. With no benchmarking running, **15,448 spurious traces** had accumulated. Reactive failure handling (`allowed_fails: 3`, `cooldown_time: 60`) remains in place.
+
+```bash
+docker restart litellm-proxy
+```
+
+**Verified:** Zero `litellm-internal-health-check` traces in Langfuse after restart.
+
+---
+
+### Change 7 — Admin password reset (port-2001 login)
+
+**Context:** After Monday's Helm install, the LitmusChaos web UI (port 2001) forces a mandatory first-login password change. The user changed the default "litmus" password during that flow. The new password was not recorded, and a disk-pressure event caused auth-pod restarts, making the login permanently inaccessible.
+
+**Root cause analysis:**
+- Auth service: Go/Gin binary at `:3000`, uses `golang.org/x/crypto/bcrypt.CompareHashAndPassword`
+- MongoDB collection: `auth.users` on `mongodb-0` (namespace `ace`), database `auth`
+- `validatedAdminSetup()` in `api/main.go` only creates the admin user if missing — it never updates the password
+
+**Fix applied:**
+1. Generated a $2a$ bcrypt hash (cost=8) of "litmus" using Python `bcrypt`
+2. Updated `auth.users` via `mongosh` direct write to set `password` to the new hash
+3. Set `is_initial_login: false` to prevent the UI from forcing another mandatory change
+4. Verified: `POST /auth/login` via port-2001 nginx proxy returns HTTP 200 with a valid JWT
+
+**Note on routing:** The auth service's Gin router registers `/login` (no prefix). The nginx config on the web pod proxies `location /auth/` → `http://auth:3000/` (strips prefix). Requests sent directly to the auth NodePort at `/auth/login` hit Gin's NoRoute handler (which includes JwtMiddleware) and receive 401 — this is expected and not a bug.

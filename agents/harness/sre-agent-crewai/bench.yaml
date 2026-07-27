@@ -1,6 +1,11 @@
 agent_id: sre-agent-crewai-v1
 agent_name: SRE Incident Diagnosis Agent (CrewAI/Qwen)
-pipeline: itbench_sre
+# Pipeline: itbench_sre has been retired from ace-bench.py.
+# sre-agent-crewai is now orchestrated exclusively via the LitmusChaos Argo
+# Workflow. To run a benchmark: register sre-agent-crewai in AgentCert (Steps
+# 2a-2d of the migration plan) and trigger the workflow from the AgentCert UI.
+pipeline: litmus  # placeholder — ace-bench.py no longer drives this agent
+
 env_file: .tmp/sre-agent-qwen-trial/sre-agent-qwen.env
 
 itbench_sre:

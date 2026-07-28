@@ -17,7 +17,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
-EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
@@ -38,16 +37,13 @@ done
 unset _arg
 
 # --- prep .env -------------------------------------------------------------
-if [[ ! -f "${EXAMPLE_FILE}" ]]; then
-    echo "ERROR: ${EXAMPLE_FILE} not found — run from a full checkout." >&2
+# .env must already exist (created by apply-cluster-prereqs.sh)
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "ERROR: ${ENV_FILE} not found." >&2
+    echo "       Run 'scripts/apply-cluster-prereqs.sh' first (it creates .env from .env.example)." >&2
     exit 1
 fi
-if [[ ! -f "${ENV_FILE}" ]]; then
-    cp "${EXAMPLE_FILE}" "${ENV_FILE}"
-    ok "Created .env from .env.example"
-else
-    ok "Using existing .env (press Enter at each prompt to keep current values)"
-fi
+ok "Using existing .env (press Enter at each prompt to keep current values)"
 
 # current value of KEY in .env (empty if unset)
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
@@ -196,14 +192,20 @@ CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/cloud/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
-# --- Corporate proxy CA certificate ----------------------------------------
-echo -e "${BOLD}4) Corporate proxy CA certificate${NC} ${DIM}(needed for git clone inside containers on proxy networks)${NC}"
-echo -e "   ${DIM}Leave blank to use the host system bundle (/etc/ssl/certs/ca-certificates.crt).${NC}"
-CUSTOM_CA_CERT_PATH="$(ask CUSTOM_CA_CERT_PATH 'Path to root CA cert file (.pem/.crt, Enter to skip)')"
-CUSTOM_CA_CERT_PATH="$(echo "${CUSTOM_CA_CERT_PATH}" | tr -d '[:space:]')"
-if [[ -n "${CUSTOM_CA_CERT_PATH}" && ! -f "${CUSTOM_CA_CERT_PATH}" ]]; then
-    warn "File not found: ${CUSTOM_CA_CERT_PATH} — will fall back to host bundle at deploy time."
-    CUSTOM_CA_CERT_PATH=""
+# --- Section 4: JFrog Registry credentials --------------------------------
+echo -e "${BOLD}4) JFrog Artifactory credentials${NC} ${DIM}(for pulling images from infyartifactory.jfrog.io)${NC}"
+# Read from env vars first, then .env file — no interactive prompt here.
+# apply-cluster-prereqs.sh will prompt if still missing.
+JFROG_USER="${JFROG_USER:-$(cur JFROG_USER)}"
+JFROG_TOKEN="${JFROG_TOKEN:-$(cur JFROG_TOKEN)}"
+
+# Log in to JFrog immediately so the session persists for the entire setup
+if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+    echo "${JFROG_TOKEN}" | docker login infyartifactory.jfrog.io -u "${JFROG_USER}" --password-stdin 2>&1 \
+        && ok "Logged in to JFrog (infyartifactory.jfrog.io)" \
+        || warn "JFrog docker login failed — image pushes may fail later."
+else
+    echo -e "   ${DIM}JFROG_USER/JFROG_TOKEN not found in env or .env — will be prompted in apply-cluster-prereqs.sh${NC}"
 fi
 echo
 
@@ -328,8 +330,10 @@ if cb:
 # pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
 host_alt = ("|" + re.escape(cb)) if cb else ""
 sets["ALLOWED_ORIGINS"] = (
-    r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
+    r"^(http://|https://|ws://|wss://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
     r"|172\.[0-9]+\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+"
+    r"|100\.78\.[0-9]+\.[0-9]+|100\.104\.[0-9]+\.[0-9]+"
+    r"|[a-z0-9.-]+\.svc\.cluster\.local"
     + host_alt + r")(:[0-9]+|)$"
 )
 
@@ -592,6 +596,52 @@ k8s_env_patch() {
     ok "Patched .env with K8s service DNS names."
 }
 
+# Build and apply the ca-certs ConfigMap from the system CA bundle + any
+# corporate proxy certs pointed to by CORPORATE_CA_CERT_DIR in .env.
+# This ConfigMap is mounted into pods (graphql, etc.) that need to make
+# outbound HTTPS calls (e.g. cloning chaos-charts from GitHub).
+apply_ca_certs_configmap() {
+    local ns="$1"
+    local ca_dir
+    ca_dir="$(grep -m1 '^CORPORATE_CA_CERT_DIR=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true)"
+
+    local bundle="/tmp/ace-ca-bundle.pem"
+
+    # Start with the system CA bundle
+    if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+        cp /etc/ssl/certs/ca-certificates.crt "${bundle}"
+    else
+        : > "${bundle}"
+    fi
+
+    # Append corporate proxy certs if CORPORATE_CA_CERT_DIR is set
+    if [[ -n "${ca_dir}" && -d "${ca_dir}" ]]; then
+        local cert_count=0
+        for crt in "${ca_dir}"/*.crt "${ca_dir}"/*.pem; do
+            if [[ -f "${crt}" ]]; then
+                cat "${crt}" >> "${bundle}" 2>/dev/null || true
+                cert_count=$((cert_count + 1))
+            fi
+        done
+        if [[ ${cert_count} -gt 0 ]]; then
+            ok "Appended ${cert_count} corporate CA cert(s) from ${ca_dir}"
+        else
+            warn "CORPORATE_CA_CERT_DIR=${ca_dir} set but no .crt/.pem files found."
+        fi
+    fi
+
+    # Create/update the ConfigMap
+    if [[ -s "${bundle}" ]]; then
+        kubectl create configmap ca-certs -n "${ns}" \
+            --from-file=ca-certificates.crt="${bundle}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        ok "ca-certs ConfigMap created/updated in namespace '${ns}'."
+    else
+        warn "No CA bundle found — ca-certs ConfigMap not created."
+    fi
+    rm -f "${bundle}"
+}
+
 # Ensure the kind cluster exists and has the port mappings required for the
 # K8s deployment. Recreates the cluster if the config has changed.
 ensure_kind_cluster() {
@@ -799,6 +849,16 @@ if os.path.isfile(litellm_cfg):
     cfg = open(litellm_cfg).read()
     lines += ["", "litellm:", "  config: |"]
     lines += ["    " + l for l in cfg.splitlines()]
+# Add imageRegistry and chartsBranch from .env so values.yaml defaults can be overridden
+image_reg = seen.get('IMAGE_REGISTRY', '')
+charts_branch = seen.get('CHARTS_BRANCH', 'feature/docker-images-repository')
+if image_reg:
+    lines += ["", f"imageRegistry: '{image_reg}'"]
+if charts_branch:
+    lines += [f"chartsBranch: '{charts_branch}'"]
+pull_secret = seen.get('IMAGE_PULL_SECRET_NAME', 'jfrog-registry')
+if pull_secret:
+    lines += [f"imagePullSecretName: '{pull_secret}'"]
 open(out_path, "w").write("\n".join(lines) + "\n")
 PY
     ok "Generated values-env.yaml (env + litellm config)."
@@ -839,10 +899,8 @@ helm_deploy() {
     echo -e "${DIM}Generating values-env.yaml from .env…${NC}"
     generate_helm_values_env
 
-    # 4b) Create namespace + CA cert ConfigMap before helm installs pods
-    kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    echo -e "${DIM}Creating/updating ace-ca-certs ConfigMap…${NC}"
-    create_ca_configmap "${NS}"
+    # 4b) ca-certs ConfigMap — run ./scripts/apply-cluster-prereqs.sh separately (needs sudo)
+    # Skipped here to avoid hanging on sudo password prompt.
 
     # 5) Run helm — it owns namespace, secret, and all workloads
     local helm_cmd=(
@@ -860,7 +918,122 @@ helm_deploy() {
 
     echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
     echo
-    "${helm_cmd[@]}"
+    "${helm_cmd[@]}" || warn "Helm install timed out — will continue setup (MongoDB RS likely needs init)."
+
+    # 5b) JFrog Registry — delegate to apply-cluster-prereqs.sh (single source of truth)
+    echo
+    # 5b) JFrog Registry — skip if already done by apply-cluster-prereqs.sh
+    echo
+    if kubectl get secret "$( grep -m1 '^IMAGE_PULL_SECRET_NAME=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || echo jfrog-registry )" -n "${NS}" >/dev/null 2>&1; then
+        ok "JFrog registry secret already exists — skipping apply-cluster-prereqs.sh (run it manually to update)."
+    else
+        echo -e "${BOLD}Setting up JFrog registry credentials (cluster-wide)…${NC}"
+        if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+            export JFROG_USER JFROG_TOKEN
+            bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
+        else
+            bash "${REPO_ROOT}/scripts/apply-cluster-prereqs.sh"
+        fi
+    fi
+
+    # 5c) MongoDB RS initialization (localhost exception — no auth needed on fresh DB)
+    echo
+    echo -e "${DIM}Waiting for MongoDB pod to be ready…${NC}"
+    kubectl wait --for=condition=ready pod/mongodb-0 -n "${NS}" --timeout=120s 2>/dev/null || true
+    # Check if RS is already initialized
+    local rs_status
+    rs_status="$(kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval 'rs.status().ok' 2>/dev/null || echo 0)"
+    if [[ "$rs_status" != "1" ]]; then
+        echo -e "${DIM}Initializing MongoDB replica set…${NC}"
+        kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval '
+          rs.initiate({
+            _id: "rs0",
+            members: [{ _id: 0, host: "mongodb-0.mongodb-headless.'"${NS}"'.svc.cluster.local:27017" }]
+          })
+        ' 2>/dev/null || true
+        sleep 5
+        # Create admin user via localhost exception
+        kubectl exec mongodb-0 -n "${NS}" -- mongosh --quiet --eval '
+          db.getSiblingDB("admin").createUser({
+            user: "admin",
+            pwd: "1234",
+            roles: [{ role: "root", db: "admin" }]
+          })
+        ' 2>/dev/null || true
+        ok "MongoDB RS initialized + admin user created."
+    else
+        ok "MongoDB RS already initialized."
+    fi
+
+    # 5d) Brief pause for jfrog-secret-sync Deployment to complete its initial sync
+    sleep 5
+
+    # Resolve image registry once (used by all subsequent deploys)
+    local img_reg
+    img_reg="$(envval IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
+
+    # Ensure submodules are up-to-date (chart sources)
+    echo -e "${DIM}Syncing git submodules…${NC}"
+    ( cd "${REPO_ROOT}" && git submodule update --init --recursive 2>/dev/null ) || true
+
+    # 5e) sock-shop — NOT deployed here.
+    # It is automatically deployed by the install-application Argo workflow step
+    # when an experiment runs (via ChaosHub experiment template).
+    # Only pre-create the namespace + secrets so it's ready when the experiment runs.
+    echo
+    echo -e "${BOLD}Preparing sock-shop namespace (secrets only, no pods)…${NC}"
+    kubectl create namespace sock-shop --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl label namespace sock-shop app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
+    kubectl annotate namespace sock-shop meta.helm.sh/release-name=sock-shop --overwrite 2>/dev/null || true
+    kubectl annotate namespace sock-shop meta.helm.sh/release-namespace=sock-shop --overwrite 2>/dev/null || true
+    ok "sock-shop namespace ready (app will be deployed by experiment workflow)."
+
+    # 5f) Deploy litellm (standalone namespace)
+    echo
+    echo -e "${BOLD}Deploying litellm proxy…${NC}"
+    local LITELLM_DIR="${REPO_ROOT}/agent-charts/litellm"
+    if [[ -d "${LITELLM_DIR}" ]]; then
+        kubectl create namespace litellm --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        # Create litellm secrets from .env values
+        local az_key az_base az_model az_ver lm_master lf_pub lf_sec lf_host
+        az_key="$(envval AZURE_OPENAI_KEY)";       az_key="${az_key:-$(envval AZURE_OPENAI_API_KEY)}"
+        az_base="$(envval AZURE_OPENAI_ENDPOINT)"
+        az_model="$(envval AZURE_OPENAI_CHAT_DEPLOYMENT_NAME)"; az_model="${az_model:-gpt4o}"
+        az_ver="$(envval AZURE_OPENAI_API_VERSION)"; az_ver="${az_ver:-2024-12-01-preview}"
+        lm_master="sk-litellm-master-key"
+        lf_pub="$(envval LANGFUSE_PUBLIC_KEY)";    lf_pub="${lf_pub:-placeholder}"
+        lf_sec="$(envval LANGFUSE_SECRET_KEY)";    lf_sec="${lf_sec:-placeholder}"
+        lf_host="$(envval LANGFUSE_HOST)";         lf_host="${lf_host:-http://langfuse-web.ace.svc.cluster.local:3000}"
+        kubectl create secret generic litellm-secrets \
+            --namespace litellm \
+            --from-literal=AZURE_API_KEY="${az_key}" \
+            --from-literal=AZURE_API_BASE="${az_base}" \
+            --from-literal=AZURE_MODEL="${az_model}" \
+            --from-literal=AZURE_API_VERSION="${az_ver}" \
+            --from-literal=LITELLM_MASTER_KEY="${lm_master}" \
+            --from-literal=LANGFUSE_PUBLIC_KEY="${lf_pub}" \
+            --from-literal=LANGFUSE_SECRET_KEY="${lf_sec}" \
+            --from-literal=LANGFUSE_HOST="${lf_host}" \
+            --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        kubectl apply -f "${LITELLM_DIR}/configmap.yaml" >/dev/null
+        kubectl apply -f "${LITELLM_DIR}/deployment.yaml" >/dev/null
+        ok "litellm deployed in litellm namespace."
+    else
+        warn "agent-charts/litellm not found — skipping."
+    fi
+
+    # 5g) Flash-agent — NOT deployed here.
+    # It is automatically deployed by the install-agent Argo workflow step
+    # when an experiment runs (via ChaosHub experiment template).
+    # Deploying it at setup time would create it before sock-shop exists.
+
+    # 5h) Update fault registries
+    echo
+    echo -e "${BOLD}Updating chaos-chart image registries…${NC}"
+    if [[ -x "${REPO_ROOT}/scripts/update-all-registries.sh" ]]; then
+        "${REPO_ROOT}/scripts/update-all-registries.sh" || true
+        ok "Image registries updated."
+    fi
 
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -902,6 +1075,14 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
     echo -e "${CYAN}  Build & push selected images${NC}"
     echo -e "${CYAN}=======================================================${NC}"
     echo
+    # Resolve JFrog registry for tagging
+    img_reg="$(cur IMAGE_REGISTRY)"; img_reg="${img_reg:-infyartifactory.jfrog.io/docker-local}"
+    # Login to JFrog for push
+    if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+        echo "${JFROG_TOKEN}" | docker login infyartifactory.jfrog.io -u "${JFROG_USER}" --password-stdin 2>&1 \
+            && ok "Logged in to JFrog (infyartifactory.jfrog.io)" \
+            || warn "JFrog login failed — images won't be pushed to JFrog."
+    fi
     if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
         ok "Logged in to Docker Hub as ${DH_USER}"
         BUILD_FAILED=()
@@ -931,10 +1112,21 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
                 fi
             fi
             if docker push "${_img}:latest"; then
-                ok "  Pushed ${_img}:latest"
+                ok "  Pushed ${_img}:latest to Docker Hub"
             else
-                warn "  Push failed: ${_label}"
+                warn "  Push to Docker Hub failed: ${_label}"
                 BUILD_FAILED+=("${_label} (push)")
+            fi
+            # Also push to JFrog if credentials are available
+            if [[ -n "${JFROG_USER:-}" && -n "${JFROG_TOKEN:-}" ]]; then
+                local _jfrog_img="${img_reg}/${_img}"
+                docker tag "${_img}:latest" "${_jfrog_img}:latest"
+                if docker push "${_jfrog_img}:latest"; then
+                    ok "  Pushed ${_jfrog_img}:latest"
+                else
+                    warn "  Push to JFrog failed: ${_label}"
+                    BUILD_FAILED+=("${_label} (jfrog push)")
+                fi
             fi
         done
         echo

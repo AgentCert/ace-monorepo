@@ -77,49 +77,65 @@ At the deploy prompt the wizard asks how to apply: press **`k`** for `kubectl ap
 
 ## 3. Expose the Browser UIs (LoadBalancer)
 
-Patch the two browser-facing services to `LoadBalancer` type. AKS provisions an
-Azure Load Balancer with a public IP for each:
+Patch the two browser-facing services to `LoadBalancer` type.
+
+<div class="callout callout-warning">
+<span class="callout-title">Azure Policy — Internal Load Balancers only</span>
+Many AKS clusters have an Azure Policy (<code>azurepolicy-k8sazurev1loadbalancernopublic</code>)
+that blocks public LoadBalancers. If you see <em>"admission webhook
+validation.gatekeeper.sh denied the request"</em>, you must add the
+<code>azure-load-balancer-internal</code> annotation. The commands below include it.
+</div>
 
 ```bash
-kubectl patch svc web          -n ace -p '{"spec":{"type":"LoadBalancer"}}'
-kubectl patch svc langfuse-web -n ace -p '{"spec":{"type":"LoadBalancer"}}'
+kubectl patch svc web          -n ace -p '{"metadata":{"annotations":{"service.beta.kubernetes.io/azure-load-balancer-internal":"true"}},"spec":{"type":"LoadBalancer"}}'
+kubectl patch svc langfuse-web -n ace -p '{"metadata":{"annotations":{"service.beta.kubernetes.io/azure-load-balancer-internal":"true"}},"spec":{"type":"LoadBalancer"}}'
 ```
 
-Wait for the external IPs to be assigned (~1–2 min):
+Wait for the internal IPs to be assigned (~1–2 min):
 
 ```bash
 kubectl get svc -n ace web langfuse-web -w
 # NAME           TYPE           EXTERNAL-IP
-# web            LoadBalancer   <pending> → 20.x.x.x
-# langfuse-web   LoadBalancer   <pending> → 20.x.x.x
+# web            LoadBalancer   <pending> → 100.78.x.x
+# langfuse-web   LoadBalancer   <pending> → 100.78.x.x
 ```
+
+<div class="callout callout-info">
+<span class="callout-title">Internal IPs</span>
+With the internal annotation, AKS assigns a private IP from the VNet/subnet.
+Access these from your VM (which is on the same VNet) or via VPN/peering.
+</div>
 
 Once populated, the browser UIs are at:
 
 | Service | URL | Default login |
 |---|---|---|
-| AgentCert UI | `http://<web-external-ip>:32001` | `admin` / `litmus` |
-| Langfuse | `http://<langfuse-external-ip>:32400` | `admin@agentcert.local` / `agentcert-admin` |
+| AgentCert UI | `http://<web-internal-ip>:32001` | `admin` / `litmus` |
+| Langfuse | `http://<langfuse-internal-ip>:32400` | `admin@agentcert.local` / `agentcert-admin` |
+
+<div class="callout callout-warning">
+<span class="callout-title">GraphQL 403 after login — update ALLOWED_ORIGINS</span>
+The GraphQL service validates the browser's <code>Origin</code> header against
+<code>ALLOWED_ORIGINS</code>. By default it only allows <code>localhost</code> and
+<code>*.svc.cluster.local</code>. When you access the UI via the LoadBalancer IP,
+the origin won't match and all <code>/query</code> requests return <strong>403</strong>.<br><br>
+Fix: add the LoadBalancer IP to <code>ALLOWED_ORIGINS</code> in <code>.env</code>:
+<pre><code>ALLOWED_ORIGINS=^(http://|https://|)((localhost|host\.docker\.internal)|100\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+)(:[0-9]+|)$</code></pre>
+Then regenerate and redeploy:
+<pre><code>./scripts/setup.sh   # or helm upgrade</code></pre>
+The Helm template now reads <code>ALLOWED_ORIGINS</code> from the <code>ace-env</code>
+Secret, so <code>.env</code> changes take effect after redeploy.
+</div>
 
 <div class="callout callout-info">
 <span class="callout-title">Langfuse login — update NEXTAUTH_URL</span>
 Langfuse's Next.js auth validates the browser origin against <code>NEXTAUTH_URL</code>.
 The default is <code>http://localhost:4000</code>, which breaks login when accessed
-from a public IP. After getting the Langfuse external IP, update <code>.env</code>
+from the LoadBalancer IP. After getting the Langfuse IP, update <code>.env</code>
 and redeploy:
-<pre><code>NEXTAUTH_URL=http://&lt;langfuse-external-ip&gt;:32400</code></pre>
+<pre><code>NEXTAUTH_URL=http://&lt;langfuse-internal-ip&gt;:32400</code></pre>
 <pre><code>./scripts/setup.sh   # answer Y — recreates ace-env Secret and restarts langfuse-web</code></pre>
-</div>
-
-<div class="callout callout-warning">
-<span class="callout-title">⚠ These IPs are public</span>
-Restrict access via an Azure NSG on the AKS node pool:
-<pre><code>az network nsg rule create \
-  --resource-group &lt;node-rg&gt; --nsg-name &lt;aks-nsg&gt; \
-  --name AllowACEUI --priority 200 \
-  --source-address-prefixes &lt;your-ip&gt;/32 \
-  --destination-port-ranges 32001 32400 \
-  --access Allow --protocol Tcp</code></pre>
 </div>
 
 ### Internal services — port-forward on demand
@@ -175,6 +191,20 @@ kubeconfig with no exec dependency.
 ---
 
 ## Notes & Gotchas
+
+- **Corporate proxy / TLS inspection** — if pods fail with `x509: certificate
+  signed by unknown authority` when reaching GitHub or other external HTTPS
+  endpoints, your network uses a TLS-intercepting proxy (e.g. Zscaler, Infosys).
+  Set `CORPORATE_CA_CERT_DIR` in `.env` to the directory containing your proxy's
+  `.crt` files:
+  ```bash
+  # In .env:
+  CORPORATE_CA_CERT_DIR=/usr/local/share/ca-certificates
+  ```
+  Then re-run `./scripts/setup.sh` or `helm upgrade`. The setup script
+  automatically builds a combined CA bundle (system CAs + corporate certs) into
+  a `ca-certs` ConfigMap that is mounted into pods at `/certs/`. The cert files
+  may require `sudo` to read — the script handles this automatically.
 
 - **RBAC** — if you hit `clusterroles ... is forbidden` during a sock-shop install:
   ```bash

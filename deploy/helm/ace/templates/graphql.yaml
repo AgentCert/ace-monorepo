@@ -14,26 +14,31 @@ spec:
         app: graphql
     spec:
       serviceAccountName: graphql
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecretName }}
       initContainers:
         - name: clone-charts
-          image: alpine/git
+          image: {{ include "ace.image" (dict "img" .Values.images.alpineGit "reg" .Values.imageRegistry) }}
           command: [sh, -c]
           args:
             - |
-              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
-              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+              if [ -f /certs/ca-certificates.crt ]; then
+                git config --global http.sslCAInfo /certs/ca-certificates.crt
+              fi
+              git clone --depth 1 -b {{ .Values.chartsBranch | default "main" }} https://github.com/AgentCert/agent-charts.git /repo/agent-charts || true
+              git clone --depth 1 -b {{ .Values.chartsBranch | default "main" }} https://github.com/AgentCert/app-charts.git    /repo/app-charts || true
+              mkdir -p /repo/agent-charts/charts /repo/app-charts/charts
           env:
-            - name: GIT_SSL_CAINFO
-              value: "/etc/ssl/certs/ca-certificates.crt"
+            - name: SSL_CERT_FILE
+              value: "/certs/ca-certificates.crt"
           volumeMounts:
             - name: repo
               mountPath: /repo
             - name: ca-certs
-              mountPath: /etc/ssl/certs/ca-certificates.crt
-              subPath: ca-certificates.crt
+              mountPath: /certs
               readOnly: true
         - name: wait-for-mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -62,7 +67,7 @@ spec:
                   optional: true
       containers:
         - name: graphql
-          image: {{ .Values.images.graphql }}
+          image: {{ include "ace.image" (dict "img" .Values.images.graphql "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 8081
@@ -111,10 +116,20 @@ spec:
               value: "/repo/agent-charts"
             - name: DEFAULT_APP_HUB_PATH
               value: "/repo/app-charts"
+            - name: DEFAULT_AGENT_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
+            - name: DEFAULT_APP_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
+            - name: DEFAULT_HUB_BRANCH_NAME
+              value: {{ .Values.chartsBranch | default "main" | quote }}
             - name: AGENTCERT_ENV_FILE
               value: ""
+            - name: IMAGE_REGISTRY
+              value: {{ .Values.imageRegistry | quote }}
+            - name: IMAGE_PULL_SECRET_NAME
+              value: {{ .Values.imagePullSecretName | quote }}
             - name: SSL_CERT_FILE
-              value: "/etc/ssl/certs/ca-certificates.crt"
+              value: "/certs/ca-certificates.crt"
             - name: LITMUS_CHAOS_OPERATOR_IMAGE
               valueFrom:
                 secretKeyRef:
@@ -133,23 +148,56 @@ spec:
                   name: {{ .Values.secretName }}
                   key: CHAOS_EXPORTER_IMAGE
                   optional: true
+            - name: SUBSCRIBER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: SUBSCRIBER_IMAGE
+                  optional: true
+            - name: EVENT_TRACKER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: EVENT_TRACKER_IMAGE
+                  optional: true
+            - name: ARGO_WORKFLOW_CONTROLLER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ARGO_WORKFLOW_CONTROLLER_IMAGE
+                  optional: true
+            - name: ARGO_WORKFLOW_EXECUTOR_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: ARGO_WORKFLOW_EXECUTOR_IMAGE
+                  optional: true
+            - name: KUBERNETES_MCP_SERVER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: KUBERNETES_MCP_SERVER_IMAGE
+                  optional: true
+            - name: PROMETHEUS_MCP_SERVER_IMAGE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: PROMETHEUS_MCP_SERVER_IMAGE
+                  optional: true
           volumeMounts:
             - name: repo
               mountPath: /repo
               readOnly: true
             - name: ca-certs
-              mountPath: /etc/ssl/certs/ca-certificates.crt
-              subPath: ca-certificates.crt
+              mountPath: /certs
               readOnly: true
       volumes:
         - name: repo
           emptyDir: {}
         - name: ca-certs
           configMap:
-            name: ace-ca-certs
-            items:
-              - key: ca-certificates.crt
-                path: ca-certificates.crt
+            name: ca-certs
+            optional: true
 ---
 apiVersion: v1
 kind: Service

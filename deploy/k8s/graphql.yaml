@@ -46,7 +46,7 @@ spec:
               readOnly: true
       containers:
         - name: graphql
-          image: agentcert/agentcert-graphql:latest
+          image: agentcert/agentcert-graphql:v6-dynamic-secret
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8081

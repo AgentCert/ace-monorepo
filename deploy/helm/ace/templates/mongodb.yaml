@@ -41,9 +41,11 @@ spec:
       labels:
         app: mongodb
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecretName }}
       initContainers:
         - name: keyfile-gen
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -58,7 +60,7 @@ spec:
               mountPath: /keydata
       containers:
         - name: mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           args: [--replSet, rs0, --keyFile, /keydata/keyfile, --bind_ip_all]
           ports:
@@ -122,10 +124,12 @@ spec:
   backoffLimit: 10
   template:
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecretName }}
       restartPolicy: OnFailure
       containers:
         - name: rs-init
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "img" .Values.images.mongodb "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:

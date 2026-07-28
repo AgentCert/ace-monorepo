@@ -95,11 +95,13 @@ spec:
       labels:
         app: web
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecretName }}
       securityContext:
         runAsUser: 0
       containers:
         - name: web
-          image: {{ .Values.images.web }}
+          image: {{ include "ace.image" (dict "img" .Values.images.web "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 2001
@@ -118,13 +120,15 @@ kind: Service
 metadata:
   name: web
   namespace: {{ include "ace.namespace" . }}
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
 spec:
   selector:
     app: web
-  type: {{ .Values.web.serviceType | default "NodePort" }}
+  type: LoadBalancer
+  {{- if .Values.staticIP.web }}
+  loadBalancerIP: {{ .Values.staticIP.web }}
+  {{- end }}
   ports:
     - port: 2001
       targetPort: 2001
-      {{- if ne (.Values.web.serviceType | default "NodePort") "LoadBalancer" }}
-      nodePort: 32001
-      {{- end }}

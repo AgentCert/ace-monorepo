@@ -35,9 +35,11 @@ spec:
       annotations:
         checksum/config: {{ .Values.litellm.config | sha256sum }}
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecretName }}
       containers:
         - name: litellm
-          image: {{ .Values.images.litellm }}
+          image: {{ include "ace.image" (dict "img" .Values.images.litellm "reg" .Values.imageRegistry) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           args: [--config, /app/config.yaml, --port, "4000", --detailed_debug]
           ports:

@@ -239,8 +239,16 @@ def build_crew(
     output_path: str,
     namespace: str = "otel-demo",
 ) -> Crew:
-    base_url = os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:14000")
-    api_key = os.environ.get("SRE_AGENT_LITELLM_API_KEY", "ollama")
+    base_url = (
+        os.environ.get("LITELLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or "http://127.0.0.1:14000"
+    )
+    api_key = (
+        os.environ.get("SRE_AGENT_LITELLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or "ollama"
+    )
     prefixed_model = model if "/" in model else f"openai/{model}"
 
     llm = LLM(

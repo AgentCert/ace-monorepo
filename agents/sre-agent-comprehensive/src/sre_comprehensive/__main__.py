@@ -46,10 +46,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Comprehensive SRE agent: investigates and remediates all K8s fault categories"
     )
-    parser.add_argument("--goal", required=True, help="Investigation and remediation goal")
+    parser.add_argument(
+        "--goal",
+        default=os.environ.get("AGENT_GOAL"),
+        help="Investigation and remediation goal (or set AGENT_GOAL env var)",
+    )
     parser.add_argument(
         "--model",
-        default=os.environ.get("MODEL", "qwen2.5-7b-instruct"),
+        default=os.environ.get("MODEL_ALIAS") or os.environ.get("MODEL", "qwen2.5-7b-instruct"),
         help="LiteLLM model alias",
     )
     parser.add_argument(
@@ -60,6 +64,8 @@ def main() -> None:
     parser.add_argument("--workspace-dir", default="/tmp/agent/workspace")
     parser.add_argument("--output", default=None, help="Path for agent_output.json")
     args = parser.parse_args()
+    if not args.goal:
+        parser.error("--goal is required (or set AGENT_GOAL env var)")
 
     workspace = Path(args.workspace_dir)
     workspace.mkdir(parents=True, exist_ok=True)

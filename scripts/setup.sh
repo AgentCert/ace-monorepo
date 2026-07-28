@@ -218,6 +218,14 @@ detect_kind_gw() {
 {{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
 }
 
+# k3s uses a CNI bridge (cni0) whose host-side IP is the gateway pods use to
+# reach host services. Detect it from the cni0 interface so the IP is derived
+# from the actual environment rather than hardcoded.
+detect_k3s_gw() {
+    ip addr show cni0 2>/dev/null \
+        | awk '/inet / {split($2,a,"/"); print a[1]; exit}'
+}
+
 if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
     # Cloud clusters have no kind network; SUBSCRIBER_CALLBACK_URL/SERVER_ADDR will be
     # set to K8s service DNS by k8s_env_patch, and PORTAL_ENDPOINT to the LB IP by
@@ -225,12 +233,18 @@ if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
     CALLBACK_HOST=""
     echo -e "${DIM}Cloud mode — skipping kind gateway detection; endpoints will be resolved at deploy time.${NC}"
 else
-    CALLBACK_HOST="$(detect_kind_gw || true)"
+    # Try k3s first (cni0 bridge); fall back to KIND docker network.
+    CALLBACK_HOST="$(detect_k3s_gw || true)"
     if [[ -n "${CALLBACK_HOST}" ]]; then
-        echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
+        echo -e "${DIM}Detected k3s CNI gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
     else
-        CALLBACK_HOST="172.26.0.1"
-        warn "kind network not up yet — using ${CALLBACK_HOST} for now; will re-detect after bring-up."
+        CALLBACK_HOST="$(detect_kind_gw || true)"
+        if [[ -n "${CALLBACK_HOST}" ]]; then
+            echo -e "${DIM}Detected kind gateway for pod->host callbacks: ${CALLBACK_HOST}${NC}"
+        else
+            CALLBACK_HOST="172.26.0.1"
+            warn "No kind/k3s gateway found — using ${CALLBACK_HOST} as fallback; re-run after cluster is up."
+        fi
     fi
 fi
 echo
@@ -659,6 +673,80 @@ PY
     ok "Injected litellm_config.yaml into ConfigMap."
 }
 
+# Sync the LitmusChaos subscriber-secret with the active infra credentials stored
+# in MongoDB.  Must be called after MongoDB is running and a chaos infrastructure
+# has been registered via the LitmusChaos UI.  Safe to call repeatedly — uses
+# kubectl apply --dry-run so it is idempotent.
+sync_subscriber_secret() {
+    local LITMUS_NS="litmus"
+    local ACE_NS="ace"
+    local mongo_user mongo_pass mongo_output infra_id access_key
+
+    mongo_user="$(cur MONGODB_USERNAME)"; mongo_user="${mongo_user:-admin}"
+    mongo_pass="$(cur MONGODB_PASSWORD)"; mongo_pass="${mongo_pass:-1234}"
+
+    echo -e "${DIM}Syncing LitmusChaos subscriber-secret from active chaos infrastructure…${NC}"
+
+    # Query the MongoDB the graphql server actually uses, so the subscriber-secret
+    # matches what VerifyInfra() looks up at connection time.  In the k8s deployment
+    # graphql, mongodb, and the litmus subscriber all run in-cluster, so the source
+    # of truth is the mongodb-0 pod in the ace namespace.  Filter on is_registered
+    # (set once at registration, stable) rather than is_active (flaps to false on
+    # disconnect) — we are syncing precisely to recover from a disconnect.
+    mongo_output="$(kubectl exec mongodb-0 -n "${ACE_NS}" -- mongosh \
+        "mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true" \
+        --quiet --eval \
+        'var doc = db.getSiblingDB("litmus").chaosInfrastructures.findOne({is_registered:true});
+         if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key); }' \
+        2>/dev/null)" || true
+
+    if [[ -z "$mongo_output" ]]; then
+        warn "No active chaos infrastructure found in MongoDB — skipping subscriber-secret sync."
+        warn "Register an infrastructure via the LitmusChaos UI, then re-run: ./scripts/setup.sh --restart"
+        return 0
+    fi
+
+    infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2-)"
+    access_key="$(echo "$mongo_output" | grep '^access_key=' | cut -d= -f2-)"
+
+    if [[ -z "$infra_id" || -z "$access_key" ]]; then
+        warn "Could not parse infra_id or access_key from MongoDB output — skipping sync."
+        return 0
+    fi
+
+    kubectl create secret generic subscriber-secret \
+        -n "${LITMUS_NS}" \
+        --from-literal=INFRA_ID="${infra_id}" \
+        --from-literal=ACCESS_KEY="${access_key}" \
+        --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null \
+        && ok "subscriber-secret synced (INFRA_ID=${infra_id})" \
+        || warn "Failed to sync subscriber-secret — verify the '${LITMUS_NS}' namespace exists"
+
+    # The Argo workflow controller only executes workflows whose
+    # controller-instanceid label matches the instanceID in its ConfigMap.
+    # The subscriber labels submitted workflows with its own INFRA_ID, so the
+    # ConfigMap instanceID must match the active infra_id — otherwise every
+    # submitted experiment workflow is silently ignored and stays Queued.
+    kubectl patch configmap workflow-controller-configmap \
+        -n "${LITMUS_NS}" \
+        --type merge \
+        -p "{\"data\":{\"instanceID\":\"${infra_id}\"}}" 2>/dev/null \
+        && ok "workflow-controller-configmap instanceID synced (${infra_id})" \
+        || warn "Failed to patch workflow-controller-configmap — verify the '${LITMUS_NS}' namespace exists"
+
+    if kubectl get deployment subscriber -n "${LITMUS_NS}" >/dev/null 2>&1; then
+        kubectl rollout restart deployment/subscriber -n "${LITMUS_NS}" >/dev/null 2>&1 \
+            && ok "Subscriber deployment restarted." \
+            || warn "Subscriber deployment restart failed."
+    fi
+
+    if kubectl get deployment workflow-controller -n "${LITMUS_NS}" >/dev/null 2>&1; then
+        kubectl rollout restart deployment/workflow-controller -n "${LITMUS_NS}" >/dev/null 2>&1 \
+            && ok "Workflow controller restarted to pick up new instanceID." \
+            || warn "Workflow controller restart failed."
+    fi
+}
+
 # Deploy all K8s manifests into the cluster.
 k8s_deploy() {
     local K8S_DIR="${REPO_ROOT}/deploy/k8s"
@@ -740,6 +828,9 @@ k8s_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         post_cloud_setup "${NS}"
     fi
+
+    # 9c) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered)
+    sync_subscriber_secret
 
     # 10) Print access URLs
     local admu admp luser lpass
@@ -865,6 +956,60 @@ helm_deploy() {
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         post_cloud_setup "${NS}"
+    fi
+
+    # 5c) Wire host services (LiteLLM, Ollama) into the cluster via selector-less
+    #     Services + manual Endpoints so pods can reach them by stable DNS name.
+    #     The endpoint IP is the pod->host gateway detected above (k3s cni0 or kind bridge).
+    #     This step is skipped for cloud mode (host services not applicable there).
+    if [[ "${CLUSTER_MODE}" != "cloud" && -n "${CALLBACK_HOST}" ]]; then
+        echo -e "${DIM}Wiring host services into cluster (gateway: ${CALLBACK_HOST})…${NC}"
+        # litellm: in-cluster DNS name for the Docker-compose LiteLLM proxy
+        kubectl apply -f - >/dev/null <<LITELLM_EOF
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: litellm
+  namespace: ${NS}
+subsets:
+  - addresses:
+      - ip: ${CALLBACK_HOST}
+    ports:
+      - port: 14000
+        name: http
+        protocol: TCP
+LITELLM_EOF
+        # ollama: in-cluster DNS name for the host Ollama inference server
+        kubectl apply -f - >/dev/null <<OLLAMA_SVC_EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/managed-by: setup.sh
+spec:
+  ports:
+    - port: 11434
+      targetPort: 11434
+      protocol: TCP
+      name: ollama
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ollama
+  namespace: ${NS}
+subsets:
+  - addresses:
+      - ip: ${CALLBACK_HOST}
+    ports:
+      - port: 11434
+        name: ollama
+        protocol: TCP
+OLLAMA_SVC_EOF
+        ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434"
     fi
 
     # 6) Print access URLs

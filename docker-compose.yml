@@ -230,6 +230,11 @@ services:
       # SSL_CERT_FILE before its compiled-in paths, so pointing it at the
       # host-mounted bundle fixes git clone TLS failures inside the container.
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      # Override auto-detected containerd socket path. Required for k3s which
+      # places its socket at /run/k3s/containerd/containerd.sock instead of the
+      # standard /run/containerd/containerd.sock. Set in .env to change without
+      # modifying this file.
+      CONTAINER_SOCKET_PATH: ${CONTAINER_SOCKET_PATH:-/run/k3s/containerd/containerd.sock}
     volumes:
       # World-readable kubeconfig from cluster-init (kind apiserver reachable on
       # host net at 127.0.0.1:<port>).

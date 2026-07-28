@@ -25,10 +25,27 @@ from typing import Optional, Type
 from crewai.tools import BaseTool
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-K8S_URL = os.environ.get("K8S_MCP_URL", "http://127.0.0.1:18081/mcp")
-PROM_URL = os.environ.get("PROM_MCP_URL", "http://127.0.0.1:31085/mcp")
+def _parse_mcp_urls() -> tuple[str, str]:
+    """Resolve K8S and Prometheus MCP URLs from env vars.
+
+    Priority:
+      1. K8S_MCP_URL / PROM_MCP_URL (explicit)
+      2. MCP_URLS — comma-separated "k8s_url,prom_url" injected by the Helm chart
+      3. Localhost defaults for local dev
+    """
+    mcp_urls = os.environ.get("MCP_URLS", "")
+    parts = [u.strip() for u in mcp_urls.split(",") if u.strip()]
+    default_k8s = parts[0] if len(parts) >= 1 else "http://127.0.0.1:18081/mcp"
+    default_prom = parts[1] if len(parts) >= 2 else "http://127.0.0.1:31085/mcp"
+    return (
+        os.environ.get("K8S_MCP_URL", default_k8s),
+        os.environ.get("PROM_MCP_URL", default_prom),
+    )
+
+
+K8S_URL, PROM_URL = _parse_mcp_urls()
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +88,31 @@ def _parse_json(text: str) -> dict | list:
 # Shared arg schemas
 # ---------------------------------------------------------------------------
 
+def _clean(v: str) -> str:
+    """Strip surrounding quotes that open-weight LLMs sometimes wrap string args in.
+
+    qwen2.5 occasionally emits {"namespace": "\"otel-demo\""} which CrewAI
+    passes through as the literal string '"otel-demo"'. Stripping one layer of
+    surrounding single or double quotes recovers the intended value.
+    """
+    if isinstance(v, str):
+        s = v.strip()
+        if len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+            return s[1:-1]
+    return v
+
+
 class _Empty(BaseModel):
     pass
 
 
 class _NSInput(BaseModel):
     namespace: str = Field(description="Kubernetes namespace")
+
+    @field_validator("namespace", mode="before")
+    @classmethod
+    def clean_namespace(cls, v: str) -> str:
+        return _clean(v)
 
 
 class _ListPodsInput(BaseModel):
@@ -85,6 +121,11 @@ class _ListPodsInput(BaseModel):
         default=None,
         description="Optional label selector, e.g. 'chaos-injector' or 'app=cart'",
     )
+
+    @field_validator("namespace", mode="before")
+    @classmethod
+    def clean_namespace(cls, v: str) -> str:
+        return _clean(v)
 
 
 class _ListResourcesInput(BaseModel):
@@ -110,12 +151,22 @@ class _ListResourcesInput(BaseModel):
         description="Optional label selector to filter results",
     )
 
+    @field_validator("api_version", "kind", "namespace", "label_selector", mode="before")
+    @classmethod
+    def clean_strings(cls, v: str) -> str:
+        return _clean(v) if v is not None else v
+
 
 class _GetResourceInput(BaseModel):
     api_version: str = Field(description="API version")
     kind: str = Field(description="Resource kind")
     name: str = Field(description="Resource name")
     namespace: Optional[str] = Field(default=None, description="Namespace")
+
+    @field_validator("api_version", "kind", "name", "namespace", mode="before")
+    @classmethod
+    def clean_strings(cls, v: str) -> str:
+        return _clean(v) if v is not None else v
 
 
 class _DeleteResourceInput(BaseModel):
@@ -124,11 +175,21 @@ class _DeleteResourceInput(BaseModel):
     name: str = Field(description="Resource name to delete")
     namespace: Optional[str] = Field(default=None, description="Namespace")
 
+    @field_validator("api_version", "kind", "name", "namespace", mode="before")
+    @classmethod
+    def clean_strings(cls, v: str) -> str:
+        return _clean(v) if v is not None else v
+
 
 class _PodLogsInput(BaseModel):
     name: str = Field(description="Pod name")
     namespace: Optional[str] = Field(default=None, description="Namespace")
     tail: Optional[int] = Field(default=50, description="Number of log lines to return")
+
+    @field_validator("name", "namespace", mode="before")
+    @classmethod
+    def clean_strings(cls, v: str) -> str:
+        return _clean(v) if v is not None else v
 
 
 class _PatchInput(BaseModel):
@@ -159,6 +220,11 @@ class _ApplyInput(BaseModel):
 class _RolloutUndoInput(BaseModel):
     name: str = Field(description="Name of the Deployment to roll back")
     namespace: str = Field(description="Namespace of the Deployment")
+
+    @field_validator("name", "namespace", mode="before")
+    @classmethod
+    def clean_strings(cls, v: str) -> str:
+        return _clean(v)
 
 
 class _PromQLInput(BaseModel):

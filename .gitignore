@@ -50,4 +50,11 @@ agent-charts/
 scripts/azure-build/start-agentcert-v2.sh
 local-personal-workspace/
 deploy/helm/ace/values-env.yaml
+.venv-certifier/
 overleaf/.venv-certifier/
+chaos-charts-default/
+
+# Linux kernel fd pseudo-filenames (created by runaway /proc/self/fd dumps)
+pipe:*
+socket:*
+anon_inode:*

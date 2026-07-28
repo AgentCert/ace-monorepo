@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ground Truth → Judge Mapping — ACE Benchmarking</title>
+<style>
+  /* ── Palette (reference instance) ── */
+  :root {
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;   /* blue  — ACE Certifier */
+    --series-2:       #eb6834;   /* orange — LAAJAgent    */
+    --series-3:       #1baf7a;   /* aqua  — Mitigation   */
+    --series-1-bg:    #e8f1fb;
+    --series-2-bg:    #fdf0ea;
+    --series-3-bg:    #e5f7f1;
+    --warn:           #ec835a;
+    --warn-bg:        #fdf3ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1:      #1a1a19;
+      --surface-2:      #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --series-1-bg:    #1a2535;
+      --series-2-bg:    #2a1a10;
+      --series-3-bg:    #112418;
+      --warn:           #ec835a;
+      --warn-bg:        #2a1a10;
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--surface-2);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 32px 24px 48px;
+  }
+
+  /* ── Page header ── */
+  .page-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+  }
+  .page-subtitle {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 32px;
+  }
+
+  /* ── Section labels ── */
+  .section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+
+  /* ════════════════════════════════════════
+     EXECUTION FLOW (top band)
+  ════════════════════════════════════════ */
+  .exec-band {
+    background: var(--surface-1);
+    border: 1px solid var(--gridline);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 12px;
+  }
+
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+  }
+
+  .flow-node {
+    background: var(--surface-2);
+    border: 1px solid var(--gridline);
+    border-radius: 6px;
+    padding: 10px 14px;
+    min-width: 148px;
+  }
+  .flow-node-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+  }
+  .flow-node-sub {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .flow-node-file {
+    font-size: 10px;
+    font-family: "SF Mono", "Consolas", monospace;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  .arrow {
+    flex: 0 0 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 16px;
+  }
+
+  /* fork visual */
+  .fork-wrapper {
+    margin-top: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 0;
+  }
+  .fork-outputs {
+    display: flex;
+    gap: 12px;
+  }
+  .output-chip {
+    background: var(--surface-2);
+    border: 1px solid var(--gridline);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 11px;
+  }
+  .output-chip-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 1px;
+  }
+  .output-chip-sub {
+    color: var(--text-secondary);
+    font-size: 10px;
+  }
+
+  /* ════════════════════════════════════════
+     CONNECTOR (arrows from outputs to paths)
+  ════════════════════════════════════════ */
+  .connector-band {
+    display: flex;
+    justify-content: space-between;
+    padding: 0 0;
+    margin-bottom: 0;
+    position: relative;
+  }
+  /* horizontal line + three vertical drops */
+  .connector-svg {
+    width: 100%;
+    height: 48px;
+    overflow: visible;
+  }
+
+  /* ════════════════════════════════════════
+     THREE EVALUATION PATHS
+  ════════════════════════════════════════ */
+  .eval-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 14px;
+    margin-top: 0;
+  }
+
+  .eval-card {
+    border-radius: 8px;
+    border: 1.5px solid var(--gridline);
+    overflow: hidden;
+    background: var(--surface-1);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .eval-card-header {
+    padding: 12px 16px 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .eval-card-header-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-top: 3px;
+    flex-shrink: 0;
+  }
+  .eval-card-header-title {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+  .eval-card-header-sub {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 1px;
+  }
+
+  .eval-card-body {
+    padding: 0 16px 16px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .eval-section {
+    border-radius: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--gridline);
+  }
+  .eval-section-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+  .eval-section-value {
+    font-size: 11px;
+    font-family: "SF Mono", "Consolas", monospace;
+    color: var(--text-primary);
+    word-break: break-all;
+    line-height: 1.6;
+  }
+  .eval-section-note {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  .schema-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .schema-chip {
+    font-size: 10px;
+    font-family: "SF Mono", "Consolas", monospace;
+    padding: 2px 7px;
+    border-radius: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--gridline);
+    color: var(--text-secondary);
+  }
+
+  .score-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 4px;
+  }
+  .score-item {
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .score-item::before {
+    content: "→";
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+  .score-item.dim {
+    color: var(--text-muted);
+    text-decoration: line-through;
+  }
+
+  /* warning callout */
+  .warn-callout {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+  .warn-callout strong {
+    color: var(--warn);
+    font-weight: 600;
+  }
+
+  /* no-llm badge */
+  .no-llm-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--gridline);
+    color: var(--text-secondary);
+    background: var(--surface-2);
+    margin-top: 4px;
+  }
+
+  /* judge pill */
+  .judge-pill {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 12px;
+    margin-top: 4px;
+  }
+
+  /* per-card accent colours */
+  .card-1 .eval-card-header      { background: var(--series-1-bg); border-bottom: 2px solid var(--series-1); }
+  .card-1 .eval-card-header-dot  { background: var(--series-1); }
+  .card-1 .eval-card-header-title{ color: var(--series-1); }
+  .card-1 .eval-section-label    { color: var(--series-1); }
+  .card-1 .judge-pill            { background: var(--series-1-bg); color: var(--series-1); border: 1px solid var(--series-1); }
+
+  .card-2 .eval-card-header      { background: var(--series-2-bg); border-bottom: 2px solid var(--series-2); }
+  .card-2 .eval-card-header-dot  { background: var(--series-2); }
+  .card-2 .eval-card-header-title{ color: var(--series-2); }
+  .card-2 .eval-section-label    { color: var(--series-2); }
+  .card-2 .judge-pill            { background: var(--series-2-bg); color: var(--series-2); border: 1px solid var(--series-2); }
+
+  .card-3 .eval-card-header      { background: var(--series-3-bg); border-bottom: 2px solid var(--series-3); }
+  .card-3 .eval-card-header-dot  { background: var(--series-3); }
+  .card-3 .eval-card-header-title{ color: var(--series-3); }
+  .card-3 .eval-section-label    { color: var(--series-3); }
+  .card-3 .judge-pill            { background: var(--series-3-bg); color: var(--series-3); border: 1px solid var(--series-3); }
+
+  /* legend */
+  .legend {
+    margin-top: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: center;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  hr.divider {
+    border: none;
+    border-top: 1px solid var(--gridline);
+    margin: 24px 0 0;
+  }
+</style>
+</head>
+<body>
+
+<p class="page-title">Ground Truth → Judge Mapping</p>
+<p class="page-subtitle">ACE Benchmarking — how each evaluation path is wired</p>
+
+<!-- ══════════════════════════════════════════
+     EXECUTION FLOW BAND
+══════════════════════════════════════════ -->
+<p class="section-label">Execution (per scenario run)</p>
+
+<div class="exec-band">
+  <div class="flow-row">
+
+    <div class="flow-node">
+      <div class="flow-node-title">LitmusChaos Fault</div>
+      <div class="flow-node-sub">ChaosExperiment/ChaosEngine</div>
+      <div class="flow-node-file">chaos-charts/faults/itbench/*/fault.yaml</div>
+    </div>
+
+    <div class="arrow">→</div>
+
+    <div class="flow-node">
+      <div class="flow-node-title">Kubernetes Cluster</div>
+      <div class="flow-node-sub">otel-demo namespace</div>
+      <div class="flow-node-file">kubectl patch / NetworkPolicy / ephemeral container</div>
+    </div>
+
+    <div class="arrow">→</div>
+
+    <div class="flow-node">
+      <div class="flow-node-title">Agent Runs</div>
+      <div class="flow-node-sub">flash-agent / sre-agent-crewai</div>
+      <div class="flow-node-file">observes via K8s MCP + Prometheus MCP</div>
+    </div>
+
+    <div class="arrow">→</div>
+
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      <div class="output-chip">
+        <div class="output-chip-title">Langfuse LLM Trace</div>
+        <div class="output-chip-sub">All LLM spans + tool calls stamped with experiment/run ID</div>
+      </div>
+      <div class="output-chip">
+        <div class="output-chip-title">agent_output.json</div>
+        <div class="output-chip-sub">Structured diagnosis: entities + propagation_chain</div>
+      </div>
+      <div class="output-chip">
+        <div class="output-chip-title">Prometheus snapshot</div>
+        <div class="output-chip-sub">Pre/post alert state captured by harness</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     SVG CONNECTOR (fork into 3 paths)
+══════════════════════════════════════════ -->
+<svg class="connector-svg" viewBox="0 0 900 48" preserveAspectRatio="none" aria-hidden="true">
+  <!-- horizontal spine -->
+  <line x1="150" y1="12" x2="750" y2="12" stroke="#c3c2b7" stroke-width="1.5"/>
+  <!-- left drop -->
+  <line x1="150" y1="12" x2="150" y2="48" stroke="#2a78d6" stroke-width="2"/>
+  <!-- centre drop -->
+  <line x1="450" y1="12" x2="450" y2="48" stroke="#eb6834" stroke-width="2"/>
+  <!-- right drop -->
+  <line x1="750" y1="12" x2="750" y2="48" stroke="#1baf7a" stroke-width="2"/>
+  <!-- arrowheads -->
+  <polygon points="144,44 150,48 156,44" fill="#2a78d6"/>
+  <polygon points="444,44 450,48 456,44" fill="#eb6834"/>
+  <polygon points="744,44 750,48 756,44" fill="#1baf7a"/>
+</svg>
+
+<!-- ══════════════════════════════════════════
+     THREE EVALUATION CARDS
+══════════════════════════════════════════ -->
+<p class="section-label" style="margin-top:4px">Post-run evaluation (three independent paths)</p>
+
+<div class="eval-grid">
+
+  <!-- ─── CARD 1: ACE Certifier ─── -->
+  <div class="eval-card card-1">
+    <div class="eval-card-header">
+      <div class="eval-card-header-dot"></div>
+      <div>
+        <div class="eval-card-header-title">ACE Certifier</div>
+        <div class="eval-card-header-sub">4-phase pipeline · Phases 0–3 + LLM Council</div>
+      </div>
+    </div>
+
+    <div class="eval-card-body">
+
+      <div class="eval-section">
+        <div class="eval-section-label">Ground Truth File</div>
+        <div class="eval-section-value">chaos-charts/faults/itbench/<br>*/ground_truth.yaml</div>
+        <div class="eval-section-note">One file per fault bundle. Authored from scratch for ACE — describes observable Litmus-based symptoms.</div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Schema fields used</div>
+        <div class="schema-chips">
+          <span class="schema-chip">symptoms</span>
+          <span class="schema-chip">ideal_course_of_action</span>
+          <span class="schema-chip">ideal_tool_usage_trajectory</span>
+          <span class="schema-chip">sla.time_to_detect</span>
+          <span class="schema-chip">sla.time_to_mitigate</span>
+          <span class="schema-chip">sla.max_tool_calls</span>
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Input from run</div>
+        <div class="eval-section-value">Langfuse LLM trace</div>
+        <div class="eval-section-note">Phase 0 buckets spans per fault; Phase 1 extracts metrics per bucket; Phases 2–3 aggregate and certify.</div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Judge</div>
+        <div class="judge-pill">Azure OpenAI</div>
+        <div class="eval-section-note" style="margin-top:6px">
+          GPT-4o → extraction model (Phases 0–1)<br>
+          o-series → reasoning model (Phase 1)<br>
+          k-judge LLM Council → qualitative narratives (Phase 2)
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Outputs (12-section certification report)</div>
+        <ul class="score-list">
+          <li class="score-item">TTD / TTR (Python arithmetic, not LLM)</li>
+          <li class="score-item">Hallucination score</li>
+          <li class="score-item">Tool selection accuracy</li>
+          <li class="score-item">SLA compliance (H06/H07 Wilcoxon)</li>
+          <li class="score-item">Qualitative narratives (LLM Council)</li>
+          <li class="score-item">RAI / safety compliance</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─── CARD 2: LAAJAgent ─── -->
+  <div class="eval-card card-2">
+    <div class="eval-card-header">
+      <div class="eval-card-header-dot"></div>
+      <div>
+        <div class="eval-card-header-title">LAAJAgent (ITBench-Evaluations)</div>
+        <div class="eval-card-header-sub">LLM-as-a-Judge · offline · 7 metrics</div>
+      </div>
+    </div>
+
+    <div class="eval-card-body">
+
+      <div class="eval-section">
+        <div class="eval-section-label">Ground Truth File</div>
+        <div class="eval-section-value">agents/sre-agent/ITBench-Lite/<br>Scenario-N/ground_truth.yaml</div>
+        <div class="eval-section-note">Sourced from HuggingFace <em>ibm-research/ITBench-Lite</em>. Currently not downloaded — directory is empty.</div>
+      </div>
+
+      <div class="warn-callout">
+        <strong>⚠ Scenarios 18, 26, 27</strong> — Chaos Mesh replacement faults.<br>
+        ITBench-Lite ground truth describes <em>Chaos Mesh</em> symptoms (pause-image swap, HttpChaos abort/tamper). ACE produces different observable symptoms.<br><br>
+        <strong>ACE-authored replacements written</strong> to <code>ITBench-Lite/Scenario-{18,26,27}/ground_truth.yaml</code> reflecting actual Litmus-based mechanisms.
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Schema fields used</div>
+        <div class="schema-chips">
+          <span class="schema-chip">groups[*] (root_cause)</span>
+          <span class="schema-chip">propagations[*]</span>
+          <span class="schema-chip">aliases</span>
+          <span class="schema-chip">fault[*].condition</span>
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Input from run</div>
+        <div class="eval-section-value">agent_output.json</div>
+        <div class="eval-section-note">Structured diagnosis produced by the agent: entities array + propagation_chain.</div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Judge</div>
+        <div class="judge-pill">Gemini 2.5 Pro</div>
+        <div class="eval-section-note" style="margin-top:6px">
+          Via IBM LiteLLM proxy<br>
+          (<code>ete-litellm.bx.cloud9.ibm.com</code>)<br>
+          OpenAI-compatible client; model swappable via <code>JUDGE_MODEL</code>
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Outputs (7 metrics, scores 0–1)</div>
+        <ul class="score-list">
+          <li class="score-item">ROOT_CAUSE_ENTITY (F1 vs GT groups)</li>
+          <li class="score-item">ROOT_CAUSE_REASONING (condition match)</li>
+          <li class="score-item">ROOT_CAUSE_REASONING_PARTIAL</li>
+          <li class="score-item">PROPAGATION_CHAIN (graph F1)</li>
+          <li class="score-item">FAULT_LOCALIZATION (effect keywords)</li>
+          <li class="score-item">ROOT_CAUSE_PROXIMITY (hop distance)</li>
+          <li class="score-item">ROOT_CAUSE_PROXIMITY_FP</li>
+          <li class="score-item dim">FAULT_CONDITION — not yet scored (planned: LM-as-a-judge)</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ─── CARD 3: Mitigation Evaluator ─── -->
+  <div class="eval-card card-3">
+    <div class="eval-card-header">
+      <div class="eval-card-header-dot"></div>
+      <div>
+        <div class="eval-card-header-title">Mitigation Evaluator</div>
+        <div class="eval-card-header-sub">Prometheus alert check · no LLM · pass@1</div>
+      </div>
+    </div>
+
+    <div class="eval-card-body">
+
+      <div class="eval-section">
+        <div class="eval-section-label">Ground Truth File</div>
+        <div class="eval-section-value">ITBench-Scenarios/scenario_N/<br>groundtruth.yaml (v2)</div>
+        <div class="eval-section-note">Only <code>spec.alerts</code> is consumed — the list of Prometheus alert names expected to fire during the fault.</div>
+        <div class="schema-chips" style="margin-top:6px">
+          <span class="schema-chip">spec.alerts[*].id</span>
+          <span class="schema-chip">spec.alerts[*].group_id</span>
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Input from run</div>
+        <div class="eval-section-value">Live Prometheus state</div>
+        <div class="eval-section-note">
+          Pre-run snapshot confirms alerts are firing before the agent starts.<br>
+          Post-run query checks whether those alerts cleared.
+        </div>
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Judge</div>
+        <div class="no-llm-badge">
+          <span>No LLM</span>
+        </div>
+        <div class="eval-section-note" style="margin-top:6px">
+          Live cluster state is the judge. Alert cleared = pass. Computed by leaderboard's <code>bundle_operator.py</code> — external to this repo.
+        </div>
+      </div>
+
+      <div class="warn-callout">
+        <strong>⚠ 7 of 27 scenarios</strong> have <code>alerts: []</code> — mitigation result is inconclusive for those scenarios even though the step still runs.
+      </div>
+
+      <div class="eval-section">
+        <div class="eval-section-label">Output</div>
+        <ul class="score-list">
+          <li class="score-item">pass@1 (binary — alerts cleared?)</li>
+          <li class="score-item">MTTR (for passing scenarios only)</li>
+        </ul>
+        <div class="eval-section-note" style="margin-top:6px">
+          Scores both diagnosis and mitigation independently.<br>No ground truth needed for the alert check itself — only the alert name list.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════
+     LEGEND
+══════════════════════════════════════════ -->
+<hr class="divider">
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--series-1)"></div>ACE Certifier path</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--series-2)"></div>LAAJAgent path</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--series-3)"></div>Mitigation path</div>
+  <div class="legend-item" style="margin-left:auto; color:var(--text-muted); font-size:11px">All three paths run for every scenario · independently · after the run completes</div>
+</div>
+
+</body>
+</html>

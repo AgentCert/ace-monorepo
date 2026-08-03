@@ -1,0 +1,41 @@
+# =============================================================================
+# Port-isolation override for a locally-cloned upstream Langfuse checkout
+# (github.com/langfuse/langfuse), auto-cloned by
+# scripts/start-local-services.sh's start_langfuse() into <repo-root>/.tmp/langfuse
+# on first run.
+#
+# Used as (see scripts/start-local-services.sh):
+#   docker compose --env-file <repo-root>/.env \
+#     -f docker-compose.yml -f <repo-root>/compose/langfuse.override.yml \
+#     up -d
+#
+# Why this exists as a root-repo override instead of an edit to the clone:
+# .tmp/langfuse is a disposable, gitignored `git clone --depth 1` of an
+# external repo (re-created from scratch whenever it's missing) — any direct
+# edit to it would be silently lost the next time it's re-cloned (fresh
+# checkout, another host, after `rm -rf .tmp/`, etc.). Upstream's own
+# docker-compose.yml hardcodes `3000:3000` for langfuse-web and
+# `9090:9000` / `127.0.0.1:9091:9001` for minio, with no env var indirection
+# at all — on a shared host, both routinely collide with other
+# Langfuse/MinIO instances already running (as happened setting this up: the
+# host already had unrelated deployments bound to both). Container/volume
+# naming is already handled separately via a per-invocation
+# COMPOSE_PROJECT_NAME (see start_langfuse() in start-local-services.sh) —
+# only the hardcoded ports need overriding here.
+#
+# `!override` (not plain replacement) is required on `ports:`: Compose merges
+# sequence fields across `-f` files by CONCATENATION, not replacement, unless
+# told otherwise -- without this tag, the base file's hardcoded ports stay in
+# the merged config alongside these entries, so each container tries to bind
+# BOTH the original hardcoded port AND this override's port. That's not
+# hypothetical: it happened here (both minio and langfuse-web genuinely
+# attempted a dual bind and failed once a hardcoded port collided).
+# =============================================================================
+services:
+  langfuse-web:
+    ports: !override
+      - "${LANGFUSE_PORT:-3000}:3000"
+  minio:
+    ports: !override
+      - "${MINIO_API_PORT:-9090}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9091}:9001"

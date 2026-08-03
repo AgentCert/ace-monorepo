@@ -1,0 +1,34 @@
+# =============================================================================
+# Instance-isolation override for agentcert-stack/litellm-setup's LiteLLM
+# compose file.
+#
+# Used as (see scripts/start-local-services.sh):
+#   docker compose --env-file <repo-root>/.env \
+#     -f docker-compose-litellm.yml -f <repo-root>/compose/litellm.override.yml \
+#     up -d
+#
+# Why this exists as a root-repo override instead of an edit to the submodule:
+# agentcert-stack is a separate git repo (its own remote), so hand-editing it
+# locally would only fix this checkout and would vanish on the next
+# `git submodule update`. The submodule's own docker-compose-litellm.yml
+# hardcodes both `container_name: litellm-proxy` and `14000:4000` — on a
+# shared host where another ACE checkout already owns that name/port, `up`
+# either collides outright or (worse) silently attaches to the OTHER
+# checkout's already-running container instead of starting its own. This
+# override makes both instance-configurable via .env, matching
+# scripts/start-local-services.sh's ACE_INSTANCE_NAME convention (see the
+# comment above ACE_INSTANCE_NAME in that script for the full rationale).
+#
+# `!override` (not plain replacement) is required on `ports:`: Compose merges
+# sequence fields across `-f` files by CONCATENATION, not replacement, unless
+# told otherwise -- without this tag, the base file's hardcoded "14000:4000"
+# stays in the merged config alongside this override's entry, so the
+# container binds BOTH ports. That's not hypothetical: it happened here and
+# would have silently re-collided with another checkout's port the next time
+# anything actually used the default 14000.
+# =============================================================================
+services:
+  litellm-proxy:
+    container_name: ${LITELLM_CONTAINER_NAME:-litellm-proxy}
+    ports: !override
+      - "${LITELLM_PORT:-14000}:4000"

@@ -9,6 +9,12 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
+            # Host's docker data-root (/Innovation/docker) sits on a large but
+            # nearly-full volume (~2.6% free of 3.5T). Kubelet's default
+            # eviction-hard thresholds (nodefs.available<10%, imagefs.available<15%)
+            # trip on that percentage alone even though tens of GB are free in
+            # absolute terms. Override with absolute floors instead.
+            eviction-hard: "nodefs.available<5Gi,imagefs.available<5Gi,nodefs.inodesFree<5%,imagefs.inodesFree<5%"
     extraPortMappings:
       # ingress
       - containerPort: 80

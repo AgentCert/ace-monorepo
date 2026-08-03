@@ -29,10 +29,12 @@ warn() { echo -e "${YELLOW}!${NC} $*"; }
 #   --setup    (default) full first-time wizard: prompts, writes .env, deploys
 #   --restart  skip all prompts and .env edits; just re-apply the stack
 SETUP_MODE="setup"
+BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
 for _arg in "$@"; do
     case "$_arg" in
-        --restart) SETUP_MODE="restart" ;;
-        --setup)   SETUP_MODE="setup"   ;;
+        --restart)     SETUP_MODE="restart" ;;
+        --setup)       SETUP_MODE="setup"   ;;
+        --local-build) BUILD_MODE="local"   ;;
     esac
 done
 unset _arg
@@ -52,15 +54,109 @@ fi
 # current value of KEY in .env (empty if unset)
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
 
+# Backfill ACE_INSTANCE_NAME if this .env doesn't have one yet. Every
+# host-wide unique resource this script creates (kind cluster name, and via
+# scripts/start-local-services.sh: container/volume/compose-project names)
+# is suffixed with this so two checkouts of this monorepo on the same shared
+# host never collide by defaulting to the same name -- see CLAUDE.md
+# section 0. Runs unconditionally (both --setup and --restart) so an
+# existing .env missing this (e.g. from before this check existed) gets
+# fixed on the next run without the user having to do anything.
+if ! grep -q '^ACE_INSTANCE_NAME=.\+' "${ENV_FILE}" 2>/dev/null; then
+    _default_instance_name="$(id -un | tr '[:upper:].' '[:lower:]-')"
+    if grep -q '^ACE_INSTANCE_NAME=' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^ACE_INSTANCE_NAME=.*|ACE_INSTANCE_NAME=${_default_instance_name}|" "${ENV_FILE}"
+    else
+        echo "ACE_INSTANCE_NAME=${_default_instance_name}" >> "${ENV_FILE}"
+    fi
+    ok "Set ACE_INSTANCE_NAME=${_default_instance_name} in .env (keeps this checkout's shared-host resources unique)"
+    unset _default_instance_name
+fi
+
+# Backfill OLLAMA_PORT if missing/empty. Derived from UID so each user on
+# this shared host gets a distinct port and never collides with the system
+# Ollama on :11434. Range: 11440–15535 (4096 slots). Runs unconditionally
+# (both --setup and --restart) so an existing .env missing this key gets
+# fixed on the next run. Also keeps OLLAMA_BASE_URL in sync if it still
+# points at an old default port (11434 or 11435).
+if ! grep -q '^OLLAMA_PORT=[0-9]' "${ENV_FILE}" 2>/dev/null; then
+    # Start from a UID-derived candidate so two users rarely pick the same
+    # port even before the availability check. Then walk forward until we find
+    # one that is genuinely free on this host right now.
+    _candidate=$(( 11440 + $(id -u) % 4096 ))
+    _checked=0
+    while ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":${_candidate}$"; do
+        _candidate=$(( _candidate + 1 ))
+        _checked=$(( _checked + 1 ))
+        if (( _checked >= 100 )); then
+            echo "ERROR: could not find a free OLLAMA_PORT after 100 attempts (tried $(( _candidate - 100 ))–${_candidate})." >&2
+            echo "ERROR: Set OLLAMA_PORT manually in .env to a free port, then re-run." >&2
+            unset _candidate _checked
+            exit 1
+        fi
+    done
+    if grep -q '^OLLAMA_PORT=' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^OLLAMA_PORT=.*|OLLAMA_PORT=${_candidate}|" "${ENV_FILE}"
+    else
+        echo "OLLAMA_PORT=${_candidate}" >> "${ENV_FILE}"
+    fi
+    # Sync OLLAMA_BASE_URL only when it still holds one of the two
+    # placeholder defaults (11434 = system Ollama, 11435 = .env.example
+    # fallback). A user who manually set a different URL must not have it
+    # silently overwritten.
+    if grep -qE '^OLLAMA_BASE_URL=http://host\.docker\.internal:(11434|11435)$' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=http://host.docker.internal:${_candidate}|" "${ENV_FILE}"
+    fi
+    ok "Set OLLAMA_PORT=${_candidate} in .env (UID-derived + verified free on this host)"
+    unset _candidate _checked
+fi
+
+# Backfill AGENT_CHARTS_ROOT and APP_CHARTS_ROOT to this checkout's actual paths.
+# Runs unconditionally (both --setup and --restart) so a .env copied from another
+# checkout (e.g. /srv/projects/ace-monorepo) gets corrected automatically.
+for _charts_var in AGENT_CHARTS_ROOT APP_CHARTS_ROOT; do
+    _charts_subdir="${_charts_var//_CHARTS_ROOT/}"; _charts_subdir="${_charts_subdir,,}-charts"
+    _expected_path="${REPO_ROOT}/${_charts_subdir}"
+    _current_val="$(grep -m1 "^${_charts_var}=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
+    if [[ "${_current_val}" != "${_expected_path}" ]]; then
+        if grep -q "^${_charts_var}=" "${ENV_FILE}" 2>/dev/null; then
+            sed -i "s|^${_charts_var}=.*|${_charts_var}=${_expected_path}|" "${ENV_FILE}"
+        else
+            echo "${_charts_var}=${_expected_path}" >> "${ENV_FILE}"
+        fi
+        ok "Set ${_charts_var}=${_expected_path}"
+    fi
+done
+unset _charts_var _charts_subdir _expected_path _current_val
+
+# Image build definitions — available to both --setup (interactive) and --restart --local-build
+declare -a ALL_BUILD_IMAGES=(
+    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile|direct"
+    "2|agent-sidecar|agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile|direct"
+    "3|install-agent|agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile|direct"
+    "4|install-app|agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile|direct"
+    "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
+    "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
+    "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
+    "8|web|agentcert/agentcert-web|||compose:agentcert-web"
+    "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
+)
+
 if [[ "$SETUP_MODE" == "restart" ]]; then
     CLUSTER_MODE="$(cur CLUSTER_MODE)"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
-    DO_BUILD=0; DH_USER=""; DH_TOKEN=""
+    DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
     declare -a SELECTED_BUILD_IMAGES=()
+    if [[ "${BUILD_MODE}" == "local" ]]; then
+        DO_LOCAL_BUILD=1
+        SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+    fi
     echo
     echo -e "${CYAN}=======================================================${NC}"
     echo -e "${CYAN}  ACE restart — re-applying stack (no .env changes)${NC}"
     echo -e "${CYAN}=======================================================${NC}"
-    echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  .env: ${ENV_FILE}${NC}"
+    _build_note=""; [[ "${DO_LOCAL_BUILD}" -eq 1 ]] && _build_note="  · local build"
+    echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  .env: ${ENV_FILE}${_build_note}${NC}"
+    unset _build_note
     echo
 fi
 
@@ -88,38 +184,42 @@ echo -e "${DIM}all-local 'docker compose up' flow. Only Azure OpenAI is${NC}"
 echo -e "${DIM}required for the agent's LLM calls to actually work.${NC}"
 echo
 
-# --- Build & push (optional) ------------------------------------------------
-declare -a ALL_BUILD_IMAGES=(
-    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile|direct"
-    "2|agent-sidecar|agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile|direct"
-    "3|install-agent|agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile|direct"
-    "4|install-app|agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile|direct"
-    "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
-    "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
-    "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
-    "8|web|agentcert/agentcert-web|||compose:agentcert-web"
-    "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
-)
-DO_BUILD=0; DH_USER=""; DH_TOKEN=""
+# --- Build: push to Docker Hub or build locally (optional) ------------------
+DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
 declare -a SELECTED_BUILD_IMAGES=()
 
-read -rp "$(echo -e "${BOLD}Build and push Docker images to Docker Hub?${NC} ${DIM}[y/N]${NC}: ")" _build_ans
-if [[ "$_build_ans" =~ ^[Yy] ]]; then
-    echo
-    echo -e "   Select services to build ${DIM}(space-separated numbers, or Enter for all):${NC}"
-    for _entry in "${ALL_BUILD_IMAGES[@]}"; do
-        IFS='|' read -r _num _label _img _ _ _method <<< "$_entry"
-        [[ "$_method" == compose:* ]] && _note="via compose" || _note="direct"
-        echo -e "     ${BOLD}${_num})${NC} ${_label}  ${DIM}(${_img}:latest, ${_note})${NC}"
-    done
-    read -rp "   Selection [all]: " _sel
-    for _entry in "${ALL_BUILD_IMAGES[@]}"; do
-        IFS='|' read -r _num _ _ _ _ _ <<< "$_entry"
-        if [[ -z "$_sel" ]] || echo " ${_sel} " | grep -qw "${_num}"; then
-            SELECTED_BUILD_IMAGES+=("$_entry")
-        fi
-    done
-    if [[ ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
+if [[ "${BUILD_MODE}" == "local" ]]; then
+    # --local-build flag: skip prompt, build all images locally
+    SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+    DO_LOCAL_BUILD=1
+else
+    echo -e "${BOLD}Build Docker images?${NC}"
+    echo -e "   ${BOLD}p${NC}  Build and push to Docker Hub"
+    echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD — no Docker Hub account needed)${NC}"
+    echo -e "   ${BOLD}n${NC}  Skip"
+    read -rp "$(echo -e "Choice ${DIM}[p/l/N]${NC}: ")" _build_ans
+    _sel_mode="none"
+    case "${_build_ans,,}" in
+        p) _sel_mode="push"  ;;
+        l) _sel_mode="local" ;;
+    esac
+    if [[ "${_sel_mode}" != "none" ]]; then
+        echo
+        echo -e "   Select services to build ${DIM}(space-separated numbers, or Enter for all):${NC}"
+        for _entry in "${ALL_BUILD_IMAGES[@]}"; do
+            IFS='|' read -r _num _label _img _ _ _method <<< "$_entry"
+            [[ "$_method" == compose:* ]] && _note="via compose" || _note="direct"
+            echo -e "     ${BOLD}${_num})${NC} ${_label}  ${DIM}(${_img}:latest, ${_note})${NC}"
+        done
+        read -rp "   Selection [all]: " _sel
+        for _entry in "${ALL_BUILD_IMAGES[@]}"; do
+            IFS='|' read -r _num _ _ _ _ _ <<< "$_entry"
+            if [[ -z "$_sel" ]] || echo " ${_sel} " | grep -qw "${_num}"; then
+                SELECTED_BUILD_IMAGES+=("$_entry")
+            fi
+        done
+    fi
+    if [[ "${_sel_mode}" == "push" && ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
         echo
         DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
         DH_TOKEN="$(ask DOCKERHUB_TOKEN 'Docker Hub token (dckr_pat_...)')"
@@ -127,9 +227,46 @@ if [[ "$_build_ans" =~ ^[Yy] ]]; then
         DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
         [[ -n "$DH_USER" && -n "$DH_TOKEN" ]] && DO_BUILD=1 \
             || warn "Docker Hub credentials missing — skipping build."
+    elif [[ "${_sel_mode}" == "local" && ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
+        DO_LOCAL_BUILD=1
     fi
+    unset _build_ans _sel_mode _sel
 fi
 echo
+
+# --- Experiment image sources -----------------------------------------------
+# Wizard is skipped in --restart mode (sources are already in .env).
+_INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
+_JFROG_HOST=""; _JFROG_PATH=""; _JFROG_USER=""; _JFROG_TOKEN=""
+if [[ "$SETUP_MODE" == "setup" ]]; then
+    echo -e "${BOLD}Experiment image sources${NC}"
+    echo -e "   ${DIM}The graphql server injects these into every Argo Workflow it creates,${NC}"
+    echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
+    echo
+    echo -e "   ${BOLD}d${NC}  Docker Hub   ${DIM}public images, no credentials needed${NC}"
+    echo -e "   ${BOLD}j${NC}  JFrog        ${DIM}Infosys Artifactory — requires credentials${NC}"
+    echo -e "   ${BOLD}l${NC}  Local build  ${DIM}build from source in this repo, loaded into KinD — no network${NC}"
+    echo
+    read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [d/j/l, Enter=d]${NC}: ")" _ans
+    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
+    read -rp "$(echo -e "  install-agent        ${DIM}(agentcert-install-agent) [d/j/l, Enter=d]${NC}: ")" _ans
+    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
+    read -rp "$(echo -e "  litmus helper images ${DIM}(k8s/checker/deployer)    [d/l, Enter=d]${NC}: ")" _ans
+    case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
+    unset _ans
+
+    if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
+        echo
+        echo -e "  ${BOLD}JFrog Artifactory credentials${NC}"
+        _JFROG_HOST="$(ask JFROG_HOST   'JFrog host')"
+        _JFROG_PATH="$(ask JFROG_REGISTRY_PATH 'Registry path')"
+        _JFROG_USER="$(ask JFROG_USER   'Username')"
+        _JFROG_TOKEN="$(ask JFROG_TOKEN 'Token / password')"
+    fi
+    echo
+fi
+export _INSTALL_APP_SRC _INSTALL_AGENT_SRC _LITMUS_SRC \
+       _JFROG_HOST _JFROG_PATH _JFROG_USER _JFROG_TOKEN
 
 # --- Section 1: LiteLLM model configuration --------------------------------
 echo -e "${BOLD}1) LiteLLM models${NC} ${DIM}(configure which providers the proxy can reach; press Enter to skip a provider)${NC}"
@@ -170,12 +307,39 @@ OPENROUTER_KEY="$(ask OPENROUTER_API_KEY 'API key (Enter to skip)')"
 OPENROUTER_KEY="$(echo "${OPENROUTER_KEY}" | tr -d '[:space:]')"
 echo
 
+echo -e "   ${BOLD}d) Ollama${NC} ${DIM}(local open-weight model — no external API key required)${NC}"
+echo -e "      ${DIM}The model is pulled automatically via 'ollama pull'. Press Enter for the default,${NC}"
+echo -e "      ${DIM}or leave blank (type a space then Enter, or 'none') to skip Ollama.${NC}"
+# Smart default: offer the qwen2.5 32b only when no external provider is configured
+# (or when the user already has OLLAMA_MODEL set in .env). If they have API keys, skip.
+_cur_ollama="$(cur OLLAMA_MODEL)"
+if [[ -n "$_cur_ollama" ]]; then
+    _ollama_def="${_cur_ollama}"
+elif [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then
+    _ollama_def="qwen2.5:32b-instruct"
+else
+    _ollama_def=""
+fi
+if [[ -n "${_ollama_def}" ]]; then
+    read -rp "$(echo -e "  ${BOLD}Ollama model${NC} ${DIM}[${_ollama_def}]${NC}: ")" _ollama_reply
+    OLLAMA_MODEL_TAG="${_ollama_reply:-${_ollama_def}}"
+else
+    read -rp "$(echo -e "  ${BOLD}Ollama model${NC} ${DIM}(Enter to skip; or e.g. qwen2.5:32b-instruct, llama3.3:70b)${NC}: ")" _ollama_reply
+    OLLAMA_MODEL_TAG="${_ollama_reply}"
+fi
+OLLAMA_MODEL_TAG="$(echo "${OLLAMA_MODEL_TAG}" | tr -d '[:space:]')"
+[[ "${OLLAMA_MODEL_TAG,,}" == "none" || "${OLLAMA_MODEL_TAG,,}" == "skip" ]] && OLLAMA_MODEL_TAG=""
+OLLAMA_ALIAS=""
+[[ -n "${OLLAMA_MODEL_TAG}" ]] && OLLAMA_ALIAS="$(echo "${OLLAMA_MODEL_TAG}" | tr ':' '-')"
+echo
+
 # --- Section 2: Flash-agent model selection --------------------------------
 # Build the list of active model aliases from whatever was just configured.
 CONFIGURED_MODELS=()
 [[ -n "$AZ_KEY" ]] && CONFIGURED_MODELS+=("${AZ_ALIAS:-gpt-4o}")
 [[ -n "$GEMINI_KEY" ]] && CONFIGURED_MODELS+=("gemini-3-flash" "gemini-2.5-flash" "gemini-2.5-flash-lite")
 [[ -n "$OPENROUTER_KEY" ]] && CONFIGURED_MODELS+=("auto-free")
+[[ -n "${OLLAMA_MODEL_TAG}" ]] && CONFIGURED_MODELS+=("${OLLAMA_ALIAS}")
 
 echo -e "${BOLD}2) Flash-agent model${NC} ${DIM}(which LiteLLM alias the agent will request)${NC}"
 if [[ ${#CONFIGURED_MODELS[@]} -gt 0 ]]; then
@@ -254,9 +418,14 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _AZ_DEPLOY_GPT5="$AZ_DEPLOY_GPT5" _AZ_DEPLOY_EMBED="$AZ_DEPLOY_EMBED" \
        _AZ_ALIAS="$AZ_ALIAS" _AZ_APIVER="$AZ_APIVER" \
        _GEMINI_KEY="$GEMINI_KEY" _OPENROUTER_KEY="$OPENROUTER_KEY" \
+       _OLLAMA_MODEL_TAG="${OLLAMA_MODEL_TAG:-}" _OLLAMA_ALIAS="${OLLAMA_ALIAS:-}" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
        _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
-       _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}"
+       _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}" \
+       _INSTALL_APP_SRC="${_INSTALL_APP_SRC:-}" _INSTALL_AGENT_SRC="${_INSTALL_AGENT_SRC:-}" \
+       _LITMUS_SRC="${_LITMUS_SRC:-}" \
+       _JFROG_HOST="${_JFROG_HOST:-}" _JFROG_PATH="${_JFROG_PATH:-}" \
+       _JFROG_USER="${_JFROG_USER:-}" _JFROG_TOKEN="${_JFROG_TOKEN:-}"
 python3 - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
@@ -312,6 +481,23 @@ flash_model = os.environ.get("_FLASH_MODEL", "")
 if flash_model:
     sets["FLASH_AGENT_MODEL"] = flash_model
 
+# ── Ollama model ──────────────────────────────────────────────────────────────
+ollama_model = os.environ.get("_OLLAMA_MODEL_TAG", "")
+if ollama_model:
+    sets["OLLAMA_MODEL"] = ollama_model
+    # Set sensible defaults for OLLAMA_BASE_URL and OPENAI_COMPATIBLE_BASE_URL
+    # if not already in .env. Both use the UID-derived OLLAMA_PORT (written to
+    # .env by the backfill block earlier in this script) so they reach THIS
+    # checkout's ACE-owned Ollama container, not the system Ollama on :11434.
+    # k8s_env_patch overwrites both with in-cluster Service names at K8s deploy.
+    cur_lines = open(path).read()
+    m = re.search(r'^OLLAMA_PORT=(\d+)', cur_lines, re.MULTILINE)
+    ollama_port = m.group(1) if m else "11434"
+    if "OLLAMA_BASE_URL=" not in cur_lines:
+        sets.setdefault("OLLAMA_BASE_URL", f"http://host.docker.internal:{ollama_port}")
+    if "OPENAI_COMPATIBLE_BASE_URL=" not in cur_lines:
+        sets.setdefault("OPENAI_COMPATIBLE_BASE_URL", f"http://host.docker.internal:{ollama_port}/v1")
+
 # ── Docker Hub ────────────────────────────────────────────────────────────────
 dh_user = os.environ.get("_DH_USER", "")
 dh_token = os.environ.get("_DH_TOKEN", "")
@@ -324,6 +510,47 @@ if dh_token:
 custom_ca = os.environ.get("_CUSTOM_CA_CERT_PATH", "")
 if custom_ca:
     sets["CUSTOM_CA_CERT_PATH"] = custom_ca
+
+# ── Experiment image sources ──────────────────────────────────────────────────
+# Only update when the wizard ran (SETUP_MODE=setup); in --restart mode all three
+# source vars are empty strings and we leave .env unchanged.
+app_src    = os.environ.get("_INSTALL_APP_SRC",   "")
+agent_src  = os.environ.get("_INSTALL_AGENT_SRC", "")
+litmus_src = os.environ.get("_LITMUS_SRC",        "")
+jfrog_host = os.environ.get("_JFROG_HOST", "") or "infyartifactory.jfrog.io"
+jfrog_path = os.environ.get("_JFROG_PATH", "") or "docker-local"
+jfrog_user = os.environ.get("_JFROG_USER",  "")
+jfrog_tok  = os.environ.get("_JFROG_TOKEN", "")
+
+if app_src:
+    sets["INSTALL_APP_IMAGE_SOURCE"] = app_src
+    if app_src == "jfrog":
+        sets["INSTALL_APPLICATION_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-app:latest"
+        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Always"
+    else:
+        # Both "local" and "dockerhub" use the same Docker Hub image name.
+        # For "local", prepare-images.sh builds and kind-loads it under that name.
+        # IfNotPresent means KinD uses the pre-loaded copy when available.
+        sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
+        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "IfNotPresent"
+
+if agent_src:
+    sets["INSTALL_AGENT_IMAGE_SOURCE"] = agent_src
+    if agent_src == "jfrog":
+        sets["INSTALL_AGENT_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-agent:latest"
+        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Always"
+    else:
+        sets["INSTALL_AGENT_IMAGE"]             = "agentcert/agentcert-install-agent:latest"
+        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "IfNotPresent"
+
+if litmus_src:
+    sets["LITMUS_IMAGES_SOURCE"] = litmus_src
+
+if jfrog_user:  sets["JFROG_USER"]          = jfrog_user
+if jfrog_tok:   sets["JFROG_TOKEN"]         = jfrog_tok
+if app_src == "jfrog" or agent_src == "jfrog":
+    sets["JFROG_HOST"]          = jfrog_host
+    sets["JFROG_REGISTRY_PATH"] = jfrog_path
 
 # Network endpoints in-cluster pods use to reach the control plane on this host
 # (so SUBSCRIBER_CALLBACK_URL is never left as the YOUR_HOST_LAN_IP placeholder).
@@ -342,7 +569,7 @@ if cb:
 # pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
 host_alt = ("|" + re.escape(cb)) if cb else ""
 sets["ALLOWED_ORIGINS"] = (
-    r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal)"
+    r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal|[a-z0-9.-]+\.svc\.cluster\.local)"
     r"|172\.[0-9]+\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+"
     + host_alt + r")(:[0-9]+|)$"
 )
@@ -364,6 +591,30 @@ PY
 
 ok "Wrote LiteLLM model config, flash-agent model, and CLUSTER_MODE=${CLUSTER_MODE} to .env"
 
+# --- patch litellm_config.yaml with the chosen Ollama model -----------------
+if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
+    _litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
+    if [[ -f "${_litellm_cfg}" ]]; then
+        python3 - "${_litellm_cfg}" <<'PY'
+import sys, re, os
+path  = sys.argv[1]
+tag   = os.environ["_OLLAMA_MODEL_TAG"]   # e.g. qwen2.5:32b-instruct
+alias = os.environ["_OLLAMA_ALIAS"]        # e.g. qwen2.5-32b-instruct
+content = open(path).read()
+# Replace the Ollama entry's model_name alias and ollama_chat model tag.
+content = re.sub(
+    r'(  - model_name: )[\w.\-:]+(\n    litellm_params:\n      model: ollama_chat/)[\w.\-:]+',
+    lambda m: m.group(1) + alias + m.group(2) + tag,
+    content,
+)
+open(path, "w").write(content)
+PY
+        ok "litellm_config.yaml → Ollama model: ${OLLAMA_MODEL_TAG}  (alias: ${OLLAMA_ALIAS})"
+    else
+        warn "litellm_config.yaml not found — run: git submodule update --init agentcert-stack"
+    fi
+fi
+
 # --- summary + sanity -------------------------------------------------------
 echo
 echo -e "${CYAN}-------------------------------------------------------${NC}"
@@ -381,7 +632,10 @@ fi
 if [[ -n "$OPENROUTER_KEY" ]]; then
     ok "OpenRouter     auto-free"
 fi
-if [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then
+if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
+    ok "Ollama         ${OLLAMA_ALIAS}  (model: ${OLLAMA_MODEL_TAG})"
+fi
+if [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" && -z "${OLLAMA_MODEL_TAG:-}" ]]; then
     warn "No LLM providers configured — agents won't be able to make LLM calls (re-run to add one)."
 fi
 echo -e "  Flash-agent model : ${BOLD}${FLASH_MODEL}${NC}"
@@ -393,6 +647,23 @@ echo -e "Next:  ${BOLD}./scripts/setup.sh${NC} then answer Y to deploy, or run $
 echo -e "       Re-deploy without re-entering values: ${BOLD}./scripts/setup.sh --restart${NC}"
 echo -e "Docs:  ${DIM}docs/setup/  ·  configuration & ports: docs/setup/configuration.md${NC}"
 echo
+
+# --- auto-pull Ollama model --------------------------------------------------
+if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
+    echo
+    echo -e "${DIM}Pulling Ollama model '${OLLAMA_MODEL_TAG}' — this may take a while for large models…${NC}"
+    if command -v ollama >/dev/null 2>&1; then
+        if ollama pull "${OLLAMA_MODEL_TAG}"; then
+            ok "Ollama model '${OLLAMA_MODEL_TAG}' is ready."
+        else
+            warn "ollama pull '${OLLAMA_MODEL_TAG}' failed. Run it manually once Ollama is running:"
+            warn "  ollama pull ${OLLAMA_MODEL_TAG}"
+        fi
+    else
+        warn "ollama command not found. Install Ollama (https://ollama.com/download), then run:"
+        warn "  ollama pull ${OLLAMA_MODEL_TAG}"
+    fi
+fi
 
 fi  # end SETUP_MODE=setup
 
@@ -439,6 +710,47 @@ PY
     else
         printf '%s=%s\n' "$k" "$v" >> "${ENV_FILE}"
     fi
+}
+
+# pick_kind_hostport VAR_NAME PREFERRED_DEFAULT
+# Resolves a KinD hostPort to a value that is free on this host right now.
+# Precedence: existing .env value → preferred default → walk forward.
+# Skips ports already claimed in the current setup pass (_KIND_CLAIMED_PORTS).
+# Persists the chosen port to .env (adds if absent; updates only if changed).
+# Logs a warning when the preferred port was already in use.
+# Result is written to _HP_RESULT (not stdout) so callers do NOT use $() —
+# that would create a subshell and break the _KIND_CLAIMED_PORTS side-effect.
+pick_kind_hostport() {
+    local var="$1" preferred="$2"
+    local current; current="$(cur "$var")"
+    local candidate="${current:-$preferred}"
+
+    local checked=0
+    while true; do
+        if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE ":${candidate}$"; then
+            : # port bound on the host
+        elif echo " ${_KIND_CLAIMED_PORTS} " | grep -q " ${candidate} "; then
+            : # already assigned to another service in this setup pass
+        else
+            break
+        fi
+        candidate=$(( candidate + 1 ))
+        checked=$(( checked + 1 ))
+        if (( checked >= 200 )); then
+            echo "ERROR: could not find a free host port for ${var} after 200 attempts." >&2
+            echo "ERROR: Set ${var} manually in .env to a free port, then re-run." >&2
+            exit 1
+        fi
+    done
+
+    if [[ -z "$current" ]] || [[ "$candidate" != "$current" ]]; then
+        set_env "$var" "$candidate"
+        if [[ "$candidate" != "${current:-$preferred}" ]]; then
+            warn "  ${var}: ${current:-$preferred} in use — assigned ${candidate} (saved to .env)"
+        fi
+    fi
+    _KIND_CLAIMED_PORTS="${_KIND_CLAIMED_PORTS} ${candidate}"
+    _HP_RESULT="$candidate"
 }
 
 # apply_ace_env_secret — dedup .env then create/update the ace-env Secret
@@ -562,6 +874,13 @@ k8s_env_patch() {
     set_env CERTIFIER_BASE_URL       "http://certifier:8000"
     set_env CERTIFICATE_PDF_BASE_URL "http://certifier:8000"
 
+    # Ollama: in-cluster pods reach the host Ollama server via the ollama Service
+    # created by helm_deploy (selector-less Service + manual Endpoints → host gateway IP).
+    set_env OLLAMA_BASE_URL           "http://ollama.ace.svc.cluster.local:11434"
+    # Certifier's direct OpenAI-compatible connection bypasses LiteLLM — wire it
+    # to the same in-cluster Service so it reaches the right Ollama instance.
+    set_env OPENAI_COMPATIBLE_BASE_URL "http://ollama.ace.svc.cluster.local:11434/v1"
+
     # Postgres (Langfuse): default dev credentials
     set_env POSTGRES_USER     "postgres"
     set_env POSTGRES_PASSWORD "postgres"
@@ -606,25 +925,212 @@ k8s_env_patch() {
     ok "Patched .env with K8s service DNS names."
 }
 
+# Ownership marker for a kind cluster THIS checkout created: a docker volume
+# labelled with this checkout's REPO_ROOT. A kind cluster (like a docker
+# container name) is a host-wide unique resource, not scoped to a checkout or
+# user -- two engineers' checkouts on the same shared host can both default
+# to a cluster named "agentcert". Before this script reuses, restarts, or
+# deletes a cluster by name, it refuses unless this marker proves THIS
+# checkout created it. This is the kind-cluster equivalent of
+# assert_not_foreign_container() in scripts/start-local-services.sh -- see
+# CLAUDE.md section 0 for the incident that safety net was built to prevent.
+kind_owner_marker() { echo "ace-kind-owner-$1"; }
+
+assert_kind_cluster_ownership() {
+    local cluster_name="$1"
+    kind get clusters 2>/dev/null | grep -qx "${cluster_name}" || return 0   # doesn't exist yet -- nothing to protect
+    local marker; marker="$(kind_owner_marker "${cluster_name}")"
+    if ! docker volume inspect "${marker}" >/dev/null 2>&1; then
+        warn "kind cluster '${cluster_name}' exists but has no ACE ownership marker (${marker})."
+        warn "It may belong to another checkout or user on this shared host. Refusing to reuse, restart, or delete it."
+        warn "Set a unique KIND_CLUSTER_NAME in .env for this checkout, or if you are CERTAIN this cluster is yours, run:"
+        warn "  docker volume create --label ace.kind.owner=${REPO_ROOT} ${marker}"
+        return 1
+    fi
+    local owner
+    owner="$(docker volume inspect "${marker}" --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null)"
+    if [[ "${owner}" != "${REPO_ROOT}" ]]; then
+        warn "kind cluster '${cluster_name}' is owned by a different checkout (working_dir: ${owner:-unknown}, ours: ${REPO_ROOT})."
+        warn "Refusing to touch it. Set a unique KIND_CLUSTER_NAME in .env for this checkout."
+        return 1
+    fi
+    return 0
+}
+
+mark_kind_cluster_owned()   { docker volume create --label "ace.kind.owner=${REPO_ROOT}" "$(kind_owner_marker "$1")" >/dev/null; }
+unmark_kind_cluster_owned() { docker volume rm "$(kind_owner_marker "$1")" >/dev/null 2>&1 || true; }
+
 # Ensure the kind cluster exists and has the port mappings required for the
 # K8s deployment. Recreates the cluster if the config has changed.
 ensure_kind_cluster() {
-    local kind_cfg="${REPO_ROOT}/deploy/kind/kind-agentcert.yaml"
-    local cluster_name="${KIND_CLUSTER_NAME:-agentcert}"
+    # Precedence matches the rest of this script's env handling: an explicit
+    # process env var wins, then the value already in .env, then an
+    # instance-scoped default -- NEVER the bare "agentcert" default, since
+    # that's exactly the name any other checkout on this host also defaults
+    # to (see the ownership check above for what happens if it collides).
+    local ace_instance_name
+    ace_instance_name="$(cur ACE_INSTANCE_NAME)"
+    ace_instance_name="${ace_instance_name:-$(id -un | tr '[:upper:].' '[:lower:]-')}"
 
-    # Check whether the current cluster node already has the ACE port bindings
-    # (nodePort 32001 → host 2001 is the canary). If not, recreate the cluster.
-    local has_ace_ports
-    has_ace_ports="$(docker inspect "${cluster_name}-control-plane" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin)[0]; \
-          print('yes' if '32001/tcp' in d.get('HostConfig',{}).get('PortBindings',{}) else 'no')" \
-        2>/dev/null || echo "no")"
+    local cluster_name="${KIND_CLUSTER_NAME:-$(cur KIND_CLUSTER_NAME)}"
+    cluster_name="${cluster_name:-agentcert-${ace_instance_name}}"
+
+    # Hard stop before touching ANYTHING by this name -- see CLAUDE.md section 0.
+    assert_kind_cluster_ownership "${cluster_name}" || return 1
+
+    # --- Early-exit if cluster is already running with ACE port mappings --------
+    # Must run BEFORE pick_kind_hostport so we don't walk ports forward past the
+    # ports the running cluster has already bound on the host — that causes .env
+    # to drift away from the cluster's actual bindings on every --restart.
+    #
+    # Multi-port canary: ≥3 of the 16 ACE containerPorts must be present in
+    # PortBindings. A single-port check (32001/tcp only) is too fragile — it
+    # matches any cluster that happens to have something on that NodePort.
+    local _inspect_json has_ace_ports
+    _inspect_json="$(docker inspect "${cluster_name}-control-plane" 2>/dev/null || true)"
+    has_ace_ports="no"
+    if [[ -n "${_inspect_json}" ]]; then
+        has_ace_ports="$(echo "${_inspect_json}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if not data:
+    print('no'); sys.exit()
+pb = data[0].get('HostConfig', {}).get('PortBindings', {})
+ace = {'80/tcp','32001/tcp','32003/tcp','32030/tcp','32081/tcp','32082/tcp',
+       '32080/tcp','31400/tcp','32400/tcp','32017/tcp','32090/tcp',
+       '31085/tcp','31086/tcp','31090/tcp','31687/tcp','32000/tcp'}
+print('yes' if sum(1 for p in ace if p in pb) >= 3 else 'no')
+" 2>/dev/null || echo "no")"
+    fi
 
     if [[ "${has_ace_ports}" == "yes" ]]; then
-        ok "kind cluster '${cluster_name}' already has ACE port mappings — reusing it."
+        ok "kind cluster '${cluster_name}' already running — reconciling .env to actual port bindings."
+        # Read actual host ports from docker inspect and write them back to .env.
+        # Guard: only overwrite a .env value if it is absent OR within ±10 of the
+        # actual port (the bounded drift window from pick_kind_hostport walking
+        # past a single occupied port). Values outside ±10 are left untouched —
+        # they are assumed to be intentional manual overrides (e.g. an SSH-tunnel
+        # port or a value set by a different tool).
+        export _ACE_INSPECT_JSON="${_inspect_json}"
+        python3 - "${ENV_FILE}" <<'PY'
+import json, os, re, sys
+
+env_path = sys.argv[1]
+data = json.loads(os.environ['_ACE_INSPECT_JSON'])
+pb   = data[0].get('HostConfig', {}).get('PortBindings', {})
+
+PORT_MAP = {
+    '80/tcp':    ('KIND_HOSTPORT_INGRESS',       8088),
+    '32001/tcp': ('KIND_HOSTPORT_WEB',           2001),
+    '32003/tcp': ('KIND_HOSTPORT_AUTH_REST',     3005),
+    '32030/tcp': ('KIND_HOSTPORT_AUTH_GRPC',     3030),
+    '32081/tcp': ('KIND_HOSTPORT_GRAPHQL_REST',  8081),
+    '32082/tcp': ('KIND_HOSTPORT_GRAPHQL_GRPC',  8082),
+    '32080/tcp': ('KIND_HOSTPORT_CERTIFIER',    18000),
+    '31400/tcp': ('KIND_HOSTPORT_LITELLM',      14000),
+    '32400/tcp': ('KIND_HOSTPORT_LANGFUSE',      4002),
+    '32017/tcp': ('KIND_HOSTPORT_MONGO',        27017),
+    '32090/tcp': ('KIND_HOSTPORT_MINIO',        19090),
+    '31085/tcp': ('KIND_HOSTPORT_OTEL_PROM_MCP',31085),
+    '31086/tcp': ('KIND_HOSTPORT_OTEL_K8S_MCP', 31086),
+    '31090/tcp': ('KIND_HOSTPORT_PROMETHEUS',   31090),
+    '31687/tcp': ('KIND_HOSTPORT_GRAFANA',      31687),
+    '32000/tcp': ('KIND_HOSTPORT_DEX',          32000),
+}
+
+lines = open(env_path).read().splitlines()
+env = {}
+for ln in lines:
+    m = re.match(r'^([A-Za-z0-9_]+)=(.*)', ln)
+    if m:
+        env[m.group(1)] = m.group(2)
+
+updated = {}
+for cport, (var, _) in PORT_MAP.items():
+    bindings = pb.get(cport)
+    if not bindings:
+        continue
+    actual = int(bindings[0]['HostPort'])
+    cur_str = env.get(var, '')
+    cur = int(cur_str) if cur_str.isdigit() else None
+    # Only reconcile if: no .env value yet, or within the ±10 drift window.
+    if cur is None or abs(actual - cur) <= 10:
+        if cur != actual:
+            updated[var] = str(actual)
+
+if updated:
+    out, seen = [], set()
+    for ln in lines:
+        m = re.match(r'^([A-Za-z0-9_]+)=', ln)
+        if m and m.group(1) in updated:
+            k = m.group(1)
+            out.append(f'{k}={updated[k]}')
+            seen.add(k)
+        else:
+            out.append(ln)
+    for k, v in updated.items():
+        if k not in seen:
+            out.append(f'{k}={v}')
+    open(env_path, 'w').write('\n'.join(out) + '\n')
+    for k, v in sorted(updated.items()):
+        print(f'  {k}: {env.get(k, "(unset)")} -> {v}')
+PY
+        unset _ACE_INSPECT_JSON
         kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
         return 0
     fi
+
+    # --- Cluster not running or lacks ACE ports: resolve host ports then create ---
+    # Resolve all 16 KinD hostPorts: check each against live host bindings and
+    # intra-batch claims, walk forward to a free slot where needed, and persist
+    # the chosen values to .env so reruns stay stable.
+    # NOTE: pick_kind_hostport writes to _HP_RESULT (not stdout) so that
+    # _KIND_CLAIMED_PORTS side-effects survive across calls in the same shell.
+    _KIND_CLAIMED_PORTS="" _HP_RESULT=""
+    local _hp_ingress _hp_web _hp_auth_rest _hp_auth_grpc
+    local _hp_gql_rest _hp_gql_grpc _hp_certifier _hp_litellm
+    local _hp_langfuse _hp_mongo _hp_minio
+    local _hp_otel_prom _hp_otel_k8s _hp_prom _hp_grafana _hp_dex
+    pick_kind_hostport KIND_HOSTPORT_INGRESS       8088;  _hp_ingress="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_WEB           2001;  _hp_web="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_AUTH_REST     3005;  _hp_auth_rest="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_AUTH_GRPC     3030;  _hp_auth_grpc="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_GRAPHQL_REST  8081;  _hp_gql_rest="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_GRAPHQL_GRPC  8082;  _hp_gql_grpc="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_CERTIFIER     18000; _hp_certifier="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_LITELLM       14000; _hp_litellm="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_LANGFUSE      4002;  _hp_langfuse="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_MONGO         27017; _hp_mongo="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_MINIO         19090; _hp_minio="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_OTEL_PROM_MCP 31085; _hp_otel_prom="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_OTEL_K8S_MCP  31086; _hp_otel_k8s="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_PROMETHEUS    31090; _hp_prom="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_GRAFANA       31687; _hp_grafana="$_HP_RESULT"
+    pick_kind_hostport KIND_HOSTPORT_DEX           32000; _hp_dex="$_HP_RESULT"
+    unset _KIND_CLAIMED_PORTS _HP_RESULT
+
+    # Render a per-checkout kind config: instance-scoped cluster name + host
+    # ports, so two checkouts on this host never fight over the same
+    # extraPortMappings (kind can only bind a given hostPort to one node).
+    local kind_cfg="${REPO_ROOT}/.tmp/kind-agentcert.rendered.yaml"
+    KIND_CLUSTER_NAME="${cluster_name}" \
+    KIND_HOSTPORT_INGRESS="${_hp_ingress}" \
+    KIND_HOSTPORT_WEB="${_hp_web}" \
+    KIND_HOSTPORT_AUTH_REST="${_hp_auth_rest}" \
+    KIND_HOSTPORT_AUTH_GRPC="${_hp_auth_grpc}" \
+    KIND_HOSTPORT_GRAPHQL_REST="${_hp_gql_rest}" \
+    KIND_HOSTPORT_GRAPHQL_GRPC="${_hp_gql_grpc}" \
+    KIND_HOSTPORT_CERTIFIER="${_hp_certifier}" \
+    KIND_HOSTPORT_LITELLM="${_hp_litellm}" \
+    KIND_HOSTPORT_LANGFUSE="${_hp_langfuse}" \
+    KIND_HOSTPORT_MONGO="${_hp_mongo}" \
+    KIND_HOSTPORT_MINIO="${_hp_minio}" \
+    KIND_HOSTPORT_OTEL_PROM_MCP="${_hp_otel_prom}" \
+    KIND_HOSTPORT_OTEL_K8S_MCP="${_hp_otel_k8s}" \
+    KIND_HOSTPORT_PROMETHEUS="${_hp_prom}" \
+    KIND_HOSTPORT_GRAFANA="${_hp_grafana}" \
+    KIND_HOSTPORT_DEX="${_hp_dex}" \
+    "${REPO_ROOT}/deploy/kind/render-kind-config.sh" "${kind_cfg}"
 
     if kind get clusters 2>/dev/null | grep -qx "${cluster_name}"; then
         warn "kind cluster '${cluster_name}' exists but lacks the ACE port mappings."
@@ -635,11 +1141,13 @@ ensure_kind_cluster() {
             return 0
         fi
         kind delete cluster --name "${cluster_name}"
+        unmark_kind_cluster_owned "${cluster_name}"
     fi
 
     echo -e "${DIM}Creating kind cluster '${cluster_name}' (this takes ~1-2 min)…${NC}"
     echo -e "${DIM}Using kind config: ${kind_cfg}${NC}"
     kind create cluster --name "${cluster_name}" --config "${kind_cfg}"
+    mark_kind_cluster_owned "${cluster_name}"
     kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
     ok "Kind cluster '${cluster_name}' created."
 }
@@ -747,6 +1255,26 @@ sync_subscriber_secret() {
     fi
 }
 
+# load_images_into_kind CLUSTER_NAME
+# Loads every image in LOCAL_BUILT_IMAGES into the named KinD cluster so pods
+# use the locally built copy instead of pulling from Docker Hub.
+load_images_into_kind() {
+    local cluster_name="$1"
+    if [[ ${#LOCAL_BUILT_IMAGES[@]} -eq 0 ]]; then
+        warn "No locally built images to load into KinD."
+        return 0
+    fi
+    echo
+    echo -e "${DIM}Loading ${#LOCAL_BUILT_IMAGES[@]} local image(s) into KinD cluster '${cluster_name}'…${NC}"
+    for _img in "${LOCAL_BUILT_IMAGES[@]}"; do
+        if kind load docker-image "${_img}" --name "${cluster_name}"; then
+            ok "  Loaded: ${_img}"
+        else
+            warn "  Failed to load ${_img} — pods may pull from Docker Hub instead"
+        fi
+    done
+}
+
 # Deploy all K8s manifests into the cluster.
 k8s_deploy() {
     local K8S_DIR="${REPO_ROOT}/deploy/k8s"
@@ -768,6 +1296,15 @@ k8s_deploy() {
         ok "CLUSTER_MODE=${CLUSTER_MODE} — skipping kind cluster creation, using existing kubeconfig."
     else
         ensure_kind_cluster
+    fi
+
+    # 2b) Load locally built images into KinD (only when --local-build was used)
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 && "${CLUSTER_MODE}" != "cloud" && "${CLUSTER_MODE}" != "local" ]]; then
+        local _ace_inst; _ace_inst="$(cur ACE_INSTANCE_NAME)"
+        local _k8s_cluster; _k8s_cluster="${KIND_CLUSTER_NAME:-$(cur KIND_CLUSTER_NAME)}"
+        _k8s_cluster="${_k8s_cluster:-agentcert-${_ace_inst}}"
+        load_images_into_kind "${_k8s_cluster}"
+        unset _ace_inst _k8s_cluster
     fi
 
     # 3) Verify kubectl is connected
@@ -838,6 +1375,12 @@ k8s_deploy() {
     admp="$(envval ADMIN_PASSWORD)";              admp="${admp:-litmus}"
     luser="$(envval LANGFUSE_INIT_USER_EMAIL)";   luser="${luser:-admin@agentcert.local}"
     lpass="$(envval LANGFUSE_INIT_USER_PASSWORD)";lpass="${lpass:-agentcert-admin}"
+    local _hp_web _hp_langfuse _hp_certifier _hp_litellm _hp_mongo
+    _hp_web="$(envval KIND_HOSTPORT_WEB)";             _hp_web="${_hp_web:-2001}"
+    _hp_langfuse="$(envval KIND_HOSTPORT_LANGFUSE)";   _hp_langfuse="${_hp_langfuse:-4002}"
+    _hp_certifier="$(envval KIND_HOSTPORT_CERTIFIER)"; _hp_certifier="${_hp_certifier:-18000}"
+    _hp_litellm="$(envval KIND_HOSTPORT_LITELLM)";     _hp_litellm="${_hp_litellm:-14000}"
+    _hp_mongo="$(envval KIND_HOSTPORT_MONGO)";         _hp_mongo="${_hp_mongo:-27017}"
     echo
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "${GREEN}  ✓ ACE stack deployed to cluster${NC}"
@@ -845,12 +1388,12 @@ k8s_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
     else
-        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:${_hp_web}          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
     fi
-    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
-    echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
-    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"
-    echo -e "  ${BOLD}MongoDB${NC}       localhost:27017"
+    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:${_hp_langfuse}          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+    echo -e "  ${BOLD}Certifier${NC}     http://localhost:${_hp_certifier}/docs"
+    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:${_hp_litellm}"
+    echo -e "  ${BOLD}MongoDB${NC}       localhost:${_hp_mongo}"
     echo
     echo -e "  ${DIM}status:  kubectl get pods -n ace${NC}"
     echo -e "  ${DIM}logs:    kubectl logs -n ace deploy/graphql -f${NC}"
@@ -920,6 +1463,15 @@ helm_deploy() {
         ensure_kind_cluster
     fi
 
+    # 2b) Load locally built images into KinD (only when --local-build was used)
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 && "${CLUSTER_MODE}" != "cloud" && "${CLUSTER_MODE}" != "local" ]]; then
+        local _ace_inst; _ace_inst="$(cur ACE_INSTANCE_NAME)"
+        local _helm_cluster; _helm_cluster="${KIND_CLUSTER_NAME:-$(cur KIND_CLUSTER_NAME)}"
+        _helm_cluster="${_helm_cluster:-agentcert-${_ace_inst}}"
+        load_images_into_kind "${_helm_cluster}"
+        unset _ace_inst _helm_cluster
+    fi
+
     # 3) Verify kubectl is connected
     if ! kubectl cluster-info >/dev/null 2>&1; then
         warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
@@ -948,10 +1500,27 @@ helm_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         helm_cmd+=(--set web.serviceType=LoadBalancer)
     fi
+    # Local build: images are already loaded into KinD — tell Helm not to pull them.
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]]; then
+        helm_cmd+=(--set imagePullPolicy=IfNotPresent)
+    fi
 
     echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
     echo
+    # The chart has a post-install/post-upgrade hook (mongodb-rs-init Job) that
+    # initialises the replica set.  Helm blocks until this hook completes — this
+    # is normal and takes 2-5 min on first install while MongoDB starts up.
+    # Watch pod status in a background loop so the terminal is not silent.
+    ( while true; do
+        sleep 15
+        kubectl get pods -n ace --no-headers 2>/dev/null \
+            | awk '{printf "  %-45s %s/%s  %s\n", $1, $2, $3, $4}' \
+            | grep -v "^$" || true
+        echo "  (helm is waiting for the mongodb-rs-init hook to complete…)"
+      done ) &
+    _HELM_WATCH_PID=$!
     "${helm_cmd[@]}"
+    kill "${_HELM_WATCH_PID}" 2>/dev/null; unset _HELM_WATCH_PID
 
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -963,6 +1532,15 @@ helm_deploy() {
     #     The endpoint IP is the pod->host gateway detected above (k3s cni0 or kind bridge).
     #     This step is skipped for cloud mode (host services not applicable there).
     if [[ "${CLUSTER_MODE}" != "cloud" && -n "${CALLBACK_HOST}" ]]; then
+        # Read the per-instance Ollama host port. The system Ollama owns :11434;
+        # each checkout's containerized Ollama publishes on OLLAMA_PORT (auto-
+        # derived earlier in this script from the user's UID). In-cluster pods
+        # still connect to ollama.ace.svc.cluster.local:11434 (the Service's
+        # virtual port); kube-proxy routes that to CALLBACK_HOST:ollama_port via
+        # the Endpoints below.
+        local ollama_port
+        ollama_port="$(envval OLLAMA_PORT)"; ollama_port="${ollama_port:-11435}"
+
         echo -e "${DIM}Wiring host services into cluster (gateway: ${CALLBACK_HOST})…${NC}"
         # litellm: in-cluster DNS name for the Docker-compose LiteLLM proxy
         kubectl apply -f - >/dev/null <<LITELLM_EOF
@@ -979,7 +1557,10 @@ subsets:
         name: http
         protocol: TCP
 LITELLM_EOF
-        # ollama: in-cluster DNS name for the host Ollama inference server
+        # ollama: in-cluster DNS name for THIS checkout's Ollama container.
+        # Service port 11434 is the stable in-cluster virtual port; Endpoints
+        # port ${ollama_port} is the actual host port where the ACE-owned
+        # Ollama container (ollama-${ACE_INSTANCE_NAME}) is published.
         kubectl apply -f - >/dev/null <<OLLAMA_SVC_EOF
 apiVersion: v1
 kind: Service
@@ -992,7 +1573,7 @@ metadata:
 spec:
   ports:
     - port: 11434
-      targetPort: 11434
+      targetPort: ${ollama_port}
       protocol: TCP
       name: ollama
 ---
@@ -1005,11 +1586,11 @@ subsets:
   - addresses:
       - ip: ${CALLBACK_HOST}
     ports:
-      - port: 11434
+      - port: ${ollama_port}
         name: ollama
         protocol: TCP
 OLLAMA_SVC_EOF
-        ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434"
+        ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434 → host:${ollama_port}"
     fi
 
     # 6) Print access URLs
@@ -1018,6 +1599,12 @@ OLLAMA_SVC_EOF
     admp="$(envval ADMIN_PASSWORD)";              admp="${admp:-litmus}"
     luser="$(envval LANGFUSE_INIT_USER_EMAIL)";   luser="${luser:-admin@agentcert.local}"
     lpass="$(envval LANGFUSE_INIT_USER_PASSWORD)";lpass="${lpass:-agentcert-admin}"
+    local _hp_web _hp_langfuse _hp_certifier _hp_litellm _hp_mongo
+    _hp_web="$(envval KIND_HOSTPORT_WEB)";             _hp_web="${_hp_web:-2001}"
+    _hp_langfuse="$(envval KIND_HOSTPORT_LANGFUSE)";   _hp_langfuse="${_hp_langfuse:-4002}"
+    _hp_certifier="$(envval KIND_HOSTPORT_CERTIFIER)"; _hp_certifier="${_hp_certifier:-18000}"
+    _hp_litellm="$(envval KIND_HOSTPORT_LITELLM)";     _hp_litellm="${_hp_litellm:-14000}"
+    _hp_mongo="$(envval KIND_HOSTPORT_MONGO)";         _hp_mongo="${_hp_mongo:-27017}"
     echo
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "${GREEN}  ✓ ACE stack deployed via Helm${NC}"
@@ -1026,12 +1613,12 @@ OLLAMA_SVC_EOF
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
     else
-        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:2001          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+        echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:${_hp_web}          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
     fi
-    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:4000          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
-    echo -e "  ${BOLD}Certifier${NC}     http://localhost:18000/docs"
-    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:14000"
-    echo -e "  ${BOLD}MongoDB${NC}       localhost:27017"
+    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:${_hp_langfuse}          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+    echo -e "  ${BOLD}Certifier${NC}     http://localhost:${_hp_certifier}/docs"
+    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:${_hp_litellm}"
+    echo -e "  ${BOLD}MongoDB${NC}       localhost:${_hp_mongo}"
     echo
     echo -e "  ${DIM}status:   kubectl get pods -n ace${NC}"
     echo -e "  ${DIM}upgrade:  helm upgrade --install ace deploy/helm/ace --create-namespace -f deploy/helm/ace/values-env.yaml --timeout 10m${NC}"
@@ -1040,15 +1627,27 @@ OLLAMA_SVC_EOF
     echo -e "${GREEN}=======================================================${NC}"
 }
 
-# --- build and push (if requested earlier) ----------------------------------
-if [[ "${DO_BUILD}" -eq 1 ]]; then
+# --- build (push to Docker Hub or local) ------------------------------------
+declare -a LOCAL_BUILT_IMAGES=()   # tracks successfully built images for kind load
+
+if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     echo
     echo -e "${CYAN}=======================================================${NC}"
-    echo -e "${CYAN}  Build & push selected images${NC}"
+    [[ "${DO_BUILD}" -eq 1 ]] \
+        && echo -e "${CYAN}  Build & push selected images${NC}" \
+        || echo -e "${CYAN}  Build selected images locally${NC}"
     echo -e "${CYAN}=======================================================${NC}"
     echo
-    if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
-        ok "Logged in to Docker Hub as ${DH_USER}"
+    _build_ready=1
+    if [[ "${DO_BUILD}" -eq 1 ]]; then
+        if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
+            ok "Logged in to Docker Hub as ${DH_USER}"
+        else
+            warn "Docker Hub login failed — images were NOT built."
+            _build_ready=0
+        fi
+    fi
+    if [[ "${_build_ready}" -eq 1 ]]; then
         BUILD_FAILED=()
         for _entry in "${SELECTED_BUILD_IMAGES[@]}"; do
             IFS='|' read -r _num _label _img _ctx _df _method <<< "$_entry"
@@ -1059,6 +1658,7 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
                 _svc="${_method#compose:}"
                 if ( cd "${REPO_ROOT}" && docker compose build "${_svc}" ); then
                     ok "  Built ${_img}:latest"
+                    LOCAL_BUILT_IMAGES+=("${_img}:latest")
                 else
                     warn "  Build failed: ${_label}"
                     BUILD_FAILED+=("${_label} (build)"); continue
@@ -1070,27 +1670,33 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
                 fi
                 if docker build -t "${_img}:latest" -f "${_ctx}/${_df}" "${_ctx}"; then
                     ok "  Built ${_img}:latest"
+                    LOCAL_BUILT_IMAGES+=("${_img}:latest")
                 else
                     warn "  Build failed: ${_label}"
                     BUILD_FAILED+=("${_label} (build)"); continue
                 fi
             fi
-            if docker push "${_img}:latest"; then
-                ok "  Pushed ${_img}:latest"
-            else
-                warn "  Push failed: ${_label}"
-                BUILD_FAILED+=("${_label} (push)")
+            if [[ "${DO_BUILD}" -eq 1 ]]; then
+                if docker push "${_img}:latest"; then
+                    ok "  Pushed ${_img}:latest"
+                else
+                    warn "  Push failed: ${_label}"
+                    BUILD_FAILED+=("${_label} (push)")
+                fi
             fi
         done
         echo
         if [[ ${#BUILD_FAILED[@]} -eq 0 ]]; then
-            ok "All selected images built and pushed successfully."
+            if [[ "${DO_BUILD}" -eq 1 ]]; then
+                ok "All selected images built and pushed successfully."
+            else
+                ok "All selected images built locally (${#LOCAL_BUILT_IMAGES[@]} images ready for KinD load)."
+            fi
         else
             warn "Completed with failures: ${BUILD_FAILED[*]}"
         fi
-    else
-        warn "Docker Hub login failed — images were NOT built."
     fi
+    unset _build_ready
     echo -e "${CYAN}=======================================================${NC}"
     echo
 fi
@@ -1119,3 +1725,17 @@ case "${deploy_choice,,}" in
     h) helm_deploy ;;
     *) echo -e "${DIM}Skipped — run './scripts/setup.sh' again and choose k or h to deploy.${NC}" ;;
 esac
+
+# --- Prepare experiment images -----------------------------------------------
+# Runs whenever any image source is non-default (local or jfrog).
+# In --restart mode this reads the current .env values directly.
+_cur_app_src="$(cur INSTALL_APP_IMAGE_SOURCE)"
+_cur_agent_src="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
+_cur_litmus_src="$(cur LITMUS_IMAGES_SOURCE)"
+if [[ "${_cur_app_src}"   == "local" || "${_cur_app_src}"   == "jfrog" || \
+      "${_cur_agent_src}" == "local" || "${_cur_agent_src}" == "jfrog" || \
+      "${_cur_litmus_src}" == "local" ]]; then
+    echo
+    "${REPO_ROOT}/scripts/prepare-images.sh"
+fi
+unset _cur_app_src _cur_agent_src _cur_litmus_src

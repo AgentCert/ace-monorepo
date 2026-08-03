@@ -17,7 +17,21 @@
 set -euo pipefail
 
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
-KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agentcert}"
+# Identifies THIS checkout on the shared host (see docker-compose.yml, which
+# passes this through from the monorepo-root .env's ACE_INSTANCE_NAME).
+# "unknown-instance" only applies if someone runs this container directly,
+# bypassing `docker compose up` from the repo root -- the supported path
+# always has a concrete value here.
+ACE_INSTANCE_NAME="${ACE_INSTANCE_NAME:-unknown-instance}"
+# Never bare "agentcert" -- see the ensure_kind() ownership-marker comment
+# below for why a checkout-independent default is unsafe on a shared host.
+KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agentcert-${ACE_INSTANCE_NAME}}"
+# The host-side absolute path of this checkout (docker-compose.yml passes
+# `${PWD}` through as this, i.e. wherever `docker compose up` was invoked
+# from). Used only to label kind-cluster ownership below -- `/repo` itself
+# is just this container's fixed internal mount alias and is identical
+# across every checkout, so it can't serve as an identity.
+HOST_REPO_ROOT="${HOST_REPO_ROOT:-/repo}"
 HOST_PUBLIC_IP="${HOST_PUBLIC_IP:-}"
 # Host ~/.kube is mounted here read-write so `kind create` can rewrite it.
 export KUBECONFIG="${KUBECONFIG:-/host-kube/config}"
@@ -60,7 +74,45 @@ kind_cluster_exists() {
     kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"
 }
 
+# Ownership marker for a kind cluster THIS checkout created: a docker volume
+# labelled with this checkout's host-side path. A kind cluster (like a
+# docker container name) is a host-wide unique resource, not scoped to a
+# checkout or user -- two engineers' checkouts on the same shared host can
+# both default to a cluster named "agentcert". Before reusing, restarting,
+# or deleting a cluster by name, refuse unless this marker proves THIS
+# checkout created it. This is the kind-cluster equivalent of
+# assert_not_foreign_container() in scripts/start-local-services.sh -- see
+# CLAUDE.md section 0 for the incident that safety net was built to prevent.
+kind_owner_marker() { echo "ace-kind-owner-$1"; }
+
+assert_kind_cluster_ownership() {
+    local cluster_name="$1"
+    kind_cluster_exists || return 0   # doesn't exist yet -- nothing to protect
+    local marker; marker="$(kind_owner_marker "${cluster_name}")"
+    if ! docker volume inspect "${marker}" >/dev/null 2>&1; then
+        err "kind cluster '${cluster_name}' exists but has no ACE ownership marker (${marker})."
+        err "It may belong to another checkout or user on this shared host. Refusing to reuse, restart, or delete it."
+        err "Set a unique KIND_CLUSTER_NAME in .env for this checkout, or if you are CERTAIN this cluster is yours, run:"
+        err "  docker volume create --label ace.kind.owner=${HOST_REPO_ROOT} ${marker}"
+        return 1
+    fi
+    local owner
+    owner="$(docker volume inspect "${marker}" --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null)"
+    if [[ "${owner}" != "${HOST_REPO_ROOT}" ]]; then
+        err "kind cluster '${cluster_name}' is owned by a different checkout (working_dir: ${owner:-unknown}, ours: ${HOST_REPO_ROOT})."
+        err "Refusing to touch it. Set a unique KIND_CLUSTER_NAME in .env for this checkout."
+        return 1
+    fi
+    return 0
+}
+
+mark_kind_cluster_owned()   { docker volume create --label "ace.kind.owner=${HOST_REPO_ROOT}" "$(kind_owner_marker "$1")" >/dev/null; }
+unmark_kind_cluster_owned() { docker volume rm "$(kind_owner_marker "$1")" >/dev/null 2>&1 || true; }
+
 ensure_kind() {
+    # Hard stop before touching ANYTHING by this name -- see CLAUDE.md section 0.
+    assert_kind_cluster_ownership "${KIND_CLUSTER_NAME}" || exit 1
+
     if kind_cluster_exists; then
         kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
         if context_works; then
@@ -79,6 +131,7 @@ ensure_kind() {
         done
         warn "Still unreachable after restart — recreating the cluster."
         kind delete cluster --name "${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
+        unmark_kind_cluster_owned "${KIND_CLUSTER_NAME}"
     fi
 
     log "Creating kind cluster '${KIND_CLUSTER_NAME}' ..."
@@ -87,9 +140,11 @@ ensure_kind() {
         log "Using kind config ${KIND_CONFIG}"
         kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"
     else
-        warn "No kind config at ${KIND_CONFIG} — creating with defaults."
+        warn "No kind config at ${KIND_CONFIG} — creating with defaults (no ACE port mappings, and NOT instance-scoped)."
+        warn "Run deploy/kind/render-kind-config.sh --personal-workspace on the host first, then re-run, to get ACE's port mappings without colliding with another checkout on this host."
         kind create cluster --name "${KIND_CLUSTER_NAME}"
     fi
+    mark_kind_cluster_owned "${KIND_CLUSTER_NAME}"
     kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
 }
 

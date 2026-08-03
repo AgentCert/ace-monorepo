@@ -1,7 +1,16 @@
 # =============================================================================
 # ACE Monorepo — one-command bring-up
 #
-#   docker compose up -d
+#   ./scripts/compose-up-guard.sh up -d
+#
+# On a shared host, prefer the guard script above over a raw `docker compose
+# up -d` -- it's a drop-in wrapper that refuses to proceed if any container
+# this file would create already exists under a DIFFERENT checkout's working
+# directory (see CLAUDE.md section 0). The project name and every
+# container_name below are suffixed with ACE_INSTANCE_NAME (.env) so two
+# checkouts don't collide by default in the first place; the guard script is
+# the belt-and-suspenders check for when they still might (e.g. shared
+# ACE_INSTANCE_NAME, or unset on both).
 #
 # Replaces the old two-script flow (scripts/start-local-services.sh +
 # scripts/azure_build/start-agentcert-v2.sh). Everything is driven by the
@@ -26,7 +35,13 @@
 # (litellm :14000, langfuse :4000) via the kind gateway 172.26.0.1.
 # =============================================================================
 
-name: ace
+# Suffixed with ACE_INSTANCE_NAME so this checkout's Compose project never
+# collides with another checkout's on the same shared host -- Compose
+# identifies "its" containers by this project label, not by working
+# directory. "unconfigured" only applies if ACE_INSTANCE_NAME was never set
+# (e.g. .env doesn't exist yet) -- run scripts/setup.sh first. See CLAUDE.md
+# section 0 for the incident this guards against.
+name: ace-${ACE_INSTANCE_NAME:-unconfigured}
 
 # Pull in the certifier stack and the profile-gated Langfuse stack so a single
 # `docker compose up` covers everything.
@@ -42,11 +57,22 @@ services:
   cluster-init:
     build: ./compose/cluster-init
     image: agentcert/cluster-init:latest
-    container_name: ace-cluster-init
+    container_name: ace-cluster-init-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
     environment:
       CLUSTER_MODE: ${CLUSTER_MODE:-auto}
-      KIND_CLUSTER_NAME: ${KIND_CLUSTER_NAME:-agentcert}
+      # Passed through empty-by-default on purpose: entrypoint.sh computes an
+      # instance-scoped default (agentcert-${ACE_INSTANCE_NAME}) itself. A
+      # bare "agentcert" baked in here would pre-empt that and put every
+      # checkout back on the same host-wide-unique cluster name. See
+      # CLAUDE.md section 0.
+      ACE_INSTANCE_NAME: ${ACE_INSTANCE_NAME:-}
+      KIND_CLUSTER_NAME: ${KIND_CLUSTER_NAME:-}
+      # This checkout's host-side absolute path (Compose expands ${PWD} from
+      # the invoking shell, i.e. wherever `docker compose up` was run from).
+      # Used by entrypoint.sh only to label kind-cluster ownership so it can
+      # tell "our cluster" apart from another checkout's on this same host.
+      HOST_REPO_ROOT: ${PWD}
       HOST_PUBLIC_IP: ${HOST_PUBLIC_IP:-}
       KUBECONFIG: /host-kube/config
       KUBECONFIG_OUT: /shared/config
@@ -78,7 +104,7 @@ services:
   # ── MongoDB (replSet rs0 + keyFile + root auth) ─────────────────────────────
   mongo-keyfile:
     image: mongo:5
-    container_name: ace-mongo-keyfile
+    container_name: ace-mongo-keyfile-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     entrypoint:
       - bash
@@ -90,7 +116,7 @@ services:
 
   mongo:
     image: mongo:5
-    container_name: agentcert-mongo
+    container_name: agentcert-mongo-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     # Bridge networking (NOT host) + a published port. The mongo image's
     # user-init step always binds 27017 *inside the container* — on a bridge
@@ -120,7 +146,7 @@ services:
   # On the compose network, so it reaches mongo by service name on 27017.
   mongo-init:
     image: mongo:5
-    container_name: ace-mongo-init
+    container_name: ace-mongo-init-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     depends_on:
       mongo:
@@ -141,7 +167,7 @@ services:
       context: AgentCert/chaoscenter/authentication
       dockerfile: Dockerfile
     image: agentcert/agentcert-auth:latest
-    container_name: agentcert-auth
+    container_name: agentcert-auth-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
     extra_hosts:
       - "mongodb:127.0.0.1"
@@ -165,7 +191,7 @@ services:
       context: AgentCert/chaoscenter/graphql
       dockerfile: server/Dockerfile
     image: agentcert/agentcert-graphql:latest
-    container_name: agentcert-graphql
+    container_name: agentcert-graphql-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
     extra_hosts:
       - "mongodb:127.0.0.1"
@@ -271,7 +297,7 @@ services:
         EXPOSE 2001
         ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]
     image: agentcert/agentcert-web:latest
-    container_name: agentcert-web
+    container_name: agentcert-web-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
     # Run as root so nginx can read the bind-mounted nginx.conf regardless of
     # host file permissions (git does not preserve permissions beyond the
@@ -287,10 +313,36 @@ services:
       - ./compose/web-nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
 
+  # ── Ollama inference server (profile: ollama) ───────────────────────────────
+  # One container per ACE instance (container_name + volume both scoped by
+  # ACE_INSTANCE_NAME) so two checkouts on this shared host never collide.
+  # OLLAMA_PORT is the host-side port; the system Ollama owns :11434 so this
+  # must differ. setup.sh auto-derives a UID-based default; override in .env.
+  # Requires NVIDIA Container Toolkit (nvidia-container-runtime) for GPU access.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-${ACE_INSTANCE_NAME:-unconfigured}
+    profiles: ["ollama"]
+    ports:
+      - "${OLLAMA_PORT:-11435}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      # Ollama binds to all interfaces inside the container by default.
+      OLLAMA_HOST: "0.0.0.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
   # ── LiteLLM gateway (profile: litellm) ──────────────────────────────────────
   litellm:
     image: ${LITELLM_PROXY_IMAGE:-litellm/litellm:v1.82.0-stable}
-    container_name: litellm-proxy
+    container_name: litellm-proxy-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["litellm"]
     restart: unless-stopped
     extra_hosts:
@@ -323,7 +375,7 @@ services:
   # workspace tree and chowns it to uid 1000 before the certifier starts.
   workspace-init:
     image: python:3.11-slim
-    container_name: ace-workspace-init
+    container_name: ace-workspace-init-${ACE_INSTANCE_NAME:-unconfigured}
     user: root
     command: >
       bash -c "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"
@@ -340,7 +392,7 @@ services:
       dockerfile: Dockerfile
       target: runtime
     image: ${CERTIFIER_IMAGE:-certifier:latest}
-    container_name: certifier_app
+    container_name: certifier_app_${ACE_INSTANCE_NAME:-unconfigured}
     restart: unless-stopped
     depends_on:
       workspace-init:
@@ -391,4 +443,9 @@ volumes:
   empty-aws-creds:
     driver: local
   empty-gcloud-creds:
+    driver: local
+  # Per-instance Ollama model store — scoped by ACE_INSTANCE_NAME so each
+  # checkout has its own isolated model library, no cross-user sharing.
+  ollama-models:
+    name: ollama-models-${ACE_INSTANCE_NAME:-unconfigured}
     driver: local

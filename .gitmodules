@@ -12,15 +12,15 @@
 [submodule "AgentCert"]
 	path = AgentCert
 	url = https://github.com/AgentCert/AgentCert.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "app-charts"]
 	path = app-charts
 	url = https://github.com/aruscher-dev/app-charts.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "agent-charts"]
 	path = agent-charts
 	url = https://github.com/AgentCert/agent-charts.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "certifier"]
 	path = certifier
 	url = https://github.com/aruscher-dev/certifier.git
@@ -28,11 +28,11 @@
 [submodule "flash-agent"]
 	path = flash-agent
 	url = https://github.com/AgentCert/flash-agent.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "agentcert-stack"]
 	path = agentcert-stack
 	url = https://github.com/AgentCert/agentcert-stack.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "chaos-charts"]
 	path = chaos-charts
 	url = https://github.com/aruscher-dev/chaos-charts.git
@@ -40,8 +40,8 @@
 [submodule "agent-sidecar"]
 	path = agent-sidecar
 	url = https://github.com/AgentCert/agent-sidecar.git
-	branch = main
+	branch = feature/itbench-scenarios
 [submodule "litmus-go"]
 	path = litmus-go
 	url = https://github.com/AgentCert/litmus-go.git
-	branch = master
+	branch = feature/itbench-scenarios

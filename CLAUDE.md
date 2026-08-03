@@ -5,6 +5,20 @@ Authoritative orientation document for Claude AI sessions. Read this before expl
 
 ---
 
+## 0. CRITICAL: This host is shared. Never touch another user's resources.
+
+The dev/build host(s) this repo runs on are shared among multiple engineers, each with their **own independent checkout** of this monorepo (e.g. `/srv/projects/ace-monorepo` is a real, separate, actively-used checkout owned by other users — it is not yours to act on). This is not a hypothetical: an agent session working from a different checkout on this exact host once ran `docker compose up` without an explicit project name, and Docker Compose — which identifies "its" containers purely by a shared label, not by working directory — matched another user's already-running `litellm-proxy` and `certifier_app` containers as "stale instances of its own service" and **deleted and replaced them**, entirely silently, with no warning and no confirmation prompt. The owners never authorized this and were not touched, asked, or informed until after the fact.
+
+**Rules, no exceptions:**
+
+- Never stop, remove, restart, recreate, or otherwise mutate a Docker/Kubernetes resource (container, volume, network, image, Compose project, KinD cluster, namespace) that you did not create in the current session, unless **both** (a) the resource's owner has explicitly consented to the specific action, **and** (b) the user directing you in this session has explicitly authorized it. Either one alone is not enough — the owner's consent without your current user's explicit go-ahead is not sufficient grounds to act, and vice versa.
+- Never run `docker compose` (or `docker run --name`, or anything that creates a named resource) without an explicit, checkout-unique project/instance identifier. Relying on Compose's default project-name-from-directory-basename behavior is what caused the incident above — two checkouts of this repo have submodule directories with identical basenames (`litellm-setup`, `certifier`, etc.), so implicit naming silently collides across users. See `ACE_INSTANCE_NAME` in `scripts/start-local-services.sh` for the pattern this repo now uses.
+- Before creating or starting anything with a name/port/project you haven't verified is free, enumerate what already exists on the host (`docker ps -a`, `docker volume ls`, `docker network ls`, `kubectl get ns`) and check labels/working-directory ownership (`docker inspect ... com.docker.compose.project.working_dir`) for anything that looks like it might belong to someone else. Treat any ambiguity as a hard stop requiring the user's explicit confirmation — not something to route around or silently "fix" by adopting/recreating the resource.
+- If you discover you have already affected another user's resource, stop immediately, do not attempt further remediation on it unilaterally, and disclose exactly what happened to the user in full, unhedged detail before doing anything else.
+- This applies to every shared host referenced by this repo's tooling, not just the one where the incident happened — the same collision pattern (implicit Compose project names, shared container name conventions, shared KinD cluster names) can recur anywhere this repo is checked out more than once on the same machine.
+
+---
+
 ## 1. Project Overview
 
 **ACE (Agent Certification Engine)** is a git-submodule monorepo that aggregates every component required to evaluate, fault-inject, and certify autonomous AI agents under controlled Kubernetes chaos conditions.
@@ -18,7 +32,7 @@ Authoritative orientation document for Claude AI sessions. Read this before expl
 - `ITBench-CISO-CAA-Agent` — CISO compliance agent (LangGraph + CrewAI)
 
 **License:** Apache 2.0. Copyright 2026 AgentCert Authors.
-**Default branch:** `main`. **Upstream org:** https://github.com/AgentCert
+**Default branch:** `main`. **Active feature branch:** `feature/itbench-scenarios` — all submodules currently tracking this branch. **Upstream org:** https://github.com/AgentCert
 **Commit convention:** Conventional Commits (`feat/fix/chore/docs/refactor/test/build/ci/perf`)
 
 ---
@@ -92,22 +106,29 @@ ace-monorepo/
 ├── deploy/
 │   ├── helm/ace/                # Main ACE platform Helm chart (deploys all services to ace namespace)
 │   ├── k8s/                     # Flat kubectl-apply manifests (Helm alternative)
-│   └── kind/                    # KinD cluster config: kind-agentcert.yaml
+│   └── kind/                    # KinD cluster config + tooling
+│       ├── kind-agentcert.yaml  # Template KinD config (do not use directly on a shared host)
+│       └── render-kind-config.sh  # Renders kind-agentcert.yaml with instance-scoped name + ports
 ├── compose/                     # Docker Compose configs for local dev bringup
-│   ├── cluster-init/            # MongoDB replica set init container
+│   ├── cluster-init/            # MongoDB replica set init container (entrypoint.sh: KinD ownership guards)
 │   ├── langfuse/                # Langfuse compose services
-│   └── kind/                    # KinD-specific overrides
+│   ├── kind/                    # KinD-specific overrides
+│   ├── langfuse.override.yml    # Port isolation override for upstream Langfuse clone (LANGFUSE_PORT, MINIO_API_PORT)
+│   ├── litellm.override.yml     # Instance isolation override for agentcert-stack LiteLLM (LITELLM_PORT, container_name)
+│   └── certifier.override.yml   # Instance isolation override for certifier submodule (container_name)
 ├── scripts/
-│   ├── setup.sh                 # Interactive setup wizard: creates .env, generates Helm values, deploys
-│   ├── start-local-services.sh  # Idempotent local dev stack bringup (MongoDB, Langfuse, LiteLLM, Certifier)
+│   ├── setup.sh                 # Interactive setup wizard: creates .env, generates Helm values, deploys; auto-sets ACE_INSTANCE_NAME + OLLAMA_PORT
+│   ├── start-local-services.sh  # Idempotent local dev stack bringup (MongoDB, Langfuse, Ollama, LiteLLM, Certifier)
+│   ├── compose-up-guard.sh      # Safety wrapper for `docker compose up` — refuses if any container already belongs to a different checkout
 │   ├── build-and-push.sh        # Builds all 5 Docker images, pushes to Docker Hub
+│   ├── prepare-images.sh        # Build/load/configure experiment workflow images per *_IMAGE_SOURCE in .env (dockerhub/jfrog/local); called by setup.sh
 │   ├── ace-bench.py             # Dev-tool: trace_based pipeline only (flash-agent local dev). Production orchestration uses LitmusChaos Argo Workflow.
 │   ├── run_certification.py     # End-to-end certifier runner (dev/CI, no FastAPI server needed)
 │   ├── dump_langfuse_trace.py   # Fetches Langfuse trace → raw_trace.json + trace_meta.json
 │   └── render_certification_pdf.py  # Standalone PDF render from existing certification.json
 ├── docs/                        # Architecture diagrams, API docs, methodology references
 ├── data/                        # Sample traces, ground truth data
-├── docker-compose.yml           # Root compose file for full local stack
+├── docker-compose.yml           # Root compose file for full local stack; project name: ace-${ACE_INSTANCE_NAME:-unconfigured}; all container_names suffixed with ACE_INSTANCE_NAME; use via compose-up-guard.sh
 ├── .env.example                 # Template for required secrets (copy to .env; .env is gitignored)
 ├── build-paths.env              # Component source-path overrides for local dev builds
 └── sonar-project.properties     # SonarQube: projectKey=ace-monorepo, Python 3.12, sources listed
@@ -463,8 +484,21 @@ For all other agents, benchmarking is driven by the LitmusChaos Argo Workflow re
 #### KinD Local Cluster
 
 ```bash
-kind create cluster --config deploy/kind/kind-agentcert.yaml --name agentcert
+# On a shared host, NEVER use the template config directly — cluster name and all hostPorts
+# are host-wide unique resources; two checkouts collide by default.
+# Render an instance-scoped config first (sets KIND_CLUSTER_NAME + unique ports from .env):
+deploy/kind/render-kind-config.sh --personal-workspace
+
+# Then the cluster-init container picks it up automatically via docker-compose.yml, or run directly:
+kind create cluster --config .tmp/kind-agentcert.rendered.yaml
 # Single control-plane node with explicit NodePort-to-host mappings for all services
+```
+
+**KinD eviction thresholds (this host):** The host's Docker data-root (`/Innovation/docker`) sits on a large volume that appears nearly full by percentage (~2.6% free) even though tens of GB remain in absolute terms. Kubelet's default thresholds (`nodefs.available<10%`, `imagefs.available<15%`) fire on percentage alone and immediately evict pods. The checked-in `kind-agentcert.yaml` (and `compose/kind/kind-fresh.yaml`) override these with **absolute floors** (`nodefs.available<5Gi,imagefs.available<5Gi`) so pods are not spuriously evicted. Do not remove these overrides on this host.
+
+**KinD cluster ownership:** `cluster-init/entrypoint.sh` marks every cluster it creates with a Docker volume (`ace-kind-owner-<name>`) labelled with this checkout's host path. Before reusing or deleting a cluster it checks this marker — clusters owned by other checkouts are refused. To manually claim a cluster you know is yours:
+```bash
+docker volume create --label ace.kind.owner=${PWD} ace-kind-owner-agentcert-<ACE_INSTANCE_NAME>
 ```
 
 #### ACE Platform Helm Chart (`deploy/helm/ace/`)
@@ -534,8 +568,10 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 
 | Script | Usage |
 |--------|-------|
-| `setup.sh` | `./scripts/setup.sh [--setup\|--restart]` — interactive wizard first time; `--restart` skips prompts |
-| `start-local-services.sh` | `./scripts/start-local-services.sh [--skip-mongo] [--skip-langfuse] [--only-certifier] [--restart] [--pull-certifier]` |
+| `setup.sh` | `./scripts/setup.sh [--setup\|--restart] [--local-build]` — interactive wizard first time; `--restart` skips prompts; `--local-build` forces all images to build locally (no Docker Hub). Auto-backfills `ACE_INSTANCE_NAME`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT`, `APP_CHARTS_ROOT` in `.env`. Prompts for Ollama model (default: `qwen2.5:32b-instruct`) and image source (dockerhub/jfrog/local) per service. |
+| `start-local-services.sh` | `./scripts/start-local-services.sh [--skip-mongo] [--skip-langfuse] [--skip-ollama] [--skip-litellm] [--skip-certifier] [--only-mongo] [--only-langfuse] [--only-ollama] [--only-litellm] [--only-certifier] [--restart] [--pull-certifier]` |
+| `compose-up-guard.sh` | `./scripts/compose-up-guard.sh up -d` — drop-in wrapper for `docker compose`; refuses to proceed if any container in the stack already exists under a different checkout's working directory |
+| `prepare-images.sh` | `./scripts/prepare-images.sh` — builds, loads, or configures registry credentials for experiment workflow images based on `*_IMAGE_SOURCE` settings in `.env` (dockerhub/jfrog/local). Called automatically by `setup.sh`; safe to run standalone to rebuild/reload. |
 | `build-and-push.sh` | `./scripts/build-and-push.sh [--env-file PATH]` — reads DOCKERHUB_USERNAME + DOCKERHUB_TOKEN from .env |
 | `ace-bench.py` | **Dev-tool, trace_based only.** `python scripts/ace-bench.py flash-agent [--runs N] [--runs-per-fault N] [--resume] [--skip-setup] [--skip-certifier]`. Production runs use the LitmusChaos Argo Workflow. |
 | `run_certification.py` | `python scripts/run_certification.py --trace-id <UUID> [--workspace DIR] [--skip-cert] [--no-pdf] [--debug]` |
@@ -592,7 +628,9 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 
 **Kubernetes Namespace for ACE:** `ace` (platform). Agent workloads deploy into the target application namespace (e.g., `sock-shop`).
 
-**Open-weight model tested:** `qwen2.5:7b-instruct` via Ollama, GPU: NVIDIA RTX A6000 (49 GB VRAM).
+**Open-weight model tested:** `qwen2.5:7b-instruct` (and `qwen2.5:32b-instruct`) via Ollama, GPU: NVIDIA RTX A6000 (49 GB VRAM).
+
+**ACE-managed Ollama:** `start-local-services.sh` and `docker-compose.yml` (profile: `ollama`) can run an instance-scoped Ollama container (`ollama-${ACE_INSTANCE_NAME}`) on a UID-derived host port (`OLLAMA_PORT`), isolated from the system Ollama on :11434 and from other checkouts. `setup.sh` prompts for the model tag and writes `OLLAMA_MODEL` to `.env`. Models are stored in a named volume (`ollama-models-${ACE_INSTANCE_NAME}`) scoped per instance. GPU access requires NVIDIA Container Toolkit; falls back to CPU automatically.
 
 ---
 
@@ -628,19 +666,28 @@ kubectl get pods -n ace
 # Copy and fill in credentials
 cp .env.example .env
 # Edit .env with AZURE_OPENAI_KEY, GEMINI_API_KEY, etc.
+# Run setup.sh at least once — it auto-generates ACE_INSTANCE_NAME and OLLAMA_PORT in .env
+./scripts/setup.sh --restart   # or ./scripts/setup.sh for interactive first-time
 
-# Start MongoDB + Langfuse + LiteLLM + Certifier
+# Start MongoDB + Langfuse + Ollama + LiteLLM + Certifier
 ./scripts/start-local-services.sh
 
 # Selective start
 ./scripts/start-local-services.sh --only-mongo
 ./scripts/start-local-services.sh --skip-langfuse
+./scripts/start-local-services.sh --skip-ollama   # skip Ollama (if using cloud LLM only)
+./scripts/start-local-services.sh --only-ollama   # start only Ollama
 
 # Force restart everything
 ./scripts/start-local-services.sh --restart
 
 # Use pre-built certifier image instead of building from source
 ./scripts/start-local-services.sh --pull-certifier
+
+# Alternatively: use the one-command root docker-compose.yml with the safety guard
+# (belt-and-suspenders check against cross-checkout container collisions)
+./scripts/compose-up-guard.sh up -d
+./scripts/compose-up-guard.sh down
 ```
 
 ### Certifier Development
@@ -738,9 +785,13 @@ python scripts/ace-bench.py flash-agent --runs 30
 python scripts/run_certification.py --trace-id <LANGFUSE_UUID>
 python scripts/run_certification.py --trace-id <UUID> --no-pdf --debug
 
-# Start local dev stack
+# Start local dev stack (start-local-services manages MongoDB, Langfuse, Ollama, LiteLLM, Certifier)
 ./scripts/start-local-services.sh
 ./scripts/start-local-services.sh --restart
+./scripts/start-local-services.sh --skip-ollama   # skip Ollama when using cloud LLMs only
+
+# Alternative: one-command root docker-compose.yml with ownership guard
+./scripts/compose-up-guard.sh up -d
 
 # Redeploy Kubernetes stack with existing .env (no prompts)
 ./scripts/setup.sh --restart
@@ -811,6 +862,22 @@ curl "http://localhost:8000/api/v1/cert-tasks?experiment_id=<exp>"
 
 All consumed from root `.env` file (created by `scripts/setup.sh`). Values prefixed `ENV_` in JSON configs are resolved from env at runtime by ConfigLoader.
 
+### Shared-Host Isolation (auto-set by `setup.sh`)
+
+These are backfilled into `.env` automatically on every `setup.sh` run (both `--setup` and `--restart`). Do not set them to the same value as another checkout on this host.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ACE_INSTANCE_NAME` | username (from `id -un`) | Suffix for all container names, volume names, Compose project names, and KinD cluster names — ensures two checkouts never collide on the shared host. All scripts read this; never leave it blank. |
+| `OLLAMA_PORT` | UID-derived, verified free | Host port for this checkout's Ollama container; avoids collision with system Ollama on :11434 and other checkouts. |
+| `OLLAMA_MODEL` | `qwen2.5:32b-instruct` (setup.sh default) | Model tag to pull/use. `setup.sh` prompts interactively; empty means Ollama is skipped. |
+| `MONGO_PORT` | `27017` | Host port for this checkout's MongoDB; override if :27017 is taken by another checkout. |
+| `LANGFUSE_PORT` | `4000` | Host port for Langfuse web; override if :4000 is taken. |
+| `MINIO_API_PORT` | `9090` | Host port for Langfuse MinIO S3 API; override if :9090 is taken. |
+| `LITELLM_PORT` | `14000` | Host port for LiteLLM proxy; override if :14000 is taken. |
+| `AGENT_CHARTS_ROOT` | `<repo-root>/agent-charts` | Absolute path to agent Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
+| `APP_CHARTS_ROOT` | `<repo-root>/app-charts` | Absolute path to app Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
+
 ### Critical — Certifier
 
 | Variable | Default | Purpose |
@@ -852,11 +919,25 @@ All consumed from root `.env` file (created by `scripts/setup.sh`). Values prefi
 | `LITELLM_MASTER_KEY` | LiteLLM gateway auth key (local dev: `sk-agentcert-2026`) |
 | `LANGFUSE_ORG_ID` / `LANGFUSE_PROJECT_ID` | Langfuse project scoping for GraphQL server |
 | `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Used by `build-and-push.sh` |
-| `ALLOWED_ORIGINS` | CORS/WebSocket origin allowlist |
+| `ALLOWED_ORIGINS` | CORS/WebSocket origin allowlist. Extended regex includes `[a-z0-9.-]+\.svc\.cluster\.local` so in-cluster Kubernetes services (e.g. subscriber) can connect. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Langfuse PostgreSQL |
 | `REDIS_AUTH` | Langfuse Redis password |
 | `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD` | Langfuse ClickHouse |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | Langfuse MinIO S3 |
+
+### Experiment Image Sources
+
+Controls where Argo Workflow step images are pulled at experiment run time. `setup.sh` prompts for each; can also be edited directly in `.env` and applied with `scripts/prepare-images.sh`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `INSTALL_APP_IMAGE_SOURCE` | `dockerhub` | Image source for the install-app workflow step: `dockerhub` (public, no creds), `jfrog` (requires JFROG_* creds), `local` (build from source + kind load) |
+| `INSTALL_AGENT_IMAGE_SOURCE` | `dockerhub` | Same options for the install-agent step |
+| `LITMUS_IMAGES_SOURCE` | `dockerhub` | LitmusChaos helper images: `dockerhub` or `local` (pre-pull + kind load; JFrog not supported for these) |
+| `JFROG_HOST` | `infyartifactory.jfrog.io` | JFrog Artifactory hostname — only needed when any `*_IMAGE_SOURCE=jfrog` |
+| `JFROG_REGISTRY_PATH` | `docker-local` | JFrog registry path |
+| `JFROG_USER` | — | JFrog username |
+| `JFROG_TOKEN` | — | JFrog API token / password |
 
 ### Critical — Flash Agent
 
@@ -1099,12 +1180,15 @@ These paths are generated, vendored, binary, or otherwise not worth reading:
 
 ## 14. Default Credentials (Local Dev)
 
+Ports marked with * are parameterized via `.env` (see Section 8, Shared-Host Isolation) and may differ from the defaults below on a shared host. Always check your `.env` for the actual values.
+
 | Service | URL | Username | Password |
 |---------|-----|----------|----------|
 | AgentCert UI | http://localhost:2001 | admin | litmus |
-| Langfuse | http://localhost:4000 | admin@agentcert.local | agentcert-admin |
-| MongoDB | localhost:27017 (rs0) | admin | 1234 |
-| LiteLLM Proxy | http://localhost:14000 | — | sk-agentcert-2026 |
+| Langfuse | http://localhost:`$LANGFUSE_PORT` (default 4000) | admin@agentcert.local | agentcert-admin |
+| MongoDB | localhost:`$MONGO_PORT` (default 27017) (rs0) | admin | 1234 |
+| LiteLLM Proxy | http://localhost:`$LITELLM_PORT` (default 14000) | — | sk-agentcert-2026 |
+| Ollama API | http://localhost:`$OLLAMA_PORT` (default UID-derived) | — | — |
 | Certifier Swagger | http://localhost:8000/docs | — | — |
 
-MongoDB connection string: `mongodb://admin:1234@localhost:27017/?replicaSet=rs0&authSource=admin`
+MongoDB connection string (replace port if MONGO_PORT differs): `mongodb://admin:1234@localhost:27017/?replicaSet=rs0&authSource=admin`

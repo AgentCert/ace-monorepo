@@ -1,0 +1,25 @@
+# =============================================================================
+# Instance-isolation override for certifier/docker-compose.yml's `app` service.
+#
+# Used as (see scripts/start-local-services.sh):
+#   docker compose --env-file <repo-root>/.env \
+#     -f docker-compose.yml -f <repo-root>/compose/certifier.override.yml \
+#     up -d app
+#
+# Why this exists as a root-repo override instead of an edit to the submodule:
+# certifier is a separate git repo (its own remote), so hand-editing it
+# locally would only fix this checkout and would vanish on the next
+# `git submodule update`. The submodule's own docker-compose.yml hardcodes
+# `container_name: certifier_app` — on a shared host where another ACE
+# checkout already owns that name, `up` either collides outright or (worse)
+# silently attaches to the OTHER checkout's already-running container instead
+# of starting its own. This override makes it instance-configurable via .env,
+# matching scripts/start-local-services.sh's ACE_INSTANCE_NAME convention
+# (see the comment above ACE_INSTANCE_NAME in that script for the full
+# rationale). API_PORT doesn't need an equivalent override here: the
+# submodule's own compose file already parameterizes it as
+# `${API_PORT:-8000}:${API_PORT:-8000}`.
+# =============================================================================
+services:
+  app:
+    container_name: ${CERTIFIER_CONTAINER_NAME:-certifier_app}

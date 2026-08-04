@@ -53,6 +53,7 @@ deploy/helm/ace/values-env.yaml
 .venv-certifier/
 overleaf/.venv-certifier/
 chaos-charts-default/
+itbench-litmus-chaos-enable.yml
 
 # Linux kernel fd pseudo-filenames (created by runaway /proc/self/fd dumps)
 pipe:*

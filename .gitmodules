@@ -15,7 +15,7 @@
 	branch = feature/itbench-scenarios
 [submodule "app-charts"]
 	path = app-charts
-	url = https://github.com/aruscher-dev/app-charts.git
+	url = https://github.com/AgentCert/app-charts.git
 	branch = feature/itbench-scenarios
 [submodule "agent-charts"]
 	path = agent-charts
@@ -23,11 +23,7 @@
 	branch = feature/itbench-scenarios
 [submodule "certifier"]
 	path = certifier
-	url = https://github.com/aruscher-dev/certifier.git
-	branch = feature/itbench-scenarios
-[submodule "flash-agent"]
-	path = flash-agent
-	url = https://github.com/AgentCert/flash-agent.git
+	url = https://github.com/AgentCert/certifier.git
 	branch = feature/itbench-scenarios
 [submodule "agentcert-stack"]
 	path = agentcert-stack
@@ -35,7 +31,7 @@
 	branch = feature/itbench-scenarios
 [submodule "chaos-charts"]
 	path = chaos-charts
-	url = https://github.com/aruscher-dev/chaos-charts.git
+	url = https://github.com/AgentCert/chaos-charts.git
 	branch = feature/itbench-scenarios
 [submodule "agent-sidecar"]
 	path = agent-sidecar

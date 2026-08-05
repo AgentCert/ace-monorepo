@@ -35,6 +35,8 @@ The dev/build host(s) this repo runs on are shared among multiple engineers, eac
 **Default branch:** `main`. **Active feature branch:** `feature/itbench-scenarios` — all submodules currently tracking this branch. **Upstream org:** https://github.com/AgentCert
 **Commit convention:** Conventional Commits (`feat/fix/chore/docs/refactor/test/build/ci/perf`)
 
+**Rule, no exceptions: every submodule's `.gitmodules` URL must point at an `https://github.com/AgentCert/...` repository — never a personal fork or any other account/org.** This has broken things silently before: `chaos-charts`, `app-charts`, and `certifier` all drifted to point at a contributor's personal fork (e.g. `aruscher-dev/chaos-charts`), and in one case the *checked-out* remote didn't even match the drifted `.gitmodules` URL (it pointed at a third, different fork). The practical damage: the deployed ChaosCenter's default ChaosHub syncs from `DEFAULT_HUB_GIT_URL`/`DEFAULT_HUB_BRANCH_NAME` (AgentCert org, by design) — any submodule content that only exists in a personal fork is invisible to it, so features (e.g. ITBench fault/experiment definitions) can be present in your local checkout yet completely absent from the running UI, with no error anywhere. If you need to push work before it can land upstream, push it to a branch on the AgentCert-org repo itself — do not repoint `.gitmodules` at a personal account, even temporarily. Verify with `grep url .gitmodules` and `git -C <submodule> remote -v` (both must agree and both must be `AgentCert`) before trusting that submodule content will actually reach deployed services.
+
 ---
 
 ## 2. Repository Structure
@@ -643,7 +645,7 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 - `git` with submodule support
 - Python 3.12 (certifier, scripts)
 - Go 1.24 (AgentCert backend changes)
-- Node.js 18+ (web frontend changes)
+- Node.js 20+ (web frontend changes — Node 18 is too old for `sass@1.102.0` and causes build failure)
 - At minimum one LLM API credential: Google Gemini (recommended for local dev) or Azure OpenAI
 
 ### First-Time Setup (Kubernetes)
@@ -767,6 +769,24 @@ make build && make run             # Docker build and run
 ```bash
 git submodule update --remote --merge
 ```
+
+### Known Operational Gotchas
+
+**`--restart` without `--local-build` silently skips Go rebuilds.**
+`setup.sh --restart` redeploys the Helm charts and restarts containers, but it does **not** rebuild Go binaries or Docker images from source. If you changed Go code in `AgentCert/` (e.g. a new ClusterRoleBinding in `1a_argo_rbac.yaml`, a bug fix in the certification package), you must run:
+```bash
+./scripts/setup.sh --restart --local-build
+```
+Otherwise the old image remains in the cluster with no warning.
+
+**JFrog 401 kills experiments mid-run.**
+If any `*_IMAGE_SOURCE` in `.env` is set to `jfrog`, containerd will attempt to pull from JFrog at experiment execution time. If credentials are missing, expired, or the token has been rotated, the experiment step fails unrecoverably — there is no retry and the run must be abandoned. For KinD-based experiments, always prefer `local` (build from source + kind load via `scripts/prepare-images.sh`) unless you have verified JFrog credentials are fresh in the cluster.
+
+**KIND_CLUSTER_NAME mismatch in `.env` breaks cluster access.**
+If `.env` was copied from another machine or checkout, `KIND_CLUSTER_NAME` may not match the actual cluster name on this host. `setup.sh --restart` auto-detects the running cluster and corrects `.env`, but a raw `kubectl` or `helm` command will fail if the kubeconfig context is wrong. Always run `kind get clusters` to verify before manual kubectl work.
+
+**Credential YAML files must be gitignored before creation.**
+Experiment configuration files that embed live secrets (e.g. `itbench-litmus-chaos-enable.yml` which carries a LitmusChaos `ACCESS_KEY`) must be added to `.gitignore` **before** they are written to disk. If one is accidentally committed, remove it from remote with `git rm --cached` and rotate the key immediately — the key lives in git history even after the file is deleted.
 
 ---
 
@@ -933,7 +953,7 @@ Controls where Argo Workflow step images are pulled at experiment run time. `set
 |----------|---------|---------|
 | `INSTALL_APP_IMAGE_SOURCE` | `dockerhub` | Image source for the install-app workflow step: `dockerhub` (public, no creds), `jfrog` (requires JFROG_* creds), `local` (build from source + kind load) |
 | `INSTALL_AGENT_IMAGE_SOURCE` | `dockerhub` | Same options for the install-agent step |
-| `LITMUS_IMAGES_SOURCE` | `dockerhub` | LitmusChaos helper images: `dockerhub` or `local` (pre-pull + kind load; JFrog not supported for these) |
+| `LITMUS_IMAGES_SOURCE` | `dockerhub` | LitmusChaos helper images: `dockerhub` or `local` (pre-pull + kind load; JFrog not supported for these). `litmuschaos/go-runner:latest` must be present — verify it is included in `prepare-images.sh` before running chaos faults. |
 | `JFROG_HOST` | `infyartifactory.jfrog.io` | JFrog Artifactory hostname — only needed when any `*_IMAGE_SOURCE=jfrog` |
 | `JFROG_REGISTRY_PATH` | `docker-local` | JFrog registry path |
 | `JFROG_USER` | — | JFrog username |
@@ -1158,6 +1178,7 @@ These paths are generated, vendored, binary, or otherwise not worth reading:
 **Generated/secret configs:**
 - `deploy/helm/ace/values-env.yaml` — generated by `setup.sh` from `.env`; contains secrets; gitignored
 - `.env` — local secrets; gitignored; **never commit**
+- `itbench-litmus-chaos-enable.yml` (and any `*-enable.yml` experiment config) — contains live `ACCESS_KEY` credentials; gitignored; **never commit**. See "Known Operational Gotchas" in Section 6.
 
 **Submodule internals rarely needed:**
 - `chaos-charts/` — LitmusChaos fault YAML templates; only needed when adding new fault types

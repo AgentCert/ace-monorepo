@@ -183,14 +183,14 @@ flowchart LR
         direction TB
 
         subgraph CC["chaos-charts"]
-            CC_MAIN["main:\naruscher-dev/chaos-charts:main\n35 generic K8s faults"]
-            CC_ITB["itbench-scenarios:\naruscher-dev/chaos-charts:feature/itbench-scenarios\n35 generic + 30 ITBench SRE fault bundles"]
+            CC_MAIN["main:\nAgentCert/chaos-charts:main\n35 generic K8s faults"]
+            CC_ITB["itbench-scenarios:\nAgentCert/chaos-charts:feature/itbench-scenarios\n35 generic + 30 ITBench SRE fault bundles"]
             CC_MAIN -->|"+ faults/itbench/"| CC_ITB
         end
 
         subgraph CF["certifier"]
-            CF_MAIN["main:\naruscher-dev/certifier:main\nSRE scorecard only\nCloud LLM providers only"]
-            CF_ITB["itbench-scenarios:\naruscher-dev/certifier:feature/itbench-scenarios\n+ CISO scorecard path\n+ FinOps scoring\n+ openai_compatible provider"]
+            CF_MAIN["main:\nAgentCert/certifier:main\nSRE scorecard only\nCloud LLM providers only"]
+            CF_ITB["itbench-scenarios:\nAgentCert/certifier:feature/itbench-scenarios\n+ CISO scorecard path\n+ FinOps scoring\n+ openai_compatible provider"]
             CF_MAIN -->|"+ ciso_metrics_adapter.py\n+ compute_ciso_*.py\n+ openai_compatible"| CF_ITB
         end
 
@@ -209,7 +209,7 @@ flowchart LR
 
     subgraph NEW["🆕 New Submodules (not in main)"]
         direction TB
-        NA["agents/ciso-agent\naruscher-dev/ITBench-CISO-CAA-Agent\nCrewAI + LangGraph\ngenerates Kyverno/OPA policies\nOpenAI-compatible (works with Ollama)"]
+        NA["agents/ciso-agent\ninlined from itbench-hub/ITBench-CISO-CAA-Agent\nCrewAI + LangGraph\ngenerates Kyverno/OPA policies\nOpenAI-compatible (works with Ollama)"]
         NB["agents/sre-agent\nitbench-hub/ITBench-CISO-SRE-FinOps-Agent\nCodex CLI + Zero runner\nITBench upstream reference agent"]
         NC["agents/flash-agent (inline snapshot)\nplain-code copy of root flash-agent/\nfor portability"]
     end
@@ -225,11 +225,11 @@ flowchart TD
     subgraph MONO["ace-monorepo"]
         subgraph MAIN_COL["main branch"]
             M1["AgentCert → AgentCert/AgentCert:main"]
-            M2["certifier → aruscher-dev/certifier:main"]
+            M2["certifier → AgentCert/certifier:main"]
             M3["flash-agent → AgentCert/flash-agent:main"]
             M4["agent-sidecar → AgentCert/agent-sidecar:main"]
-            M5["chaos-charts → aruscher-dev/chaos-charts:main"]
-            M6["app-charts → aruscher-dev/app-charts:main"]
+            M5["chaos-charts → AgentCert/chaos-charts:main"]
+            M6["app-charts → AgentCert/app-charts:main"]
             M7["agent-charts → AgentCert/agent-charts:main"]
             M8["agentcert-stack → AgentCert/agentcert-stack:main"]
             M9["litmus-go → AgentCert/litmus-go:master"]
@@ -237,15 +237,15 @@ flowchart TD
 
         subgraph ITB_COL["feature/itbench-scenarios branch"]
             I1["AgentCert → AgentCert/AgentCert:main ✅"]
-            I2["certifier → aruscher-dev/certifier:feature/itbench-scenarios 🔄"]
+            I2["certifier → AgentCert/certifier:feature/itbench-scenarios 🔄"]
             I3["flash-agent → AgentCert/flash-agent:main ✅"]
             I4["agent-sidecar → AgentCert/agent-sidecar:main ✅"]
-            I5["chaos-charts → aruscher-dev/chaos-charts:feature/itbench-scenarios 🔄"]
-            I6["app-charts → aruscher-dev/app-charts:main 🔄"]
+            I5["chaos-charts → AgentCert/chaos-charts:feature/itbench-scenarios 🔄"]
+            I6["app-charts → AgentCert/app-charts:main 🔄"]
             I7["agent-charts → AgentCert/agent-charts:main ✅"]
             I8["agentcert-stack → AgentCert/agentcert-stack:main 🔄"]
             I9["litmus-go → AgentCert/litmus-go:master ✅"]
-            I10["agents/ciso-agent → aruscher-dev/ITBench-CISO-CAA-Agent 🆕"]
+            I10["agents/ciso-agent → inlined from itbench-hub/ITBench-CISO-CAA-Agent 🆕"]
             I11["agents/sre-agent → itbench-hub/ITBench-CISO-SRE-FinOps-Agent 🆕"]
         end
     end

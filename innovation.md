@@ -272,7 +272,7 @@ Instead of broadening the `ALLOWED_ORIGINS` regex to match in-cluster Kubernetes
 
 ### 8.1 PR: CISO Agent OpenAI-Compatible LLM Fix
 **Status: Not Yet Raised**
-`aruscher-dev/ITBench-CISO-CAA-Agent` has two fixes pushed on `fix/openai-compatible-llm-fallback` but no PR has been opened against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.
+Two fixes (already inlined into `agents/ciso-agent/` in this monorepo) are pushed on `fix/openai-compatible-llm-fallback` to a personal fork, but no PR has been opened against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.
 
 ### 8.2 PR: SRE Agent Live-Mode MCP Compatibility Fix
 **Status: Not Yet Pushed**

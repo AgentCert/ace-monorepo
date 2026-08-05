@@ -47,14 +47,17 @@ All repos are on the `feature/itbench-scenarios` branch unless noted.
 
 | Repo | Role | Remote (push target) |
 |---|---|---|
-| `ace-monorepo` ← **you are here** | Top-level orchestration, `.env`, scripts | `Warsea12-ai/ace-monorepo` |
-| `chaos-charts` (submodule) | LitmusChaos fault-bundle ChaosHub catalog | `Warsea12-ai/chaos-charts` |
-| `app-charts` (submodule) | Target app Helm charts (otel-demo, bookinfo) | `Warsea12-ai/app-charts` |
-| `certifier` (submodule) | 4-phase certification pipeline | `Warsea12-ai/certifier` |
-| `agentcert-stack` (submodule) | LiteLLM proxy + Langfuse compose stack | `Warsea12-ai/agentcert-stack` |
-| `flash-agent` (submodule) | The SRE agent under test | Push → `Warsea12-ai/flash-agent` (fork); upstream `AgentCert/flash-agent` is read-only |
+| `ace-monorepo` ← **you are here** | Top-level orchestration, `.env`, scripts | `AgentCert/ace-monorepo` |
+| `chaos-charts` (submodule) | LitmusChaos fault-bundle ChaosHub catalog | `AgentCert/chaos-charts` |
+| `app-charts` (submodule) | Target app Helm charts (otel-demo, bookinfo) | `AgentCert/app-charts` |
+| `certifier` (submodule) | 4-phase certification pipeline | `AgentCert/certifier` |
+| `agentcert-stack` (submodule) | LiteLLM proxy + Langfuse compose stack | `AgentCert/agentcert-stack` |
+| `flash-agent` | Now inlined at `agents/flash-agent/`; the standalone submodule has been removed | `AgentCert/flash-agent` |
 
-> **flash-agent push note:** `AgentCert/flash-agent` is not writable by the `Warsea12-ai` identity. A `fork` remote pointing at the pre-existing `Warsea12-ai/flash-agent` fork was added. Always run `git remote -v` before pushing in this submodule. Branch: `feature/itbench-certification-fixes`.
+> All submodules track the canonical `AgentCert` org — never a personal fork. Always run
+> `git remote -v` before pushing in any submodule; if a push is ever rejected for lack of
+> permissions, push to a branch on the AgentCert-org repo itself rather than repointing any
+> remote at a personal account, even temporarily.
 
 ---
 
@@ -337,7 +340,7 @@ Remediation: patched the two Deployments' init containers, deleted the leftover 
 ITBench ships two reference agents. The one used here:
 
 - **CISO Agent** (`itbench-hub/ITBench-CISO-CAA-Agent`) — built with **CrewAI + LangGraph**
-- Fork: `aruscher-dev/ITBench-CISO-CAA-Agent`, branch `fix/openai-compatible-llm-fallback` (commits `104f83e`, `b025192`)
+- Fixed on a personal fork, branch `fix/openai-compatible-llm-fallback` (commits `104f83e`, `b025192`); both fixes are now inlined into `agents/ciso-agent/` in this monorepo
 - **Not used:** the SRE Agent ("Zero") is a wrapper around OpenAI's Codex CLI, not CrewAI
 
 ### Two bugs fixed in the CISO agent itself (`src/ciso_agent/llm.py`)
@@ -354,7 +357,7 @@ The caller, `call_llm()`, treated a `None` return as a signal to build its own c
 
 **How it was fixed:** The guard in `init_llm()` was widened to `if "gpt" in model.lower() or api_url`. If a base URL has been provided, the function now treats the model as an intentional OpenAI-compatible target regardless of name, and builds a `ChatOpenAI(model=model, api_key=api_key, base_url=api_url)` client. The fallback in `call_llm()` was also updated to carry `api_key` and `base_url` through — so even if `init_llm()` returns `None` for some future unusual case, the fallback still routes to the right endpoint.
 
-*(Commit: `aruscher-dev/ITBench-CISO-CAA-Agent@104f83e`)*
+*(Commit: `104f83e`, now inlined into `agents/ciso-agent/` in this monorepo)*
 
 ---
 
@@ -375,7 +378,7 @@ return LLM(model=llm_model, api_key=api_key, base_url=api_url)
 
 This means a single `LLM_MODEL_NAME=qwen2.5-7b-instruct` now satisfies both paths: LangChain receives the bare alias (correct), CrewAI's litellm layer receives `openai/qwen2.5-7b-instruct` (correct). The guard also makes the prefix safe to apply even if someone passes a fully-qualified name like `openai/qwen2.5-7b-instruct` directly — it passes through unchanged.
 
-*(Commit: `aruscher-dev/ITBench-CISO-CAA-Agent@b025192`)*
+*(Commit: `b025192`, now inlined into `agents/ciso-agent/` in this monorepo)*
 
 ---
 

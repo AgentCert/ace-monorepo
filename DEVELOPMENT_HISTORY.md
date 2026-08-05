@@ -59,7 +59,7 @@ This document summarises the major development stages of the **Agent Certificati
 
 **Goal:** Make ACE compatible with IBM's ITBench benchmark framework for SRE, CISO, and FinOps scenarios.
 
-- Pointed `chaos-charts` at the `Warsea12-ai` fork and introduced 30 ITBench SRE fault bundles under `chaos-charts/faults/itbench/`.
+- Introduced 30 ITBench SRE fault bundles under `chaos-charts/faults/itbench/` (`chaos-charts` tracks `AgentCert/chaos-charts`).
 - Registered 50+ ITBench fault names in the fault taxonomy (`certifier/configs/fault_categories.json`), including a new `scheduling_fault` top-level category.
 - Split the ChaosHub catalog into separate fault categories so ITBench experiments appear correctly in the certifier's Phase 0 bucketing.
 - Added `certifier/metrics_extractor/scripts/ciso_metrics_adapter.py` — adapts ITBench CISO evaluation output into the standard per-run metrics document shape.
@@ -88,7 +88,7 @@ Several real bugs were found and fixed across submodules:
 | 1 | Langfuse `LANGFUSE_INIT_*` vars never reached the container because `--env-file` was missing from `docker compose up` | `scripts/start-local-services.sh` | `d1bf6dc` |
 | 2 | LiteLLM router timeout too short (default 60s) for long open-weight inference — all requests timed out | `agentcert-stack/litellm-setup/litellm_config.yaml` — raised to 600s | `8f46515` |
 | 3 | `AZURE_OPENAI_DEPLOYMENT` and related vars not forwarded into LiteLLM container — crashed on startup | `agentcert-stack/litellm-setup/docker-compose-litellm.yml` | submodule bump `ddaf148` |
-| 4 | `chaos-charts` ChaosEngine `TARGETS` field parsing bug — experiments never started | `chaos-charts` (upstream fix, `Warsea12-ai/chaos-charts`) | `9e0fbb2` |
+| 4 | `chaos-charts` ChaosEngine `TARGETS` field parsing bug — experiments never started | `chaos-charts` (upstream fix, `AgentCert/chaos-charts`) | `9e0fbb2` |
 | 5 | `flash-agent` analysis-type validation rejected valid structured outputs from open-weight models | `flash-agent` | `877eceb` |
 | 6 | `certifier` `fault_name` metadata missing from Phase 0 output — broke Phase 1 extraction | `certifier` | `ee42826` |
 | 7 | PDF renderer (`cert_reporter`) missing handlers for `HeadingBlock`, `CardBlock`, and `AssessmentBlock` — rendered blank pages | `certifier/cert_reporter/` | `63bf187` |
@@ -110,7 +110,7 @@ Several real bugs were found and fixed across submodules:
 
 - Added `agents/` directory collecting every agent implementation evaluated by ACE:
   - `agents/flash-agent/` — plain-code snapshot of the primary SRE agent.
-  - `agents/ciso-agent/` — `aruscher-dev/ITBench-CISO-CAA-Agent` fork (CrewAI + LangGraph).
+  - `agents/ciso-agent/` — inlined from `itbench-hub/ITBench-CISO-CAA-Agent` (CrewAI + LangGraph).
   - `agents/sre-agent/` — upstream ITBench "Zero" Codex-CLI wrapper (read-only, unmodified).
   - `agents/sre-agent-crewai/` — ACE-built CrewAI SRE agent for live Kubernetes benchmarking using MCP streamable-HTTP.
   - `agents/harness/a2a-mcp-agent/` — universal A2A JSON-RPC 2.0 bridge for any A2A-compatible agent.

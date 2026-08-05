@@ -13,19 +13,17 @@ ITBench SRE fault bundles are complete (see §1); that file predates it.
 
 | Repo | Role | Remote in use | Branch |
 |---|---|---|---|
-| `ace-monorepo` (this repo) | top-level orchestration, `.env`, scripts | `origin` → `Warsea12-ai/ace-monorepo` | `feature/itbench-scenarios` |
-| `chaos-charts` (submodule) | LitmusChaos fault-bundle ChaosHub catalog | `origin` → `Warsea12-ai/chaos-charts` | `feature/itbench-scenarios` |
-| `app-charts` (submodule) | target application Helm charts (otel-demo, bookinfo) | `origin` → `Warsea12-ai/app-charts` | `feature/itbench-scenarios` |
-| `certifier` (submodule) | 4-phase certification pipeline | `origin` → `Warsea12-ai/certifier` | `feature/itbench-scenarios` |
-| `agentcert-stack` (submodule) | LiteLLM proxy + Langfuse compose stack | `origin` → `Warsea12-ai/agentcert-stack` | `feature/itbench-scenarios` |
-| `flash-agent` (submodule) | the SRE agent under test | `origin` (no push) → `AgentCert/flash-agent`, `fork` (push) → `Warsea12-ai/flash-agent` | `feature/itbench-certification-fixes` |
+| `ace-monorepo` (this repo) | top-level orchestration, `.env`, scripts | `origin` → `AgentCert/ace-monorepo` | `feature/itbench-scenarios` |
+| `chaos-charts` (submodule) | LitmusChaos fault-bundle ChaosHub catalog | `origin` → `AgentCert/chaos-charts` | `feature/itbench-scenarios` |
+| `app-charts` (submodule) | target application Helm charts (otel-demo, bookinfo) | `origin` → `AgentCert/app-charts` | `feature/itbench-scenarios` |
+| `certifier` (submodule) | 4-phase certification pipeline | `origin` → `AgentCert/certifier` | `feature/itbench-scenarios` |
+| `agentcert-stack` (submodule) | LiteLLM proxy + Langfuse compose stack | `origin` → `AgentCert/agentcert-stack` | `feature/itbench-scenarios` |
+| `flash-agent` | now inlined at `agents/flash-agent/` (the standalone submodule has been removed) | — | `feature/itbench-scenarios` |
 
-`flash-agent` is the one submodule where the upstream `AgentCert` org repo itself is not
-writable by this session's GitHub identity (`Warsea12-ai`, confirmed via
-`gh api repos/AgentCert/flash-agent --jq .permissions` → `push:false`) — a `fork` remote
-pointing at the pre-existing `Warsea12-ai/flash-agent` fork was added and is what gets
-pushed to. Always check `git remote -v` before pushing in any of these — ownership has
-moved before during this project.
+All submodules track the canonical `AgentCert` org — never a personal fork. If a push is
+ever rejected for lack of permissions, push to a branch on the AgentCert-org repo itself
+rather than repointing any remote at a personal account, even temporarily. Always check
+`git remote -v` before pushing in any of these.
 
 ---
 
@@ -100,14 +98,14 @@ certifier (Azure OR Ollama for LLM judges/meta-judge — configs/configs.json pe
 
 ### 4.2 Files changed, by repo
 
-**`agentcert-stack`** (fork `Warsea12-ai/agentcert-stack`, branch `feature/itbench-scenarios`):
+**`agentcert-stack`** (`origin` → `AgentCert/agentcert-stack`, branch `feature/itbench-scenarios`):
 
 | File | Commit | What / why |
 |---|---|---|
 | `litellm-setup/docker-compose-litellm.yml` | `a4af43b` | Forward `AZURE_OPENAI_DEPLOYMENT`, `LITELLM_AZURE_CHAT_MODEL`, `AZURE_OPENAI_API_VERSION` into the container env (root-caused startup crash, see §5 bug 9). |
 | `litellm-setup/litellm_config.yaml` | `a4af43b`, `4651472` | Restored full multi-provider `model_list` (Gemini ×3, Azure GPT-4o, OpenRouter) alongside a new `qwen2.5-7b-instruct` (`ollama_chat/qwen2.5:7b-instruct`, `api_base: http://172.17.0.1:11434`) entry; `default_model` set to `qwen2.5-7b-instruct`; `num_ctx: 16384` added to the Ollama entry (see §5 bug 11). |
 
-**`ace-monorepo`** (this repo, `origin` → `Warsea12-ai/ace-monorepo`):
+**`ace-monorepo`** (this repo, `origin` → `AgentCert/ace-monorepo`):
 
 | File | Commit | What / why |
 |---|---|---|
@@ -115,7 +113,7 @@ certifier (Azure OR Ollama for LLM judges/meta-judge — configs/configs.json pe
 | `.env` | *not committed (gitignored, local secrets)* | Docker-bridge IP corrected from the example `172.26.0.1` to this host's real `172.17.0.1`; added `LANGFUSE_INIT_ORG_ID`/`_ORG_NAME`/`_PROJECT_ID`/`_PROJECT_NAME`/`_PROJECT_PUBLIC_KEY`/`_PROJECT_SECRET_KEY`; `LANGFUSE_HOST` remapped to port `4001` (see §5 bugs 6/7 for why). |
 | `.tmp/langfuse/docker-compose.yml` | *not a tracked repo file — locally-generated compose stack* | `langfuse-web` port remapped `3000→4000→4001` (both earlier ports were other users' services, not mine — see §5 bugs 6/7). |
 
-**`certifier`** (`origin` → `Warsea12-ai/certifier`, branch `feature/itbench-scenarios`):
+**`certifier`** (`origin` → `AgentCert/certifier`, branch `feature/itbench-scenarios`):
 
 | File | Commit | What / why |
 |---|---|---|
@@ -123,7 +121,7 @@ certifier (Azure OR Ollama for LLM judges/meta-judge — configs/configs.json pe
 | `README.md` | `b67b59c` | New subsection *"Using a non-Azure backend for the LLM judges (e.g. a local open-weight model)"* at line 278 — documents the `provider: openai_compatible` config shape, an example JSON block, the `agent-framework-ollama` package version-skew bug this sidesteps, and a caveat that 7-8B CPU models are less reliable at structured-JSON judge output than GPT-4o/GPT-5. |
 | `configs/configs.json` | *deliberately NOT committed — local-only override, like a `.env`* | `gpt-4o`/`gpt-5.2` entries point at `provider: openai_compatible`, `base_url: http://127.0.0.1:11434/v1`, `model_id: qwen2.5:7b-instruct` for local testing. The shipped default (in git) still points at Azure for every other user. |
 
-**`flash-agent`** (fork `Warsea12-ai/flash-agent`, branch `feature/itbench-certification-fixes`):
+**`flash-agent`** (`origin` → `AgentCert/flash-agent`, branch `feature/itbench-certification-fixes`):
 
 | File | Commit | What / why |
 |---|---|---|
@@ -343,7 +341,7 @@ and evaluated against this session's actual k3s cluster — not mocked, not simu
 | Repo | Fork | Purpose |
 |---|---|---|
 | `IBM/ITBench-Scenarios` (`ciso/` subtree) | not forked (read-only reference; no changes needed) | Ansible/Makefile-driven scenario lifecycle: `deploy_bundle` (installs Kyverno via Helm), `inject_fault` (deploys a noncompliant `hostNetwork: true` nginx pod in a new `paa` namespace), `get` (goal text + scenario kubeconfig), `evaluate` (checks PolicyReports), `remove_fault`/`destroy_bundle` (cleanup). |
-| `itbench-hub/ITBench-CISO-CAA-Agent` | `aruscher-dev/ITBench-CISO-CAA-Agent`, branch `fix/openai-compatible-llm-fallback` (commits `104f83e`, `b025192`) | The CrewAI+LangGraph CISO Agent itself (`crewai==0.95.0`). Two real bugs found and fixed here — see §8.3. |
+| `itbench-hub/ITBench-CISO-CAA-Agent` | fixed on a personal fork, branch `fix/openai-compatible-llm-fallback` (commits `104f83e`, `b025192`); both fixes are now inlined into `agents/ciso-agent/` in this monorepo | The CrewAI+LangGraph CISO Agent itself (`crewai==0.95.0`). Two real bugs found and fixed here — see §8.3. |
 
 Both repos were cloned/built under `ace-monorepo/.tmp/ciso-agent-trial/` (gitignored,
 persistent across the session — not the ephemeral `/tmp` scratchpad), including two Docker
@@ -394,7 +392,7 @@ images built locally: `ciso-task-scenarios:latest` (the scenario Makefile runner
       base_url=api_url)` so that even when `init_llm()` returns `None`, the
       OpenAI-compatible endpoint and credentials are still applied.
 
-    Commits: `aruscher-dev/ITBench-CISO-CAA-Agent@104f83e`.
+    Commits: `104f83e` (now inlined into `agents/ciso-agent/` in this monorepo).
 
 18. **CrewAI's *native* `LLM` class needed a different model-string shape than the fix
     above.** After fixing #17, the manager/task-selector step (LangChain `ChatOpenAI`
@@ -431,7 +429,7 @@ images built locally: `ciso-task-scenarios:latest` (the scenario Makefile runner
     original, un-prefixed `model` value and forwards it as-is, which is what an
     OpenAI-compatible proxy expects in the request body.
 
-    Commits: `aruscher-dev/ITBench-CISO-CAA-Agent@b025192`.
+    Commits: `b025192` (now inlined into `agents/ciso-agent/` in this monorepo).
 
     **Why both fixes are necessary together:** Bug A and Bug B are in entirely separate
     execution paths that happen to share one env var. Fixing only Bug A leaves
@@ -481,8 +479,9 @@ get ns paa` all confirm nothing remains.
   this per-run doc shape, from the earlier CISO scorecard work) is separate follow-on work,
   not yet started.
 - Two upstream PRs are open-able but not yet raised: both `fix/openai-compatible-llm-fallback`
-  commits on `aruscher-dev/ITBench-CISO-CAA-Agent` are pushed but no PR has been opened
-  against `itbench-hub/ITBench-CISO-CAA-Agent` upstream.
+  commits (already inlined into `agents/ciso-agent/` in this monorepo) are pushed to a
+  personal fork, but no PR has been opened against `itbench-hub/ITBench-CISO-CAA-Agent`
+  upstream.
 
 ---
 

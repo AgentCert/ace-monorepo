@@ -722,7 +722,7 @@ spec:
       #{NODE_SELECTOR}
       containers:
         - name: prometheus-mcp-server
-          image: agentcert/prometheus-mcp-server:latest
+          image: ghcr.io/pab1it0/prometheus-mcp-server:latest
           envFrom:
             - configMapRef:
                 name: prometheus-mcp-config

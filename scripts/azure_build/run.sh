@@ -175,7 +175,7 @@ export INSTALL_AGENT_IMAGE_PULL_POLICY="Always"
 
 # MCP server images (used by infra namespace manifests)
 export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
-export PROMETHEUS_MCP_SERVER_IMAGE="agentcert/prometheus-mcp-server:latest"
+export PROMETHEUS_MCP_SERVER_IMAGE="ghcr.io/pab1it0/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
 # MCP service URLs injected into agent.config.MCP_URLS at install-agent time
 # (graphql/server/pkg/chaos_experiment/ops/service.go:2126). Sock-shop ns since

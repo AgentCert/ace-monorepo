@@ -112,6 +112,22 @@ if ! grep -q '^OLLAMA_PORT=[0-9]' "${ENV_FILE}" 2>/dev/null; then
 fi
 
 # Backfill AGENT_CHARTS_ROOT and APP_CHARTS_ROOT to this checkout's actual paths.
+# Backfill KIND_CLUSTER_NAME if the value in .env names a cluster that doesn't
+# exist. This happens when ACE_INSTANCE_NAME is renamed (e.g. during a shared-host
+# refactor) while the KinD cluster was created under the old name. Detect the
+# mismatch by checking `kind get clusters`, then fall back to the current kubectl
+# context (kind-<name>) so the existing running cluster is adopted automatically.
+# Runs unconditionally (both --setup and --restart).
+_configured_cluster="$(cur KIND_CLUSTER_NAME)"
+if [[ -n "${_configured_cluster}" ]] && ! kind get clusters 2>/dev/null | grep -qx "${_configured_cluster}"; then
+    _context_cluster="$(kubectl config current-context 2>/dev/null | sed 's/^kind-//' || true)"
+    if [[ -n "${_context_cluster}" ]] && kind get clusters 2>/dev/null | grep -qx "${_context_cluster}"; then
+        sed -i "s|^KIND_CLUSTER_NAME=.*|KIND_CLUSTER_NAME=${_context_cluster}|" "${ENV_FILE}"
+        ok "KIND_CLUSTER_NAME corrected: '${_configured_cluster}' not found, adopted running cluster '${_context_cluster}' from current kubectl context"
+    fi
+fi
+unset _configured_cluster _context_cluster
+
 # Runs unconditionally (both --setup and --restart) so a .env copied from another
 # checkout (e.g. /srv/projects/ace-monorepo) gets corrected automatically.
 for _charts_var in AGENT_CHARTS_ROOT APP_CHARTS_ROOT; do
@@ -129,9 +145,71 @@ for _charts_var in AGENT_CHARTS_ROOT APP_CHARTS_ROOT; do
 done
 unset _charts_var _charts_subdir _expected_path _current_val
 
+# Backfill CHAOS_CHARTS_ROOT separately — the subdir name (chaos-charts-default)
+# does not follow the AGENT/APP pattern so it can't use the loop above.
+_expected_chaos="${REPO_ROOT}/chaos-charts-default"
+_current_chaos="$(grep -m1 "^CHAOS_CHARTS_ROOT=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
+if [[ "${_current_chaos}" != "${_expected_chaos}" ]]; then
+    if grep -q "^CHAOS_CHARTS_ROOT=" "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^CHAOS_CHARTS_ROOT=.*|CHAOS_CHARTS_ROOT=${_expected_chaos}|" "${ENV_FILE}"
+    else
+        echo "CHAOS_CHARTS_ROOT=${_expected_chaos}" >> "${ENV_FILE}"
+    fi
+    ok "Set CHAOS_CHARTS_ROOT=${_expected_chaos}"
+fi
+unset _expected_chaos _current_chaos
+
+# Self-heal FLASH_AGENT_MODEL if it points at a provider that isn't actually
+# configured (or whose credentials are still a copy-pasted placeholder, e.g.
+# .env.example's https://YOUR_RESOURCE.openai.azure.com/). Runs unconditionally
+# (both --setup and --restart) by reading .env directly, so this corrects
+# itself on every run — including plain `--restart` runs where the interactive
+# provider prompts never execute and the guided/express-mode fixes above don't
+# apply. Without this, a value written once (e.g. while trying Azure) sticks
+# forever even after switching entirely to another provider, because the
+# provider check in the interactive prompts only fires in --setup mode.
+_az_key="$(cur AZURE_OPENAI_KEY)"
+_az_endpoint="$(cur AZURE_OPENAI_ENDPOINT)"
+_az_alias="$(cur AZURE_OPENAI_DEPLOYMENT)"
+_gemini_key="$(cur GEMINI_API_KEY)"
+_openrouter_key="$(cur OPENROUTER_API_KEY)"
+_ollama_model_cur="$(cur OLLAMA_MODEL)"
+_ollama_alias_cur=""
+[[ -n "${_ollama_model_cur}" ]] && _ollama_alias_cur="$(echo "${_ollama_model_cur}" | tr ':' '-')"
+
+# Ollama is checked first and wins ties: it's the only provider whose
+# "health" this script can actually confirm end-to-end (a real, running,
+# ownership-guarded local container — see the Ollama-ensure-running block
+# below), whereas Azure/Gemini/OpenRouter health here is just "looks like a
+# real key/endpoint was typed in," not a verified live credential.
+declare -a _healthy_aliases=()
+[[ -n "${_ollama_alias_cur}" ]] && _healthy_aliases+=("${_ollama_alias_cur}")
+if [[ -n "${_az_key}" && -n "${_az_endpoint}" && "${_az_endpoint}" != *YOUR_RESOURCE* && "${_az_endpoint}" != *CHANGE_ME* ]]; then
+    _healthy_aliases+=("${_az_alias:-gpt-4o}")
+fi
+[[ -n "${_gemini_key}" ]] && _healthy_aliases+=("gemini-3-flash" "gemini-2.5-flash" "gemini-2.5-flash-lite")
+[[ -n "${_openrouter_key}" ]] && _healthy_aliases+=("auto-free")
+
+_cur_flash="$(cur FLASH_AGENT_MODEL)"
+if [[ ${#_healthy_aliases[@]} -gt 0 && -n "${_cur_flash}" ]]; then
+    _flash_is_healthy=0
+    for _a in "${_healthy_aliases[@]}"; do
+        [[ "${_a}" == "${_cur_flash}" ]] && _flash_is_healthy=1 && break
+    done
+    if [[ "${_flash_is_healthy}" -eq 0 ]]; then
+        warn "FLASH_AGENT_MODEL='${_cur_flash}' doesn't match any configured provider (available: ${_healthy_aliases[*]}) — correcting to '${_healthy_aliases[0]}'"
+        if grep -q '^FLASH_AGENT_MODEL=' "${ENV_FILE}" 2>/dev/null; then
+            sed -i "s|^FLASH_AGENT_MODEL=.*|FLASH_AGENT_MODEL=${_healthy_aliases[0]}|" "${ENV_FILE}"
+        else
+            echo "FLASH_AGENT_MODEL=${_healthy_aliases[0]}" >> "${ENV_FILE}"
+        fi
+    fi
+fi
+unset _az_key _az_endpoint _az_alias _gemini_key _openrouter_key _ollama_model_cur _ollama_alias_cur _cur_flash _flash_is_healthy _a _healthy_aliases
+
 # Image build definitions — available to both --setup (interactive) and --restart --local-build
 declare -a ALL_BUILD_IMAGES=(
-    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile|direct"
+    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile|direct"
     "2|agent-sidecar|agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile|direct"
     "3|install-agent|agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile|direct"
     "4|install-app|agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile|direct"
@@ -143,21 +221,47 @@ declare -a ALL_BUILD_IMAGES=(
 )
 
 if [[ "$SETUP_MODE" == "restart" ]]; then
+    EXPRESS_MODE=0   # restart never runs the interactive express/guided wizard
     CLUSTER_MODE="$(cur CLUSTER_MODE)"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
+    PLATFORM_IMAGE_SOURCE="$(cur PLATFORM_IMAGE_SOURCE)"; PLATFORM_IMAGE_SOURCE="${PLATFORM_IMAGE_SOURCE:-skip}"
     DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
     declare -a SELECTED_BUILD_IMAGES=()
-    if [[ "${BUILD_MODE}" == "local" ]]; then
-        DO_LOCAL_BUILD=1
-        SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  ACE restart — re-applying stack${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  image policy: ${PLATFORM_IMAGE_SOURCE}  ·  .env: ${ENV_FILE}${NC}"
+    echo
+    read -rp "$(echo -e "  ${BOLD}r${NC} Reconfigure all choices  |  Enter = Continue with policy above  [r/Enter]: ")" _restart_choice
+    echo
+    if [[ "${_restart_choice,,}" == "r" ]]; then
+        SETUP_MODE="setup"
+    else
+        # Apply persisted platform image build policy
+        case "${PLATFORM_IMAGE_SOURCE}" in
+            local)
+                DO_LOCAL_BUILD=1
+                SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+                ;;
+            push)
+                DH_USER="$(cur DOCKERHUB_USERNAME)"
+                DH_TOKEN="$(cur DOCKERHUB_TOKEN)"
+                if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
+                    DO_BUILD=1
+                    SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+                else
+                    warn "PLATFORM_IMAGE_SOURCE=push but DOCKERHUB_USERNAME/TOKEN not set — skipping build."
+                fi
+                ;;
+        esac
+        # --local-build CLI flag always overrides persisted policy
+        if [[ "${BUILD_MODE}" == "local" ]]; then
+            DO_LOCAL_BUILD=1
+            SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+        fi
     fi
-    echo
-    echo -e "${CYAN}=======================================================${NC}"
-    echo -e "${CYAN}  ACE restart — re-applying stack (no .env changes)${NC}"
-    echo -e "${CYAN}=======================================================${NC}"
-    _build_note=""; [[ "${DO_LOCAL_BUILD}" -eq 1 ]] && _build_note="  · local build"
-    echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  .env: ${ENV_FILE}${_build_note}${NC}"
-    unset _build_note
-    echo
+    unset _restart_choice
 fi
 
 # ask "KEY" "Prompt label" → echoes chosen value (default = current .env value)
@@ -184,7 +288,145 @@ echo -e "${DIM}all-local 'docker compose up' flow. Only Azure OpenAI is${NC}"
 echo -e "${DIM}required for the agent's LLM calls to actually work.${NC}"
 echo
 
+# --- Setup style: express (all questions now) or guided (section by section) --
+EXPRESS_MODE=0
+_DEPLOY_CHOICE=""
+echo -e "${BOLD}Setup style${NC}"
+echo -e "   ${BOLD}e${NC}  Express — answer every question now, then the script runs unattended"
+echo -e "   ${BOLD}g${NC}  Guided  — answer questions one section at a time ${DIM}(default)${NC}"
+read -rp "$(echo -e "  Choice ${DIM}[e/G]${NC}: ")" _style_ans
+[[ "${_style_ans,,}" == "e" ]] && EXPRESS_MODE=1
+unset _style_ans
+echo
+
+if [[ $EXPRESS_MODE -eq 1 ]]; then
+    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  Express setup — all questions upfront${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${DIM}  Press Enter to keep the value shown in [brackets].${NC}"
+    echo
+
+    # Build
+    echo -e "${BOLD}▸ Build images?${NC}  p=push to Docker Hub  l=build locally  n=skip"
+    DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
+    declare -a SELECTED_BUILD_IMAGES=()
+    read -rp "  Choice [p/l/N]: " _eb
+    case "${_eb,,}" in
+        p)  DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
+            DH_TOKEN="$(ask DOCKERHUB_TOKEN   'Docker Hub token')"
+            DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
+            DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
+            if [[ -n "$DH_USER" && -n "$DH_TOKEN" ]]; then
+                DO_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+            else
+                warn "Credentials missing — skipping build."
+            fi ;;
+        l)  DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}") ;;
+    esac
+    _pis="skip"; [[ $DO_BUILD -eq 1 ]] && _pis="push"; [[ $DO_LOCAL_BUILD -eq 1 ]] && _pis="local"
+    if grep -q '^PLATFORM_IMAGE_SOURCE=' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^PLATFORM_IMAGE_SOURCE=.*|PLATFORM_IMAGE_SOURCE=${_pis}|" "${ENV_FILE}"
+    else
+        echo "PLATFORM_IMAGE_SOURCE=${_pis}" >> "${ENV_FILE}"
+    fi
+    unset _pis
+    echo
+
+    # Image sources
+    echo -e "${BOLD}▸ Experiment image sources${NC}  d=Docker Hub  j=JFrog  l=local build"
+    read -rp "  install-application  (agentcert-install-app)   [d/j/l, Enter=d]: " _ans
+    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
+    read -rp "  install-agent        (agentcert-install-agent) [d/j/l, Enter=d]: " _ans
+    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
+    read -rp "  litmuschaos helpers  (k8s/checker/deployer)    [d/l,   Enter=d]: " _ans
+    case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
+    unset _ans
+    if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
+        echo -e "  ${BOLD}JFrog credentials${NC}"
+        _JFROG_HOST="$(ask JFROG_HOST          'JFrog host')"
+        _JFROG_PATH="$(ask JFROG_REGISTRY_PATH 'Registry path')"
+        _JFROG_USER="$(ask JFROG_USER          'Username')"
+        _JFROG_TOKEN="$(ask JFROG_TOKEN        'Token / password')"
+    fi
+    echo
+
+    # LiteLLM / Azure OpenAI
+    echo -e "${BOLD}▸ Azure OpenAI${NC}  ${DIM}(certifier + flash-agent; Enter to skip)${NC}"
+    AZ_KEY="$(ask AZURE_OPENAI_KEY 'API key')"
+    AZ_ENDPOINT=""; AZ_DEPLOY=""; AZ_DEPLOY_GPT5=""; AZ_DEPLOY_EMBED=""; AZ_ALIAS=""; AZ_APIVER=""
+    if [[ -n "$AZ_KEY" ]]; then
+        AZ_ENDPOINT="$(ask AZURE_OPENAI_ENDPOINT                  'Endpoint (https://<resource>.openai.azure.com/)')"
+        AZ_APIVER="$(ask   AZURE_OPENAI_API_VERSION                'API version')"
+        AZ_DEPLOY="$(ask   AZURE_OPENAI_CHAT_DEPLOYMENT_NAME       'Standard deployment (certifier gpt-4o)')"
+        AZ_DEPLOY_GPT5="$(ask AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME 'Reasoning deployment (Enter=same as above)')"
+        AZ_DEPLOY_EMBED="$(ask AZURE_EMBEDDING_MODEL               'Embedding deployment (Enter to skip)')"
+        AZ_ALIAS="$(ask    AZURE_OPENAI_DEPLOYMENT                 'LiteLLM alias (e.g. gpt-4o)')"
+        AZ_ENDPOINT="$(echo "${AZ_ENDPOINT}" | tr -d '[:space:]')"; AZ_ENDPOINT="${AZ_ENDPOINT%]}"
+        AZ_DEPLOY="$(echo "${AZ_DEPLOY}" | tr -d '[:space:]')"
+        AZ_DEPLOY_GPT5="$(echo "${AZ_DEPLOY_GPT5:-${AZ_DEPLOY}}" | tr -d '[:space:]')"
+        AZ_DEPLOY_EMBED="$(echo "${AZ_DEPLOY_EMBED}" | tr -d '[:space:]')"
+        AZ_ALIAS="$(echo "${AZ_ALIAS:-gpt-4o}" | tr -d '[:space:]')"
+        AZ_APIVER="$(echo "${AZ_APIVER}" | tr -d '[:space:]')"
+    fi
+
+    echo -e "${BOLD}▸ Google Gemini${NC}  ${DIM}(Enter to skip)${NC}"
+    GEMINI_KEY="$(ask GEMINI_API_KEY 'API key')"; GEMINI_KEY="$(echo "${GEMINI_KEY}" | tr -d '[:space:]')"
+
+    echo -e "${BOLD}▸ OpenRouter${NC}  ${DIM}(Enter to skip)${NC}"
+    OPENROUTER_KEY="$(ask OPENROUTER_API_KEY 'API key')"; OPENROUTER_KEY="$(echo "${OPENROUTER_KEY}" | tr -d '[:space:]')"
+
+    echo -e "${BOLD}▸ Ollama${NC}  ${DIM}(local open-weight model; Enter to skip)${NC}"
+    _cur_ollama="$(cur OLLAMA_MODEL)"
+    if   [[ -n "$_cur_ollama" ]]; then _ollama_def="${_cur_ollama}"
+    elif [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then _ollama_def="qwen2.5:32b-instruct"
+    else _ollama_def=""; fi
+    if [[ -n "${_ollama_def}" ]]; then
+        read -rp "$(echo -e "  Model ${DIM}[${_ollama_def}]${NC}: ")" _or; OLLAMA_MODEL_TAG="${_or:-${_ollama_def}}"
+    else
+        read -rp "$(echo -e "  Model ${DIM}(Enter to skip)${NC}: ")" _or; OLLAMA_MODEL_TAG="${_or}"
+    fi
+    OLLAMA_MODEL_TAG="$(echo "${OLLAMA_MODEL_TAG}" | tr -d '[:space:]')"
+    [[ "${OLLAMA_MODEL_TAG,,}" == "none" || "${OLLAMA_MODEL_TAG,,}" == "skip" ]] && OLLAMA_MODEL_TAG=""
+    [[ -n "${OLLAMA_MODEL_TAG}" ]] && OLLAMA_ALIAS="$(echo "${OLLAMA_MODEL_TAG}" | tr ':' '-')" || OLLAMA_ALIAS=""
+    echo
+
+    # Flash-agent model — Ollama first: matches the --restart self-heal
+    # priority below (it's the only provider whose health is actually
+    # verified end-to-end, not just "a key was typed in").
+    CONFIGURED_MODELS=()
+    [[ -n "${OLLAMA_MODEL_TAG}" ]] && CONFIGURED_MODELS+=("${OLLAMA_ALIAS}")
+    [[ -n "$AZ_KEY" ]]           && CONFIGURED_MODELS+=("${AZ_ALIAS:-gpt-4o}")
+    [[ -n "$GEMINI_KEY" ]]       && CONFIGURED_MODELS+=("gemini-3-flash" "gemini-2.5-flash" "gemini-2.5-flash-lite")
+    [[ -n "$OPENROUTER_KEY" ]]   && CONFIGURED_MODELS+=("auto-free")
+    _flash_def="${CONFIGURED_MODELS[0]:-$(cur FLASH_AGENT_MODEL)}"; _flash_def="${_flash_def:-gpt-4o}"
+    echo -e "${BOLD}▸ Flash-agent model alias${NC}  ${DIM}${CONFIGURED_MODELS[*]:+(available: ${CONFIGURED_MODELS[*]})}${NC}"
+    # See guided-mode comment: not using ask() so a stale .env value can't
+    # override the freshly-computed _flash_def every run.
+    read -rp "$(echo -e "  Model alias ${DIM}[${_flash_def}]${NC}: ")" FLASH_MODEL
+    FLASH_MODEL="$(echo "${FLASH_MODEL:-${_flash_def}}" | tr -d '[:space:]')"
+    echo
+
+    # Cluster + CA cert
+    echo -e "${BOLD}▸ Cluster mode${NC}  ${DIM}auto=reuse/create kind  local=existing  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
+    CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE')"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
+    CUSTOM_CA_CERT_PATH="$(ask CUSTOM_CA_CERT_PATH 'Corporate CA cert path (Enter to skip)')"
+    CUSTOM_CA_CERT_PATH="$(echo "${CUSTOM_CA_CERT_PATH}" | tr -d '[:space:]')"
+    [[ -n "${CUSTOM_CA_CERT_PATH}" && ! -f "${CUSTOM_CA_CERT_PATH}" ]] \
+        && { warn "File not found — will skip CA cert."; CUSTOM_CA_CERT_PATH=""; }
+    echo
+
+    # Deploy choice (asked now so the rest runs unattended)
+    echo -e "${BOLD}▸ Deploy to Kubernetes?${NC}  k=kubectl  h=helm  n=skip"
+    read -rp "  Choice [k/h/N]: " _DEPLOY_CHOICE
+    echo
+    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+    ok "All answers collected — script will now run unattended."
+    echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
+    echo
+fi
+
 # --- Build: push to Docker Hub or build locally (optional) ------------------
+if [[ $EXPRESS_MODE -eq 0 ]]; then
 DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
 declare -a SELECTED_BUILD_IMAGES=()
 
@@ -232,13 +474,21 @@ else
     fi
     unset _build_ans _sel_mode _sel
 fi
+_pis="skip"; [[ $DO_BUILD -eq 1 ]] && _pis="push"; [[ $DO_LOCAL_BUILD -eq 1 ]] && _pis="local"
+if grep -q '^PLATFORM_IMAGE_SOURCE=' "${ENV_FILE}" 2>/dev/null; then
+    sed -i "s|^PLATFORM_IMAGE_SOURCE=.*|PLATFORM_IMAGE_SOURCE=${_pis}|" "${ENV_FILE}"
+else
+    echo "PLATFORM_IMAGE_SOURCE=${_pis}" >> "${ENV_FILE}"
+fi
+unset _pis
 echo
+fi # EXPRESS_MODE -eq 0 (build section)
 
 # --- Experiment image sources -----------------------------------------------
 # Wizard is skipped in --restart mode (sources are already in .env).
 _INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
 _JFROG_HOST=""; _JFROG_PATH=""; _JFROG_USER=""; _JFROG_TOKEN=""
-if [[ "$SETUP_MODE" == "setup" ]]; then
+if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
     echo -e "${BOLD}Experiment image sources${NC}"
     echo -e "   ${DIM}The graphql server injects these into every Argo Workflow it creates,${NC}"
     echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
@@ -268,6 +518,8 @@ fi
 export _INSTALL_APP_SRC _INSTALL_AGENT_SRC _LITMUS_SRC \
        _JFROG_HOST _JFROG_PATH _JFROG_USER _JFROG_TOKEN
 
+# --- Sections 1-4: LiteLLM, Flash, Cluster, CA cert (guided mode only) ------
+if [[ $EXPRESS_MODE -eq 0 ]]; then
 # --- Section 1: LiteLLM model configuration --------------------------------
 echo -e "${BOLD}1) LiteLLM models${NC} ${DIM}(configure which providers the proxy can reach; press Enter to skip a provider)${NC}"
 echo
@@ -335,11 +587,14 @@ echo
 
 # --- Section 2: Flash-agent model selection --------------------------------
 # Build the list of active model aliases from whatever was just configured.
+# Ollama first — matches the --restart self-heal priority (it's the only
+# provider whose health is actually verified end-to-end, not just "a key was
+# typed in").
 CONFIGURED_MODELS=()
+[[ -n "${OLLAMA_MODEL_TAG}" ]] && CONFIGURED_MODELS+=("${OLLAMA_ALIAS}")
 [[ -n "$AZ_KEY" ]] && CONFIGURED_MODELS+=("${AZ_ALIAS:-gpt-4o}")
 [[ -n "$GEMINI_KEY" ]] && CONFIGURED_MODELS+=("gemini-3-flash" "gemini-2.5-flash" "gemini-2.5-flash-lite")
 [[ -n "$OPENROUTER_KEY" ]] && CONFIGURED_MODELS+=("auto-free")
-[[ -n "${OLLAMA_MODEL_TAG}" ]] && CONFIGURED_MODELS+=("${OLLAMA_ALIAS}")
 
 echo -e "${BOLD}2) Flash-agent model${NC} ${DIM}(which LiteLLM alias the agent will request)${NC}"
 if [[ ${#CONFIGURED_MODELS[@]} -gt 0 ]]; then
@@ -349,7 +604,12 @@ else
     warn "   No providers configured — flash-agent won't be able to make LLM calls. Re-run to add one."
     DEFAULT_FLASH="$(cur FLASH_AGENT_MODEL)"; DEFAULT_FLASH="${DEFAULT_FLASH:-gpt-4o}"
 fi
-FLASH_MODEL="$(ask FLASH_AGENT_MODEL 'Flash-agent model alias')"
+# NOTE: deliberately not using ask() here — ask() defaults to whatever
+# FLASH_AGENT_MODEL already is in .env, which silently overrides DEFAULT_FLASH
+# (the alias actually backed by a configured provider this run) and lets a
+# stale/broken choice (e.g. "gpt-4o" from a long-abandoned Azure attempt)
+# stick forever across every future run, even after switching providers.
+read -rp "$(echo -e "  ${BOLD}Flash-agent model alias${NC} ${DIM}[${DEFAULT_FLASH}]${NC}: ")" FLASH_MODEL
 FLASH_MODEL="$(echo "${FLASH_MODEL:-${DEFAULT_FLASH}}" | tr -d '[:space:]')"
 echo
 
@@ -370,6 +630,8 @@ if [[ -n "${CUSTOM_CA_CERT_PATH}" && ! -f "${CUSTOM_CA_CERT_PATH}" ]]; then
     CUSTOM_CA_CERT_PATH=""
 fi
 echo
+
+fi # EXPRESS_MODE -eq 0 (sections 1-4)
 
 # The kind docker-network gateway is the address in-cluster pods use to reach
 # host services. Its subnet is assigned PER-BOX (NOT always 172.26.0.1 — it
@@ -545,6 +807,25 @@ if agent_src:
 
 if litmus_src:
     sets["LITMUS_IMAGES_SOURCE"] = litmus_src
+    if litmus_src == "jfrog":
+        # GraphQL server will rewrite all litmus helper image refs to JFrog URLs at
+        # workflow submission time (applyLitmusHelperImageOverrides).
+        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = f"{jfrog_host}/{jfrog_path}/"
+        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "Always"
+    elif litmus_src == "local":
+        # Images are pre-loaded into KinD under their Docker Hub names; IfNotPresent
+        # means the node uses the cached copy and never contacts the registry.
+        # docker.io prefix normalises any registry prefix in the source YAML
+        # (JFrog, Scarf, bare Docker Hub) to a canonical docker.io/ ref so the
+        # lookup always hits the KinD image cache regardless of what branch the
+        # ChaosHub is cloned from.
+        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = "docker.io"
+        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "IfNotPresent"
+    else:  # dockerhub
+        # Normalise to explicit docker.io prefix so the pull always goes to
+        # Docker Hub even when the source YAML carries a different registry.
+        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = "docker.io"
+        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "Always"
 
 if jfrog_user:  sets["JFROG_USER"]          = jfrog_user
 if jfrog_tok:   sets["JFROG_TOKEN"]         = jfrog_tok
@@ -648,24 +929,49 @@ echo -e "       Re-deploy without re-entering values: ${BOLD}./scripts/setup.sh 
 echo -e "Docs:  ${DIM}docs/setup/  ·  configuration & ports: docs/setup/configuration.md${NC}"
 echo
 
-# --- auto-pull Ollama model --------------------------------------------------
-if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
-    echo
-    echo -e "${DIM}Pulling Ollama model '${OLLAMA_MODEL_TAG}' — this may take a while for large models…${NC}"
-    if command -v ollama >/dev/null 2>&1; then
-        if ollama pull "${OLLAMA_MODEL_TAG}"; then
-            ok "Ollama model '${OLLAMA_MODEL_TAG}' is ready."
-        else
-            warn "ollama pull '${OLLAMA_MODEL_TAG}' failed. Run it manually once Ollama is running:"
-            warn "  ollama pull ${OLLAMA_MODEL_TAG}"
-        fi
-    else
-        warn "ollama command not found. Install Ollama (https://ollama.com/download), then run:"
-        warn "  ollama pull ${OLLAMA_MODEL_TAG}"
-    fi
-fi
-
 fi  # end SETUP_MODE=setup
+
+# --- Ensure this checkout's Ollama container is actually running, and pull ---
+# the configured model into it. Runs unconditionally (both --setup and
+# --restart): OLLAMA_MODEL_TAG is only populated by the interactive prompts in
+# --setup mode, so fall back to whatever is already recorded in .env for
+# --restart. This used to just check for a system-wide `ollama` CLI and run
+# `ollama pull` against WHATEVER daemon that CLI happened to reach — not
+# necessarily this checkout's instance-scoped container (ollama-<ACE_INSTANCE_
+# NAME>, port $OLLAMA_PORT). On a host with no system Ollama installed (the
+# common case for a fresh host), that check silently no-opped: OLLAMA_MODEL
+# ended up configured end-to-end (litellm-config, K8s Service) with nothing
+# actually listening behind it. Delegate the container lifecycle to
+# start-local-services.sh, which already has the ownership-guarded
+# create/start logic for this exact container, then pull directly into it.
+_ollama_tag_final="${OLLAMA_MODEL_TAG:-$(cur OLLAMA_MODEL)}"
+_OLLAMA_PULL_PID=""
+_OLLAMA_PULL_LOG=""
+_OLLAMA_PULL_RETRY_CMD=""
+if [[ -n "${_ollama_tag_final}" ]]; then
+    _ollama_container="ollama-$(cur ACE_INSTANCE_NAME)"
+    echo
+    echo -e "${DIM}Ensuring this checkout's Ollama container ('${_ollama_container}') is up …${NC}"
+    if "${SCRIPT_DIR}/start-local-services.sh" --only-ollama --env-file "${ENV_FILE}"; then
+        # Container is up — pull the model in the background so the rest of
+        # setup (K8s deploy, image builds) can proceed concurrently. The pull
+        # has no data dependency on anything that follows: K8s/Helm only needs
+        # the URL + alias (already in .env), and Docker builds are independent.
+        _OLLAMA_PULL_LOG="${REPO_ROOT}/.tmp/ollama-pull.log"
+        _OLLAMA_PULL_RETRY_CMD="docker exec ${_ollama_container} ollama pull ${_ollama_tag_final}"
+        mkdir -p "${REPO_ROOT}/.tmp"
+        echo -e "${DIM}Pulling '${_ollama_tag_final}' into '${_ollama_container}' in the background — setup continues …${NC}"
+        echo -e "${DIM}  Progress: tail -f ${_OLLAMA_PULL_LOG}${NC}"
+        ( docker exec "${_ollama_container}" ollama pull "${_ollama_tag_final}" ) \
+            >"${_OLLAMA_PULL_LOG}" 2>&1 &
+        _OLLAMA_PULL_PID=$!
+    else
+        warn "Could not bring up ${_ollama_container} — flash-agent's Ollama route will not work until this is resolved."
+        warn "Retry with: ./scripts/start-local-services.sh --only-ollama"
+    fi
+    unset _ollama_container
+fi
+unset _ollama_tag_final
 
 # --- K8s deployment helpers -------------------------------------------------
 
@@ -1500,8 +1806,10 @@ helm_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         helm_cmd+=(--set web.serviceType=LoadBalancer)
     fi
-    # Local build: images are already loaded into KinD — tell Helm not to pull them.
-    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]]; then
+    # On KinD (auto/fresh), always use IfNotPresent so locally built images take effect
+    # without being overwritten by a Docker Hub pull.  Always is only appropriate for
+    # remote registries (cloud clusters) where images are never kind-loaded.
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 || ( "${CLUSTER_MODE}" != "cloud" && "${CLUSTER_MODE}" != "local" ) ]]; then
         helm_cmd+=(--set imagePullPolicy=IfNotPresent)
     fi
 
@@ -1715,11 +2023,14 @@ for _charts_dir in "${REPO_ROOT}/agent-charts/charts" "${REPO_ROOT}/app-charts/c
     fi
 done
 
-echo -e "${BOLD}Deploy the stack to the Kubernetes cluster now?${NC}"
-echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
-echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
-echo -e "   ${BOLD}n${NC}  skip for now"
-read -rp "$(echo -e "Choice ${DIM}[k/h/N]${NC}: ")" deploy_choice
+if [[ $EXPRESS_MODE -eq 0 ]]; then
+    echo -e "${BOLD}Deploy the stack to the Kubernetes cluster now?${NC}"
+    echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
+    echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
+    echo -e "   ${BOLD}n${NC}  skip for now"
+    read -rp "$(echo -e "Choice ${DIM}[k/h/N]${NC}: ")" deploy_choice
+fi
+deploy_choice="${deploy_choice:-${_DEPLOY_CHOICE:-n}}"
 case "${deploy_choice,,}" in
     k) k8s_deploy ;;
     h) helm_deploy ;;
@@ -1739,3 +2050,16 @@ if [[ "${_cur_app_src}"   == "local" || "${_cur_app_src}"   == "jfrog" || \
     "${REPO_ROOT}/scripts/prepare-images.sh"
 fi
 unset _cur_app_src _cur_agent_src _cur_litmus_src
+
+# --- Wait for background Ollama model pull ----------------------------------
+if [[ -n "${_OLLAMA_PULL_PID}" ]]; then
+    echo
+    echo -e "${DIM}Waiting for Ollama model pull to complete (PID ${_OLLAMA_PULL_PID}) …${NC}"
+    if wait "${_OLLAMA_PULL_PID}"; then
+        ok "Ollama model pull complete."
+    else
+        warn "Ollama pull failed. Check log: ${_OLLAMA_PULL_LOG}"
+        warn "Retry: ${_OLLAMA_PULL_RETRY_CMD}"
+    fi
+fi
+unset _OLLAMA_PULL_PID _OLLAMA_PULL_LOG _OLLAMA_PULL_RETRY_CMD

@@ -493,6 +493,16 @@ class FlashAgent:
             logger.error("No MCP tools discovered – cannot proceed")
             return {"health": {"overall_health_score": -1}, "issues": []}
 
+        # Direct tool→client routing: each tool carries the URL of the server
+        # that advertised it. Build a lookup so _execute_mcp_tool can route
+        # without iterating all clients (which breaks when a server returns
+        # HTTP 200 with a JSON-RPC error for unknown tools).
+        tool_owner = {
+            t["name"]: mcp_clients[t["_mcp_url"]]
+            for t in mcp_tools
+            if t.get("_mcp_url") in mcp_clients
+        }
+
         # Convert to OpenAI function format
         openai_tools = [_convert_mcp_tool_to_openai(t) for t in mcp_tools]
         tool_names = [t["function"]["name"] for t in openai_tools]
@@ -587,7 +597,7 @@ class FlashAgent:
                     tool_calls_made.append(tool_name)
                     
                     # Execute via MCP
-                    result = self._execute_mcp_tool(mcp_clients, tool_name, tool_args)
+                    result = self._execute_mcp_tool(mcp_clients, tool_name, tool_args, tool_owner=tool_owner)
                     result_text = _format_tool_result(tool_name, result)
                     
                     logger.info("  Tool result: %d chars", len(result_text))
@@ -753,11 +763,28 @@ class FlashAgent:
         clients: Dict[str, MCPClient],
         tool_name: str,
         arguments: Dict[str, Any],
+        tool_owner: Optional[Dict[str, MCPClient]] = None,
     ) -> Dict[str, Any]:
         """
         Execute a tool call via the appropriate MCP client.
+
+        ``tool_owner`` maps tool name → the client that advertised it (built from
+        the ``_mcp_url`` metadata stamped onto each tool by ``_discover_mcp_tools``).
+        When present, the owning client is tried directly instead of iterating all
+        clients — necessary when multiple MCP servers are configured and a server
+        returns HTTP 200 with a JSON-RPC error for unknown tools (which does not
+        raise an exception and would otherwise short-circuit the fallback loop).
         """
-        # Try each client until one succeeds
+        if tool_owner:
+            client = tool_owner.get(tool_name)
+            if client is not None:
+                try:
+                    return client.call_tool(tool_name, arguments)
+                except Exception as exc:
+                    logger.debug("Tool %s call failed: %s", tool_name, exc)
+                    return {"error": f"Tool '{tool_name}' call failed: {exc}"}
+
+        # Fallback for single-MCP setups or when tool_owner is unavailable.
         for mcp_url, client in clients.items():
             try:
                 result = client.call_tool(tool_name, arguments)
@@ -765,7 +792,7 @@ class FlashAgent:
             except Exception as exc:
                 logger.debug("Tool %s failed on %s: %s", tool_name, mcp_url, exc)
                 continue
-        
+
         return {"error": f"Tool '{tool_name}' not found or failed on all MCP servers"}
 
     def _parse_analysis_response(self, content: str) -> Dict[str, Any]:
@@ -994,7 +1021,12 @@ class FlashAgent:
         if not mcp_clients:
             logger.error("No MCP clients available for watch")
             return
-        
+        tool_owner = {
+            t["name"]: mcp_clients[t["_mcp_url"]]
+            for t in mcp_tools
+            if t.get("_mcp_url") in mcp_clients
+        }
+
         last_metrics = baseline.baseline_metrics.copy()
         poll_count = 0
         
@@ -1076,7 +1108,7 @@ class FlashAgent:
             tool_name = tool_spec.get("name", "")
             tool_args = tool_spec.get("args", {})
             
-            result = self._execute_mcp_tool(clients, tool_name, tool_args)
+            result = self._execute_mcp_tool(clients, tool_name, tool_args, tool_owner=tool_owner)
             result_text = _format_tool_result(tool_name, result)
             raw_outputs.append(result_text)
             

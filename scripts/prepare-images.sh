@@ -124,16 +124,29 @@ build_and_load_install_agent() {
 }
 
 pull_and_load_litmus_images() {
+    # Base images pulled under their Docker Hub names.
+    # For each image we also load an alias under any alternative registry names
+    # that stored experiment manifests may reference (JFrog, Scarf proxy).
     local images=(
         "litmuschaos/k8s:latest"
         "litmuschaos/litmus-checker:latest"
         "litmuschaos/litmus-app-deployer:latest"
+        "litmuschaos/go-runner:latest"
+        "alexeiled/stress-ng:latest-ubuntu"
+        "gaiadocker/iproute2:latest"
     )
     for img in "${images[@]}"; do
         info "Pulling ${img} from Docker Hub …"
         if docker pull "${img}"; then
             ok "Pulled ${img}"
             kind_load "${img}"
+
+            # Also load Scarf-proxy alias for go-runner (referenced in chaos-charts source YAMLs)
+            if [[ "${img}" == "litmuschaos/go-runner:latest" ]]; then
+                local scarf="litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest"
+                docker tag "${img}" "${scarf}"
+                kind_load "${scarf}"
+            fi
         else
             warn "Pull failed for ${img}"
         fi

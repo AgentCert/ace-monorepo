@@ -8,16 +8,22 @@ set -euo pipefail
 # Reads DOCKERHUB_USERNAME and DOCKERHUB_TOKEN from the root .env file.
 #
 # Usage:
-#   ./scripts/build-and-push.sh [--env-file PATH]
+#   ./scripts/build-and-push.sh [--env-file PATH] [--local] [--kind-load]
 #
 # Options:
 #   --env-file PATH   Path to env file (default: <repo-root>/.env)
+#   --local           Build only — skip Docker Hub login and push
+#   --kind-load       After building, load each image into the local KinD cluster
+#                     (reads KIND_CLUSTER_NAME / ACE_INSTANCE_NAME from .env;
+#                      implies --local)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ENV_FILE="${REPO_ROOT}/.env"
+LOCAL_ONLY=false
+KIND_LOAD=false
 
 # Colors
 RED='\033[0;31m'
@@ -40,8 +46,17 @@ while [[ $# -gt 0 ]]; do
             ENV_FILE="${2:-}"
             shift 2
             ;;
+        --local)
+            LOCAL_ONLY=true
+            shift
+            ;;
+        --kind-load)
+            KIND_LOAD=true
+            LOCAL_ONLY=true
+            shift
+            ;;
         --help|-h)
-            head -14 "$0" | tail -12
+            head -18 "$0" | tail -16
             exit 0
             ;;
         *)
@@ -64,47 +79,116 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Docker Hub login
+# KinD cluster name (used with --kind-load)
 # ---------------------------------------------------------------------------
-DH_USER="$(grep -m1 '^DOCKERHUB_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
-DH_TOKEN="$(grep -m1 '^DOCKERHUB_TOKEN=' "${ENV_FILE}" | cut -d= -f2-)"
-
-if [[ -z "${DH_USER}" || -z "${DH_TOKEN}" ]]; then
-    log_error "DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set in ${ENV_FILE}"
-    exit 1
+if [[ "${KIND_LOAD}" == true ]]; then
+    if ! command -v kind >/dev/null 2>&1; then
+        log_error "kind not found — cannot use --kind-load"
+        exit 1
+    fi
+    ACE_INSTANCE="$(grep -m1 '^ACE_INSTANCE_NAME=' "${ENV_FILE}" | cut -d= -f2-)"
+    KIND_CLUSTER="${KIND_CLUSTER_NAME:-agentcert-${ACE_INSTANCE}}"
+    if [[ -z "${ACE_INSTANCE}" ]]; then
+        log_error "ACE_INSTANCE_NAME not set in ${ENV_FILE}"
+        exit 1
+    fi
+    log_info "KinD cluster: ${KIND_CLUSTER}"
 fi
 
-echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin || {
-    log_error "Docker Hub login failed"
-    exit 1
+# ---------------------------------------------------------------------------
+# Image → Kubernetes deployment map (for --kind-load pod restart)
+# Only images that run as persistent Deployments are listed here.
+# Workflow-step images (install-agent, install-app) and per-experiment images
+# (flash-agent, agent-sidecar) are excluded — they have no running Deployment
+# to restart.
+# Format: image_name → "namespace/deployment-name"
+# ---------------------------------------------------------------------------
+declare -A IMAGE_DEPLOY_MAP=(
+    ["agentcert/agentcert-auth"]="ace/auth"
+    ["agentcert/agentcert-graphql"]="ace/graphql"
+    ["agentcert/agentcert-web"]="ace/web"
+    ["agentcert/certifier"]="ace/certifier"
+)
+
+# Restart a deployment after kind-loading its image so running pods pick up
+# the new image immediately (kind load replaces the containerd cache entry,
+# but IfNotPresent won't restart already-running pods on its own).
+restart_deployment() {
+    local img_name="$1"
+    local target="${IMAGE_DEPLOY_MAP[$img_name]:-}"
+    [[ -z "${target}" ]] && return 0   # no persistent deployment for this image
+
+    local ns="${target%%/*}"
+    local deploy="${target##*/}"
+
+    if ! kubectl get deployment "${deploy}" -n "${ns}" &>/dev/null; then
+        log_warn "Deployment ${deploy} not found in namespace ${ns} — skipping restart"
+        return 0
+    fi
+
+    log_info "Restarting deployment/${deploy} in ${ns} to pick up new image ..."
+    if kubectl rollout restart "deployment/${deploy}" -n "${ns}"; then
+        log_success "Restarted: deployment/${deploy} (${ns})"
+        RESTARTED_DEPLOYMENTS+=("${ns}/${deploy}")
+    else
+        log_warn "Rollout restart failed for deployment/${deploy} — pods may still use the old image"
+    fi
 }
-log_success "Logged in to Docker Hub as ${DH_USER}"
+
+# ---------------------------------------------------------------------------
+# Docker Hub login (skipped in --local mode)
+# ---------------------------------------------------------------------------
+if [[ "${LOCAL_ONLY}" == false ]]; then
+    DH_USER="$(grep -m1 '^DOCKERHUB_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
+    DH_TOKEN="$(grep -m1 '^DOCKERHUB_TOKEN=' "${ENV_FILE}" | cut -d= -f2-)"
+
+    if [[ -z "${DH_USER}" || -z "${DH_TOKEN}" ]]; then
+        log_error "DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set in ${ENV_FILE}"
+        exit 1
+    fi
+
+    echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin || {
+        log_error "Docker Hub login failed"
+        exit 1
+    }
+    log_success "Logged in to Docker Hub as ${DH_USER}"
+fi
 
 # ---------------------------------------------------------------------------
 # Image definitions: (name, context_dir, dockerfile)
 # ---------------------------------------------------------------------------
 declare -a IMAGES=(
-    "agentcert/agentcert-flash-agent|${REPO_ROOT}/flash-agent|Dockerfile"
+    "agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile"
     "agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile"
     "agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile"
     "agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile"
     "agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile"
+    "agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile"
+    "agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile"
+    "agentcert/agentcert-web|${REPO_ROOT}/AgentCert/chaoscenter/web|Dockerfile"
 )
 
 # ---------------------------------------------------------------------------
-# Build & Push
+# Build (+ optional push / kind-load)
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${CYAN}======================================${NC}"
-echo -e "${CYAN}  Build & Push All Images${NC}"
+if [[ "${KIND_LOAD}" == true ]]; then
+    echo -e "${CYAN}  Build & Load into KinD${NC}"
+elif [[ "${LOCAL_ONLY}" == true ]]; then
+    echo -e "${CYAN}  Build Only (local)${NC}"
+else
+    echo -e "${CYAN}  Build & Push All Images${NC}"
+fi
 echo -e "${CYAN}======================================${NC}"
 echo ""
 
 FAILED=()
+RESTARTED_DEPLOYMENTS=()
 
 for entry in "${IMAGES[@]}"; do
     IFS='|' read -r img_name context_dir dockerfile <<< "$entry"
-    
+
     if [[ ! -f "${context_dir}/${dockerfile}" ]]; then
         log_warn "Dockerfile not found: ${context_dir}/${dockerfile} — skipping ${img_name}"
         FAILED+=("${img_name} (no Dockerfile)")
@@ -120,23 +204,55 @@ for entry in "${IMAGES[@]}"; do
         continue
     fi
 
-    log_info "Pushing ${img_name}:latest ..."
-    if docker push "${img_name}:latest"; then
-        log_success "Pushed: ${img_name}:latest"
-    else
-        log_error "Push failed: ${img_name}"
-        FAILED+=("${img_name} (push)")
+    if [[ "${KIND_LOAD}" == true ]]; then
+        log_info "Loading ${img_name}:latest into KinD cluster ${KIND_CLUSTER} ..."
+        if kind load docker-image "${img_name}:latest" --name "${KIND_CLUSTER}"; then
+            log_success "Loaded: ${img_name}:latest"
+            # Restart the matching deployment so running pods immediately use the
+            # new image — kind load replaces the containerd cache entry but
+            # IfNotPresent won't restart already-running pods on its own.
+            restart_deployment "${img_name}"
+        else
+            log_error "kind load failed: ${img_name}"
+            FAILED+=("${img_name} (kind-load)")
+        fi
+    elif [[ "${LOCAL_ONLY}" == false ]]; then
+        log_info "Pushing ${img_name}:latest ..."
+        if docker push "${img_name}:latest"; then
+            log_success "Pushed: ${img_name}:latest"
+        else
+            log_error "Push failed: ${img_name}"
+            FAILED+=("${img_name} (push)")
+        fi
     fi
 
     echo ""
 done
 
 # ---------------------------------------------------------------------------
+# Wait for restarted deployments to finish rolling out
+# ---------------------------------------------------------------------------
+if [[ ${#RESTARTED_DEPLOYMENTS[@]} -gt 0 ]]; then
+    echo ""
+    log_info "Waiting for rollouts to complete ..."
+    for target in "${RESTARTED_DEPLOYMENTS[@]}"; do
+        ns="${target%%/*}"
+        deploy="${target##*/}"
+        if kubectl rollout status "deployment/${deploy}" -n "${ns}" --timeout=120s; then
+            log_success "Rollout complete: deployment/${deploy} (${ns})"
+        else
+            log_warn "Rollout timed out for deployment/${deploy} — check: kubectl get pods -n ${ns}"
+        fi
+    done
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}======================================${NC}"
 if [[ ${#FAILED[@]} -eq 0 ]]; then
-    echo -e "${GREEN}  All images built and pushed!${NC}"
+    echo -e "${GREEN}  All images built successfully!${NC}"
 else
     echo -e "${YELLOW}  Completed with failures:${NC}"
     for f in "${FAILED[@]}"; do

@@ -61,7 +61,7 @@ applying it to the target cluster. The relevant tokens for stage 4:
 |---|---|
 | `#{INFRA_NAMESPACE}` | The target namespace registered for this infra |
 | `#{KUBERNETES_MCP_SERVER_IMAGE}` | Image registry value configured server-side (defaults to a published `agentcert/...` tag) |
-| `#{PROMETHEUS_MCP_SERVER_IMAGE}` | Same — `agentcert/prometheus-mcp-server:latest` by default |
+| `#{PROMETHEUS_MCP_SERVER_IMAGE}` | Same — `ghcr.io/pab1it0/prometheus-mcp-server:latest` by default |
 | `#{PROMETHEUS_MCP_URL}` | Upstream Prometheus the MCP server queries. Defaults to the Prometheus deployed by [`app-charts`](../../app-charts/)'s `sock-shop` chart |
 | `#{TOLERATIONS}` | Cluster-specific scheduling tolerations |
 | `#{NODE_SELECTOR}` | Cluster-specific node-selector block |

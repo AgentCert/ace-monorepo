@@ -356,7 +356,7 @@ LLM establishes baseline thresholds once
 
 #### In-Cluster Configuration (via Helm flash-agent chart)
 
-- LLM endpoint: `http://litellm-proxy.litellm.svc.cluster.local:4000/v1`
+- LLM endpoint: `http://litellm.ace.svc.cluster.local:14000/v1`
 - Model alias: `gpt-4o` (routes to whatever LiteLLM maps that alias to)
 - MCP URLs: `kubernetes-mcp-server.sock-shop:8081`, `prometheus-mcp-server.sock-shop:8083`
 - API key: `sk-agentcert-2026` (LiteLLM master key)

@@ -9,8 +9,12 @@ set -euo pipefail
 # ACE_INSTANCE_NAME.  Never touches resources that belong to another user or
 # checkout on this shared host.
 #
-#   ./scripts/shut_down.sh          # interactive confirmation
-#   ./scripts/shut_down.sh --yes    # non-interactive (CI / scripted use)
+#   ./scripts/shut_down.sh                       # interactive confirmation
+#   ./scripts/shut_down.sh --yes                 # non-interactive (CI / scripted use)
+#   ./scripts/shut_down.sh --keep-ollama-model    # preserve the ollama-models-<instance>
+#                                                  # volume so pulled models survive teardown
+#                                                  # and don't need to be re-downloaded by
+#                                                  # the next setup.sh run
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,13 +31,17 @@ say()  { echo -e "$*"; }
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 YES=0
+KEEP_OLLAMA_MODEL=0
 for _arg in "$@"; do
     case "${_arg}" in
         -y|--yes) YES=1 ;;
+        -k|--keep-ollama-model) KEEP_OLLAMA_MODEL=1 ;;
         -h|--help)
-            say "Usage: $0 [--yes|-y]"
+            say "Usage: $0 [--yes|-y] [--keep-ollama-model|-k]"
             say "  Tears down all ACE infrastructure for the ACE_INSTANCE_NAME in .env."
-            say "  --yes / -y   skip the confirmation prompt"
+            say "  --yes / -y               skip the confirmation prompt"
+            say "  --keep-ollama-model / -k don't delete the ollama-models-<instance> volume"
+            say "                           (preserves already-pulled models for next setup)"
             exit 0 ;;
         *) err "Unknown argument: ${_arg}"; exit 1 ;;
     esac
@@ -129,12 +137,25 @@ project_is_ours() {
     return 0
 }
 
+# Compare two paths for referring to the same directory, alias-proof — the
+# same "same tree under two mount paths" issue documented above for
+# container_is_ours/project_is_ours also applies to the KinD ownership
+# marker, which stores a path string rather than an inode. Compare device:inode
+# of the directories instead of the raw strings.
+same_dir() {
+    local a b
+    a="$(stat -c '%d:%i' "$1" 2>/dev/null || true)"
+    b="$(stat -c '%d:%i' "$2" 2>/dev/null || true)"
+    [[ -n "${a}" && "${a}" == "${b}" ]]
+}
+
 # ── Safeguard: verify at least some infra exists on this host ─────────────────
 say "${BOLD}Scanning for ACE infrastructure (instance: ${BOLD}${INST}${NC}${BOLD})…${NC}"
 echo
 
 FOUND_CONTAINERS=()
 FOUND_VOLUMES=()
+KEPT_VOLUMES=()
 FOUND_KIND=""
 
 # -- Known container names created by setup.sh / start-local-services.sh ------
@@ -163,8 +184,14 @@ done < <(docker ps -a \
     --format '{{.Names}}' 2>/dev/null || true)
 
 # -- Named volumes whose names encode ACE_INSTANCE_NAME -----------------------
+_OLLAMA_MODELS_VOL="ollama-models-${INST}"
 while IFS= read -r vname; do
-    [[ -n "${vname}" ]] && FOUND_VOLUMES+=("${vname}")
+    [[ -z "${vname}" ]] && continue
+    if [[ "${vname}" == "${_OLLAMA_MODELS_VOL}" && "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
+        KEPT_VOLUMES+=("${vname}")
+        continue
+    fi
+    FOUND_VOLUMES+=("${vname}")
 done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E \
     "^(ace-${INST}_|ace-langfuse-${INST}_|ace-litellm-${INST}_|ace-certifier-${INST}_|ollama-models-${INST}$)" \
     || true)
@@ -174,7 +201,7 @@ if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
     _owner_marker="ace-kind-owner-${KIND_CLUSTER_NAME}"
     _cluster_owner="$(docker volume inspect "${_owner_marker}" \
         --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null || true)"
-    if [[ "${_cluster_owner}" == "${REPO_ROOT}" ]]; then
+    if same_dir "${_cluster_owner}" "${REPO_ROOT}"; then
         FOUND_KIND="${KIND_CLUSTER_NAME}"
     else
         warn "KinD cluster '${KIND_CLUSTER_NAME}' exists but is owned by a different checkout"
@@ -190,6 +217,9 @@ TOTAL_FOUND=$(( ${#FOUND_CONTAINERS[@]} + ${#FOUND_VOLUMES[@]} ))
 if [[ "${TOTAL_FOUND}" -eq 0 ]]; then
     say "${YELLOW}No ACE infrastructure found for instance '${INST}' on this host.${NC}"
     say "${DIM}Nothing to shut down."
+    if [[ ${#KEPT_VOLUMES[@]} -gt 0 ]]; then
+        say "${DIM}(${KEPT_VOLUMES[*]} kept as requested via --keep-ollama-model)${NC}"
+    fi
     say "If resources were created under a different instance name, check ACE_INSTANCE_NAME in .env.${NC}"
     exit 0
 fi
@@ -206,6 +236,11 @@ fi
 if [[ ${#FOUND_VOLUMES[@]} -gt 0 ]]; then
     say "  ${CYAN}Volumes (${#FOUND_VOLUMES[@]}):${NC}"
     for v in "${FOUND_VOLUMES[@]}"; do say "    • ${v}"; done
+    echo
+fi
+if [[ ${#KEPT_VOLUMES[@]} -gt 0 ]]; then
+    say "  ${CYAN}Kept (--keep-ollama-model):${NC}"
+    for v in "${KEPT_VOLUMES[@]}"; do say "    • ${v} ${DIM}(will NOT be deleted)${NC}"; done
     echo
 fi
 if [[ -n "${FOUND_KIND}" ]]; then
@@ -395,7 +430,11 @@ unset _OLLAMA_CONT
 # The ollama-models volume has an explicit name: override in docker-compose.yml
 # (name: ollama-models-${ACE_INSTANCE_NAME}) which bypasses the compose project
 # prefix, so it may not have been removed by the root compose down above.
-remove_volume "ollama-models-${INST}"
+if [[ "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
+    ok "  Kept volume: ${_OLLAMA_MODELS_VOL} ${DIM}(--keep-ollama-model)${NC}"
+else
+    remove_volume "${_OLLAMA_MODELS_VOL}"
+fi
 
 # ── 6. KinD cluster ───────────────────────────────────────────────────────────
 echo
@@ -404,7 +443,7 @@ _OWNER_MARKER="ace-kind-owner-${KIND_CLUSTER_NAME}"
 if kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
     _cluster_owner="$(docker volume inspect "${_OWNER_MARKER}" \
         --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null || true)"
-    if [[ "${_cluster_owner}" == "${REPO_ROOT}" ]]; then
+    if same_dir "${_cluster_owner}" "${REPO_ROOT}"; then
         if kind delete cluster --name "${KIND_CLUSTER_NAME}"; then
             ok "  Deleted KinD cluster: ${KIND_CLUSTER_NAME}"
         else
@@ -423,7 +462,7 @@ else
     # Remove a stale ownership marker that points to us (cluster already gone).
     _stale_owner="$(docker volume inspect "${_OWNER_MARKER}" \
         --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null || true)"
-    if [[ "${_stale_owner}" == "${REPO_ROOT}" ]]; then
+    if same_dir "${_stale_owner}" "${REPO_ROOT}"; then
         docker volume rm "${_OWNER_MARKER}" >/dev/null 2>&1 \
             && ok "  Removed stale ownership marker: ${_OWNER_MARKER}" || true
     fi
@@ -448,6 +487,9 @@ _remaining_langfuse="$(docker ps -a \
 _remaining_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E \
     "^(ace-${INST}_|ace-langfuse-${INST}_|ace-litellm-${INST}_|ace-certifier-${INST}_|ollama-models-${INST}$)" \
     || true)"
+if [[ "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
+    _remaining_volumes="$(echo "${_remaining_volumes}" | grep -vx "${_OLLAMA_MODELS_VOL}" || true)"
+fi
 
 _all_remaining="${_remaining_containers}${_remaining_langfuse}${_remaining_volumes}"
 

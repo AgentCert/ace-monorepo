@@ -3,14 +3,14 @@ ACE stack deployed successfully!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Service         URL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  UI (web)        http://localhost:2001
-  GraphQL API     http://localhost:8081
-  Auth            http://localhost:3000
-  Certifier       http://localhost:18000/docs
-  LiteLLM         http://localhost:14000
-  Langfuse        http://localhost:4000
-  MongoDB         mongodb://localhost:27017
-  MinIO           http://localhost:9090
+  UI (web)        http://localhost:{{ .Values.env.KIND_HOSTPORT_WEB | default "2001" }}
+  GraphQL API     http://localhost:{{ .Values.env.KIND_HOSTPORT_GRAPHQL_REST | default "8081" }}
+  Auth            http://localhost:{{ .Values.env.KIND_HOSTPORT_AUTH_REST | default "3000" }}
+  Certifier       http://localhost:{{ .Values.env.KIND_HOSTPORT_CERTIFIER | default "18000" }}/docs
+  LiteLLM         http://localhost:{{ .Values.env.KIND_HOSTPORT_LITELLM | default "14000" }}
+  Langfuse        http://localhost:{{ .Values.env.KIND_HOSTPORT_LANGFUSE | default "4000" }}
+  MongoDB         mongodb://localhost:{{ .Values.env.KIND_HOSTPORT_MONGO | default "27017" }}
+  MinIO           http://localhost:{{ .Values.env.KIND_HOSTPORT_MINIO | default "9090" }}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Check pod status:

@@ -63,6 +63,15 @@ ITBench shell-script fault bundles (not Go litmus-go SDK) never write a `ChaosRe
 **Status: Proposed**
 Currently `FLASH_AGENT_MODEL` is a global `.env` setting. Enabling per-experiment model selection from the UI would require a GraphQL schema change, a new Go resolver, an `agent_registry` update, and a React form addition.
 
+### 1.12 Aggregation-Failure Status Propagation to `certificate_experiments`
+**Status: Implemented**
+`pollAggregation()` and `startAggregation()` in `pkg/certification/service.go` previously wrote `AGGREGATION_FAILED` only onto the per-attempt `certificate_aggregation_workflows` sub-document, never onto the parent `certificate_experiments.status` field that `getCertificationStatus` and the ChaosCenter UI's `CertificationStatusPanel` actually read. A failed aggregation/certification run (e.g. a Phase 3 `KeyError` in `report_assembler.py`) left the UI stuck showing "Generating Certificate: running" indefinitely, with no way to tell from the UI that the pipeline had died. Fixed by:
+- Added `ExperimentStatusAggregationFailed = "AGGREGATION_FAILED"` to `model.go`.
+- Both failure paths in `service.go` (trigger failure in `startAggregation`, poll failure in `pollAggregation`) now also call `UpdateExperimentStatus(..., ExperimentStatusAggregationFailed)`.
+- `ResetStatusIfCertified` (operator.go) extended to reset from `AGGREGATION_FAILED` back to `RUNS_IN_PROGRESS`, not just from `EXPERIMENT_CERTIFICATE_READY`, so a replacement run reopens the pipeline in the UI instead of leaving it stuck on the old failure.
+- `CertificationStatusPanel.tsx` (frontend) adds an explicit `AGGREGATION_FAILED` case rendering the "Generating Certificate" stage as failed rather than falling through to the misleading default.
+- Follow-up (not yet done): surface the actual `error.reason` string (e.g. the underlying Python traceback) through a new `errorMessage` field on `CertificationExperimentSummary`, which requires a GraphQL schema change + gqlgen regen.
+
 ---
 
 ## 2. Agent Implementations
@@ -167,6 +176,17 @@ A `make dev` target that always runs `docker compose up --build`, giving the Com
 **Status: Proposed**
 `AZURE_CONTENT_SAFETY_ENDPOINT`/`AZURE_CONTENT_SAFETY_API_KEY` and `AZURE_STORAGE_CONNECTION_STRING` exist in `.env.example` but are never prompted. Could be included as optional steps.
 
+### 3.18 HTTPS for the ChaosCenter Web UI
+**Status: Proposed**
+The web UI is currently HTTP-only end to end: `AgentCert/chaoscenter/web/nginx/nginx.conf` has a single `server` block listening on plain `8185` (`root /opt/chaos`, proxying `/auth/` and `/api/` to the auth and GraphQL services), fronted by a Kubernetes NodePort Service (host `2001` → NodePort `32001` → container `2001`, per `deploy/helm/ace/templates/web.yaml`) with no TLS termination anywhere in the chart. No cert-manager, TLS secret, or `ssl_certificate` directive exists in the repo today. Serving credentials (JWT bearer tokens, the `admin`/`litmus` login) over plaintext HTTP is a real exposure once ACE runs anywhere beyond localhost/loopback.
+
+Enabling HTTPS would require:
+- A TLS certificate + key, either self-signed (generated at `setup.sh` time, good enough for local/shared-host dev) or issued via `cert-manager` (better for anything longer-lived); mounted into the web pod as a Secret.
+- A second `server` block (or a rewrite of the existing one) in `nginx.conf` listening on `443 ssl` with `ssl_certificate`/`ssl_certificate_key`, plus an HTTP→HTTPS redirect on the existing `8185`/plain listener.
+- `deploy/helm/ace/templates/web.yaml` updated to expose the TLS port (NodePort or LoadBalancer) and mount the cert Secret into the container.
+- `ALLOWED_ORIGINS` (auth service + GraphQL server CORS/WebSocket allowlist, see §4 in CLAUDE.md) extended to accept the `https://` origin, since it's currently only validated against `http://`-style entries.
+- Frontend `OPENAI_BASE_URL`-style absolute-URL assumptions (if any) and Apollo/WebSocket client config in `AgentCert/chaoscenter/web/src` double-checked for hardcoded `ws://`/`http://` schemes that would need to become `wss://`/`https://` behind TLS.
+
 ---
 
 ## 4. LLM & Model Configuration
@@ -247,6 +267,10 @@ Four operational traps documented with exact workarounds: `--restart` skips Go r
 **Status: Proposed**
 Allow answering all implementation choices at the start of `setup.sh` rather than being prompted mid-run between long-running operations (KinD creation, Helm deploy). Pure UX improvement.
 
+### 6.9 Simple Onboarding Procedure for Benchmarked Agents
+**Status: Proposed**
+Adding a new agent/app pairing to Chaos Studio currently has no guided path. `AppsHub`/`AgentHub` are read-only catalog pages with no "Create Experiment" CTA — users must hand-author the `install-application`/`install-agent` Argo container `args` directly in the raw YAML tab (`AgentCert/chaoscenter/web/src/views/ChaosStudio`). The required `-folder=<chart-dir-name>` value must match the literal chart directory name under `app-charts/`/`agent-charts/` exactly (e.g. `bookinfo`, not the `book-info` namespace/display name used elsewhere for the same app — a mismatch that silently fails the install step and cascades into an empty fault-injection target list, since `TargetApplicationTab` only lists what's actually live in-cluster). Additionally, Save stays disabled until a real fault step (`install-chaos-faults`/`install-chaos-experiments` with ≥1 artifact) is added via the fault drawer — `install-app`/`install-agent` steps alone never populate it, and no chaos-charts template currently pairs `book-info` with plain `sre-agent`. A simple onboarding procedure — either a short guided doc or a form-based install-app/install-agent step in the builder that lists valid chart folder names from `apphub`/`agenthub` — would remove this whole class of blank-canvas confusion.
+
 ---
 
 ## 7. Security & Shared-Host Isolation
@@ -318,6 +342,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 1.9 | Two-layer capability probe system | Evaluation | Implemented |
 | 1.10 | ChaosResult CR verdict patching | Evaluation | Implemented |
 | 1.11 | Per-experiment model selection from UI | Control Plane | Proposed |
+| 1.12 | Aggregation-failure status propagation to UI | Certifier | Implemented |
 | 2.1 | sre-agent-crewai (ACE-built CrewAI SRE agent) | Agents | Implemented |
 | 2.2 | A2A JSON-RPC 2.0 bridge | Agents | Implemented |
 | 2.3 | Open-weight model certification (Qwen2.5 7B local GPU) | Agents | Implemented |
@@ -342,6 +367,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 3.15 | `make dev` target | Dev Experience | Proposed |
 | 3.16 | Prompt JWT/MongoDB credentials at setup | Security | Proposed |
 | 3.17 | Azure Content Safety prompted at setup | Security | Proposed |
+| 3.18 | HTTPS for ChaosCenter web UI | Infrastructure | Proposed |
 | 4.1 | `num_ctx: 16384` for Ollama models | LLM Config | Implemented |
 | 4.2 | LiteLLM router timeout 600s | LLM Config | Implemented |
 | 4.3 | Disable `enable_pre_call_checks` in LiteLLM | LLM Config | Implemented |
@@ -359,6 +385,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 6.6 | Install-app console progress bar | Dev Experience | Implemented |
 | 6.7 | `make setup-env` for trial env files | Dev Experience | Proposed |
 | 6.8 | "Answer all upfront" option in setup.sh | Dev Experience | Proposed |
+| 6.9 | Simple onboarding procedure for benchmarked agents | Dev Experience | Proposed |
 | 7.1 | Compose-up-guard ownership check | Security | Implemented |
 | 7.2 | `itbench-litmus-chaos-enable.yml` in .gitignore | Security | Implemented |
 | 7.3 | Hardcoded `/srv/projects/` path made adaptive | Security | Implemented |

@@ -207,6 +207,27 @@ if [[ ${#_healthy_aliases[@]} -gt 0 && -n "${_cur_flash}" ]]; then
 fi
 unset _az_key _az_endpoint _az_alias _gemini_key _openrouter_key _ollama_model_cur _ollama_alias_cur _cur_flash _flash_is_healthy _a _healthy_aliases
 
+# The kind docker-network gateway is the address in-cluster pods use to reach
+# host services. Its subnet is assigned PER-BOX (NOT always 172.26.0.1 — it
+# depends on how many docker networks already exist), so detect it rather than
+# hardcoding. Empty if the kind network doesn't exist yet (fresh VM); we
+# re-detect after bring-up below. Defined unconditionally (both --setup and
+# --restart) since --restart without reconfiguring needs it too — see the
+# CALLBACK_HOST fallback below.
+detect_kind_gw() {
+    docker network inspect kind \
+        -f '{{range .IPAM.Config}}{{.Gateway}}
+{{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
+}
+
+# k3s uses a CNI bridge (cni0) whose host-side IP is the gateway pods use to
+# reach host services. Detect it from the cni0 interface so the IP is derived
+# from the actual environment rather than hardcoded.
+detect_k3s_gw() {
+    ip addr show cni0 2>/dev/null \
+        | awk '/inet / {split($2,a,"/"); print a[1]; exit}'
+}
+
 # Image build definitions — available to both --setup (interactive) and --restart --local-build
 declare -a ALL_BUILD_IMAGES=(
     "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile|direct"
@@ -216,7 +237,7 @@ declare -a ALL_BUILD_IMAGES=(
     "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
     "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
     "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
-    "8|web|agentcert/agentcert-web|||compose:agentcert-web"
+    "8|web|agentcert/agentcert-web|||compose:web"
     "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
 )
 
@@ -259,6 +280,23 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
         if [[ "${BUILD_MODE}" == "local" ]]; then
             DO_LOCAL_BUILD=1
             SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+        fi
+
+        # CALLBACK_HOST (pod->host gateway IP) is normally (re)detected further
+        # below, but that logic lives inside the interactive SETUP_MODE=setup
+        # block, which this restart-without-reconfiguring path never enters —
+        # leaving CALLBACK_HOST completely unset. k8s_deploy() dereferences it
+        # unconditionally under `set -u`, which crashes the script *after* the
+        # Helm upgrade has already gone through, only skipping the trailing
+        # "wire host services into cluster" step. Detect it here too so a
+        # plain `--restart` (Enter) stays self-healing like the other
+        # unconditional fixups above.
+        if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+            CALLBACK_HOST=""
+        else
+            CALLBACK_HOST="$(detect_k3s_gw || true)"
+            [[ -z "${CALLBACK_HOST}" ]] && CALLBACK_HOST="$(detect_kind_gw || true)"
+            CALLBACK_HOST="${CALLBACK_HOST:-172.26.0.1}"
         fi
     fi
     unset _restart_choice
@@ -632,25 +670,6 @@ fi
 echo
 
 fi # EXPRESS_MODE -eq 0 (sections 1-4)
-
-# The kind docker-network gateway is the address in-cluster pods use to reach
-# host services. Its subnet is assigned PER-BOX (NOT always 172.26.0.1 — it
-# depends on how many docker networks already exist), so detect it rather than
-# hardcoding. Empty if the kind network doesn't exist yet (fresh VM); we
-# re-detect after bring-up below.
-detect_kind_gw() {
-    docker network inspect kind \
-        -f '{{range .IPAM.Config}}{{.Gateway}}
-{{end}}' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.' | head -1
-}
-
-# k3s uses a CNI bridge (cni0) whose host-side IP is the gateway pods use to
-# reach host services. Detect it from the cni0 interface so the IP is derived
-# from the actual environment rather than hardcoded.
-detect_k3s_gw() {
-    ip addr show cni0 2>/dev/null \
-        | awk '/inet / {split($2,a,"/"); print a[1]; exit}'
-}
 
 if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
     # Cloud clusters have no kind network; SUBSCRIBER_CALLBACK_URL/SERVER_ADDR will be
@@ -1581,6 +1600,40 @@ load_images_into_kind() {
     done
 }
 
+# restart_locally_built_deployments NAMESPACE
+# All agentcert/* images keep the ":latest" tag whether they were built locally
+# or pulled from Docker Hub, and every Deployment uses imagePullPolicy:
+# IfNotPresent (see deploy/helm/ace/values.yaml and deploy/k8s/*.yaml). That
+# combination means a `helm upgrade`/`kubectl apply` that only rebuilds the
+# same tag produces byte-identical manifests — Helm/kubectl see no diff and
+# leave already-running pods alone, so freshly built local images sit unused
+# in the node's containerd cache until something explicitly recreates the pod.
+# Force that recreation here for every long-running platform Deployment we
+# just rebuilt so `--local-build` actually reaches a cluster that was already
+# up (first-time installs are unaffected since there's no prior pod to keep).
+restart_locally_built_deployments() {
+    local ns="$1"
+    [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]] || return 0
+    [[ ${#LOCAL_BUILT_IMAGES[@]} -eq 0 ]] && return 0
+    local -A _img_to_deploy=(
+        ["agentcert/agentcert-graphql"]="graphql"
+        ["agentcert/agentcert-auth"]="auth"
+        ["agentcert/agentcert-web"]="web"
+        ["agentcert/certifier"]="certifier"
+    )
+    local _img _repo _dep
+    for _img in "${LOCAL_BUILT_IMAGES[@]}"; do
+        _repo="${_img%%:*}"
+        _dep="${_img_to_deploy[${_repo}]:-}"
+        [[ -z "${_dep}" ]] && continue
+        if kubectl get deployment "${_dep}" -n "${ns}" >/dev/null 2>&1; then
+            kubectl rollout restart "deployment/${_dep}" -n "${ns}" >/dev/null 2>&1 \
+                && ok "  Restarted deployment/${_dep} to pick up freshly built local image" \
+                || warn "  Failed to restart deployment/${_dep} — it may still be running the old image"
+        fi
+    done
+}
+
 # Deploy all K8s manifests into the cluster.
 k8s_deploy() {
     local K8S_DIR="${REPO_ROOT}/deploy/k8s"
@@ -1654,6 +1707,12 @@ k8s_deploy() {
             2>/dev/null && ok "web service patched to LoadBalancer." || true
     fi
     ok "Manifests applied."
+
+    # 8b) --local-build against an already-running cluster: force a restart so
+    # the freshly built/kind-loaded images are actually picked up (see comment
+    # on restart_locally_built_deployments — same tag + IfNotPresent means
+    # `kubectl apply` alone leaves existing pods on the old image).
+    restart_locally_built_deployments "${NS}"
 
     # 9) Wait for core services to become ready (best-effort; don't abort on timeout)
     echo
@@ -1829,6 +1888,12 @@ helm_deploy() {
     _HELM_WATCH_PID=$!
     "${helm_cmd[@]}"
     kill "${_HELM_WATCH_PID}" 2>/dev/null; unset _HELM_WATCH_PID
+
+    # 5a) --local-build against an already-running release: force a restart so
+    # the freshly built/kind-loaded images are actually picked up (see comment
+    # on restart_locally_built_deployments — same tag + IfNotPresent means a
+    # no-diff `helm upgrade` leaves existing pods on the old image).
+    restart_locally_built_deployments "${NS}"
 
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then

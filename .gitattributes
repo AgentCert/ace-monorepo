@@ -1,0 +1,10 @@
+# Force LF line endings for shell scripts regardless of the checking-out
+# platform's core.autocrlf setting. This repo's bash tooling (scripts/,
+# agents/harness/*/setup.sh, compose/, deploy/kind/) is executed on
+# Linux/WSL/containers; a CRLF checkout (Windows with core.autocrlf=true)
+# silently breaks every one of them with "syntax error near unexpected token"
+# the moment they're read from a Linux shell (e.g. via a WSL /mnt/c/... mount)
+# — see CLAUDE.md section 6, "Known Operational Gotchas". Does not apply
+# inside git submodules (AgentCert/, agent-charts/, etc.) — each of those is
+# a separate repository and would need its own .gitattributes.
+*.sh text eol=lf

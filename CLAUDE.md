@@ -648,6 +648,8 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 - Node.js 20+ (web frontend changes — Node 18 is too old for `sass@1.102.0` and causes build failure)
 - At minimum one LLM API credential: Google Gemini (recommended for local dev) or Azure OpenAI
 
+`./scripts/setup.sh` checks all of the above automatically on every run (both `--setup` and `--restart`) via `scripts/check-prerequisites.sh` — it reports versions found, auto-bootstraps Python 3.12 through `uv` (no sudo) when apt doesn't package it, and prints the exact fix command for anything else missing (docker, git, kind, kubectl all need sudo, so those are never installed silently). Run it standalone for a fast sanity check without the full wizard: `./scripts/check-prerequisites.sh`.
+
 ### First-Time Setup (Kubernetes)
 
 ```bash
@@ -787,6 +789,9 @@ If `.env` was copied from another machine or checkout, `KIND_CLUSTER_NAME` may n
 
 **Credential YAML files must be gitignored before creation.**
 Experiment configuration files that embed live secrets (e.g. `itbench-litmus-chaos-enable.yml` which carries a LitmusChaos `ACCESS_KEY`) must be added to `.gitignore` **before** they are written to disk. If one is accidentally committed, remove it from remote with `git rm --cached` and rotate the key immediately — the key lives in git history even after the file is deleted.
+
+**Very new Ubuntu releases may not have `python3.12` in apt at all.**
+Ubuntu ships whatever CPython is current as the `python3` default at release time, and that version climbs every release. On a release newer than whatever this repo's contributors had when they last checked (e.g. 26.04 defaults to Python 3.14), apt's `python3.12` package may not exist yet, and the usual deadsnakes-PPA fallback may not have published builds for that codename yet either. `scripts/check-prerequisites.sh` (run standalone or automatically via `setup.sh`) detects this and offers to bootstrap Python 3.12 through `uv` instead — a sudo-free tool that ships prebuilt CPython binaries independent of the OS package manager, so it isn't blocked on the distro catching up. This only matters for certifier local dev outside Docker (§6 "Certifier Development"); the Compose and Kubernetes deploy paths run certifier from the prebuilt image and never need it.
 
 ---
 

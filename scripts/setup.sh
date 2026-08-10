@@ -19,11 +19,29 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/.env"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
+# Force UTF-8 as Python's default text encoding (PEP 540) for every embedded
+# `python3 - <<'PY'` heredoc below. Without this, Python on Windows opens
+# files (.env, litellm_config.yaml, ...) using the OS codepage (e.g. cp1252)
+# instead of UTF-8, and decoding fails with UnicodeDecodeError on this
+# repo's box-drawing/arrow characters (→ ─ ▸ ✓) the moment any open(path)
+# call reads a file containing them. No-op on Linux/Mac, which already
+# default to UTF-8.
+export PYTHONUTF8=1
+
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
 
 say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
+
+# --- Prerequisite check & self-heal ------------------------------------------
+# Runs unconditionally (both --setup and --restart), before anything else
+# touches .env, so a fresh host/VM missing tools this script depends on is
+# guided to a working state (or auto-fixed, for what can be fixed without
+# sudo) instead of failing deep into the wizard with an opaque error. See
+# scripts/check-prerequisites.sh for what's checked and why.
+# shellcheck source=scripts/check-prerequisites.sh
+source "${SCRIPT_DIR}/check-prerequisites.sh"
 
 # --- Invocation mode ----------------------------------------------------------
 #   --setup    (default) full first-time wizard: prompts, writes .env, deploys
@@ -302,12 +320,27 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
     unset _restart_choice
 fi
 
-# ask "KEY" "Prompt label" → echoes chosen value (default = current .env value)
+# True if $1 is empty or looks like an unfilled .env.example placeholder
+# (CHANGE_ME, REPLACE_ME, dckr_pat_REPLACE_ME, YOUR_RESOURCE, YOUR_DOCKERHUB_...,
+# YOUR_HOST_LAN_IP, etc.) rather than a real value someone actually typed in.
+is_placeholder() {
+    local v="$1"
+    [[ -z "$v" ]] && return 0
+    case "$v" in
+        CHANGE_ME|REPLACE_ME|*REPLACE_ME|YOUR_*|*YOUR_RESOURCE*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ask "KEY" "Prompt label" → echoes chosen value (default = current .env value).
+# When .env already holds a real (non-placeholder) value for KEY, that's
+# flagged inline with "already set" so it's obvious the bracketed default is
+# an existing credential to keep (Enter) or overwrite — not a guess.
 ask() {
     local key="$1" label="$2" def reply
     def="$(cur "$key")"
-    if [[ -n "$def" && "$def" != CHANGE_ME && "$def" != REPLACE_ME && "$def" != *YOUR_RESOURCE* ]]; then
-        read -rp "$(echo -e "  ${BOLD}${label}${NC} ${DIM}[${def}]${NC}: ")" reply
+    if ! is_placeholder "$def"; then
+        read -rp "$(echo -e "  ${BOLD}${label}${NC} ${GREEN}✓ already set${NC} ${DIM}[${def}]${NC}: ")" reply
         echo "${reply:-$def}"
     else
         read -rp "$(echo -e "  ${BOLD}${label}${NC}: ")" reply
@@ -345,10 +378,10 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo
 
     # Build
-    echo -e "${BOLD}▸ Build images?${NC}  p=push to Docker Hub  l=build locally  n=skip"
-    DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
+    echo -e "${BOLD}▸ Build images?${NC}  p=push to Docker Hub  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
+    DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
     declare -a SELECTED_BUILD_IMAGES=()
-    read -rp "  Choice [p/l/N]: " _eb
+    read -rp "  Choice [p/l/a/N]: " _eb
     case "${_eb,,}" in
         p)  DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
             DH_TOKEN="$(ask DOCKERHUB_TOKEN   'Docker Hub token')"
@@ -360,6 +393,7 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
                 warn "Credentials missing — skipping build."
             fi ;;
         l)  DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}") ;;
+        a)  DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}"); _ALL_LOCAL=1 ;;
     esac
     _pis="skip"; [[ $DO_BUILD -eq 1 ]] && _pis="push"; [[ $DO_LOCAL_BUILD -eq 1 ]] && _pis="local"
     if grep -q '^PLATFORM_IMAGE_SOURCE=' "${ENV_FILE}" 2>/dev/null; then
@@ -370,15 +404,20 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     unset _pis
     echo
 
-    # Image sources
-    echo -e "${BOLD}▸ Experiment image sources${NC}  d=Docker Hub  j=JFrog  l=local build"
-    read -rp "  install-application  (agentcert-install-app)   [d/j/l, Enter=d]: " _ans
-    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
-    read -rp "  install-agent        (agentcert-install-agent) [d/j/l, Enter=d]: " _ans
-    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
-    read -rp "  litmuschaos helpers  (k8s/checker/deployer)    [d/l,   Enter=d]: " _ans
-    case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
-    unset _ans
+    # Image sources — "a" above already answers these; only ask when it wasn't chosen.
+    if [[ ${_ALL_LOCAL} -eq 1 ]]; then
+        echo -e "${BOLD}▸ Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
+        _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
+    else
+        echo -e "${BOLD}▸ Experiment image sources${NC}  d=Docker Hub  j=JFrog  l=local build"
+        read -rp "  install-application  (agentcert-install-app)   [d/j/l, Enter=d]: " _ans
+        case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
+        read -rp "  install-agent        (agentcert-install-agent) [d/j/l, Enter=d]: " _ans
+        case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
+        read -rp "  litmuschaos helpers  (k8s/checker/deployer)    [d/l,   Enter=d]: " _ans
+        case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
+        unset _ans
+    fi
     if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
         echo -e "  ${BOLD}JFrog credentials${NC}"
         _JFROG_HOST="$(ask JFROG_HOST          'JFrog host')"
@@ -465,7 +504,7 @@ fi
 
 # --- Build: push to Docker Hub or build locally (optional) ------------------
 if [[ $EXPRESS_MODE -eq 0 ]]; then
-DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""
+DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
 declare -a SELECTED_BUILD_IMAGES=()
 
 if [[ "${BUILD_MODE}" == "local" ]]; then
@@ -476,12 +515,14 @@ else
     echo -e "${BOLD}Build Docker images?${NC}"
     echo -e "   ${BOLD}p${NC}  Build and push to Docker Hub"
     echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD — no Docker Hub account needed)${NC}"
+    echo -e "   ${BOLD}a${NC}  Build ALL locally   ${DIM}(platform + experiment images — also auto-fills and skips the image-source questions below)${NC}"
     echo -e "   ${BOLD}n${NC}  Skip"
-    read -rp "$(echo -e "Choice ${DIM}[p/l/N]${NC}: ")" _build_ans
+    read -rp "$(echo -e "Choice ${DIM}[p/l/a/N]${NC}: ")" _build_ans
     _sel_mode="none"
     case "${_build_ans,,}" in
         p) _sel_mode="push"  ;;
         l) _sel_mode="local" ;;
+        a) _sel_mode="local"; _ALL_LOCAL=1 ;;
     esac
     if [[ "${_sel_mode}" != "none" ]]; then
         echo
@@ -523,10 +564,17 @@ echo
 fi # EXPRESS_MODE -eq 0 (build section)
 
 # --- Experiment image sources -----------------------------------------------
-# Wizard is skipped in --restart mode (sources are already in .env).
+# Wizard is skipped in --restart mode (sources are already in .env), and also
+# skipped here — auto-filled to local instead — when "a" (build ALL locally)
+# was chosen in the build prompt above.
 _INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
 _JFROG_HOST=""; _JFROG_PATH=""; _JFROG_USER=""; _JFROG_TOKEN=""
 if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
+    if [[ "${_ALL_LOCAL:-0}" -eq 1 ]]; then
+        echo -e "${BOLD}Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
+        _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
+        echo
+    else
     echo -e "${BOLD}Experiment image sources${NC}"
     echo -e "   ${DIM}The graphql server injects these into every Argo Workflow it creates,${NC}"
     echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
@@ -552,6 +600,7 @@ if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
         _JFROG_TOKEN="$(ask JFROG_TOKEN 'Token / password')"
     fi
     echo
+    fi
 fi
 export _INSTALL_APP_SRC _INSTALL_AGENT_SRC _LITMUS_SRC \
        _JFROG_HOST _JFROG_PATH _JFROG_USER _JFROG_TOKEN

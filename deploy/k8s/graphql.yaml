@@ -32,8 +32,12 @@ spec:
           command: [sh, -c]
           args:
             - |
-              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
-              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+              # Branch must match the "branch =" value for these submodules in
+              # .gitmodules — otherwise this clones the repo's default branch
+              # and silently hides any agent/app onboarded only on the feature
+              # branch from AgentHub/AppHub, with no error anywhere.
+              git clone --depth 1 -b feature/itbench-scenarios https://github.com/AgentCert/agent-charts.git /repo/agent-charts
+              git clone --depth 1 -b feature/itbench-scenarios https://github.com/AgentCert/app-charts.git    /repo/app-charts
           env:
             - name: GIT_SSL_CAINFO
               value: "/etc/ssl/certs/ca-certificates.crt"

@@ -43,6 +43,18 @@ images:
 imagePullPolicy: IfNotPresent
 infraImagePullPolicy: IfNotPresent
 
+# ── AgentHub / AppHub chart sources ──────────────────────────────────────────
+# The graphql pod's clone-charts initContainer clones these branches of
+# agent-charts and app-charts to populate "Install Agent" / "Install
+# Application" in the UI (pkg/agenthub, pkg/apphub read
+# charts/agents.chartserviceversion.yaml / charts/applications.chartserviceversion.yaml
+# from the clone). Must match the branch actually tracked in .gitmodules —
+# otherwise cloning the repo's default branch silently hides any
+# agent/app onboarded only on the feature branch, with no error anywhere.
+chartsHub:
+  agentChartsBranch: feature/itbench-scenarios
+  appChartsBranch: feature/itbench-scenarios
+
 # ── Persistent storage sizes ─────────────────────────────────────────────────
 storage:
   mongodb:                5Gi

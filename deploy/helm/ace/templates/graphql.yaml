@@ -21,8 +21,8 @@ spec:
           args:
             - |
               rm -rf /repo/agent-charts /repo/app-charts
-              git clone --depth 1 https://github.com/AgentCert/agent-charts.git /repo/agent-charts
-              git clone --depth 1 https://github.com/AgentCert/app-charts.git    /repo/app-charts
+              git clone --depth 1 -b {{ .Values.chartsHub.agentChartsBranch }} https://github.com/AgentCert/agent-charts.git /repo/agent-charts
+              git clone --depth 1 -b {{ .Values.chartsHub.appChartsBranch }}   https://github.com/AgentCert/app-charts.git    /repo/app-charts
           env:
             - name: GIT_SSL_CAINFO
               value: "/etc/ssl/certs/ca-certificates.crt"

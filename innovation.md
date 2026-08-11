@@ -104,6 +104,16 @@ Live-mode SRE agent now uses `kubernetes-mcp-server` and `prometheus-mcp-server`
 **Status: Proposed (deferred — methodological implications for capability probes)**
 `bench.yaml` for `sre-agent-qwen` should switch to `sre_react_online.md` to activate the include system and bring the patched `kubernetes.md` into the assembled prompt. Deliberately held to avoid invalidating ongoing capability probe baseline data.
 
+### 2.8 `injectExperimentContextArgs` Hardcodes Flash-Agent's Value Schema Regardless of Selected Agent
+**Status: Proposed**
+`injectExperimentContextArgs` (`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go`) matches any install-agent workflow step purely by template name (`install-agent`) or image (`agentcert-install-agent`) — it never reads `{{workflow.parameters.agentFolder}}`, so it has no way to know which agent chart a given step is actually installing. It unconditionally injects a fixed Helm `--set` arg list shaped for flash-agent's specific value schema (`agent.config.MCP_URLS`, `agent.config.OPENAI_BASE_URL`, `agent.secret.LITELLM_MASTER_KEY`, `sidecar.enabled`, `sidecar.upstream`, etc.) onto every install-agent step it finds, regardless of which agent is actually selected via the App/Agent Hub picker or hand-edited YAML.
+
+At least one other onboarded agent chart, `sre-agent-comprehensive`, uses a structurally different value schema entirely (`agent.notifyId`, `agent.workflowUid` — no `agent.config.*` namespace at all), confirmed by inspecting `chaos-charts/experiments/sre-agent-comprehensive-itbench-single/experiment.yaml`'s raw install-agent template. So a blank-canvas experiment built with a non-flash-agent agent selected would still receive the flash-agent-shaped values, which don't map to anything in that chart — most likely silently ignored by Helm as unused paths rather than erroring, but this has not been verified per-agent, and it is clearly accidental scope rather than intentional.
+
+Discovered while confirming durability of the MCP-URL-hardcoding fix from this session's `2exp`/ITBench-scenario-registration work: that fix (templating the MCP server URLs off `{{workflow.parameters.appNamespace}}` instead of a literal namespace) is itself agent-agnostic and fully durable — it lives in the same function and applies to any install-agent step regardless of agent. The problem here is a separate, pre-existing characteristic of the function (not introduced by that fix): the entire arg-injection block was already scoped to flash-agent's value schema before this session, with no branching on which agent is actually being installed.
+
+Fixing properly would mean either: (a) branching the injected arg set on `agentFolder`'s declared value schema, sourced from `agenthub`'s per-agent CSV metadata — the same mechanism `applyInstallAgentTemplateOverridesFromMetadata` already uses to resolve per-agent image/pull-policy — or (b) having each onboarded agent chart declare its own Helm value-key mapping (MCP URLs env var name, model alias key, sidecar config key, etc.) that this function reads generically instead of hardcoding flash-agent's specific keys.
+
 ---
 
 ## 3. Infrastructure & Deployment
@@ -350,6 +360,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 2.5 | Prometheus + K8s MCP for live SRE mode | Agents | Implemented |
 | 2.6 | Agent sidecar as sole `experiment_run_id` injection point | Agents | Implemented |
 | 2.7 | `sre_react_online.md` composite entry-point | Agents | Proposed (deferred) |
+| 2.8 | `injectExperimentContextArgs` hardcodes flash-agent value schema for any agent | Agents | Proposed |
 | 3.1 | Instance-scoped shared-host isolation | Infrastructure | Implemented |
 | 3.2 | KinD eviction absolute byte floor thresholds | Infrastructure | Implemented |
 | 3.3 | `compose-up-guard.sh` safety wrapper | Infrastructure | Implemented |

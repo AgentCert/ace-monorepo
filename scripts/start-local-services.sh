@@ -25,6 +25,16 @@ set -uo pipefail
 #                                 instead of building from source. Default tag:
 #                                 agentcert/certifier:latest. Override the tag
 #                                 with CERTIFIER_IMAGE in your .env.
+#   --check-local-mods             Before starting, check certifier/ (submodule)
+#                                 and .tmp/langfuse (upstream clone) for
+#                                 uncommitted local changes. If found, ask
+#                                 whether to build that component's image from
+#                                 source instead of pulling a prebuilt tag --
+#                                 pulling would silently ignore local edits.
+#                                 Useful when you have no push access to the
+#                                 image registry but full pull access: you can
+#                                 still pull everything unmodified, and only
+#                                 build locally what you've actually changed.
 #   --env-file PATH               .env to feed services (default: <repo-root>/.env)
 #   --langfuse-dir PATH           Langfuse compose dir (default: /opt/langfuse,
 #                                 then ~/langfuse, then <repo-root>/.tmp/langfuse)
@@ -32,8 +42,18 @@ set -uo pipefail
 #   -h, --help                    Show this help
 # =============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# `pwd -P` (not plain `pwd`) is required here: plain `pwd` returns whatever
+# symlink alias the CWD was reached through (bash's "logical" path), while
+# Docker records container working_dir labels resolved to the physical path.
+# On hosts where the repo is reachable through more than one symlinked path
+# (e.g. /home/<user>/... symlinked to /Innovation/home/<user>/...), invoking
+# this script through a different alias than whatever created an existing
+# container would make assert_not_foreign_container() below compare two
+# spellings of the SAME directory and wrongly refuse it as a foreign
+# checkout. `-P` resolves symlinks so REPO_ROOT is always canonical and
+# comparisons are meaningful regardless of which alias was used to invoke it.
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -P "${SCRIPT_DIR}/.." && pwd -P)"
 
 ENV_FILE="${REPO_ROOT}/.env"
 LANGFUSE_DIR=""
@@ -44,7 +64,11 @@ RUN_CERTIFIER=true
 RUN_OLLAMA=true
 RESTART=false
 PULL_CERTIFIER=false
+CHECK_LOCAL_MODS=false
 CERTIFIER_PULL_IMAGE_DEFAULT="agentcert/certifier:latest"
+# Set by run_local_mod_check() when the user opts to build Langfuse from
+# source; consumed by start_langfuse().
+LANGFUSE_BUILD_FROM_SOURCE=false
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 log_info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -67,6 +91,7 @@ while [[ $# -gt 0 ]]; do
         --only-certifier) RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=false; RUN_CERTIFIER=true;  RUN_OLLAMA=false; shift ;;
         --only-ollama)    RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=false; RUN_CERTIFIER=false; RUN_OLLAMA=true;  shift ;;
         --pull-certifier) PULL_CERTIFIER=true; shift ;;
+        --check-local-mods) CHECK_LOCAL_MODS=true; shift ;;
         --env-file)       ENV_FILE="${2:-}"; shift 2 ;;
         --langfuse-dir)   LANGFUSE_DIR="${2:-}"; shift 2 ;;
         --restart)        RESTART=true; shift ;;
@@ -328,14 +353,32 @@ start_langfuse() {
     # -f compose/langfuse.override.yml: parameterizes the two hardcoded ports
     # in the pristine upstream clone (see that file's header for why this
     # can't just be a hand-edit to LANGFUSE_DIR).
+    #
+    # Base compose file: docker-compose.yml pulls prebuilt langfuse-web /
+    # langfuse-worker images (docker.io/langfuse/*:3) -- fine when .tmp/langfuse
+    # is an untouched clone. If run_local_mod_check() (--check-local-mods)
+    # detected local edits and the user opted in, LANGFUSE_BUILD_FROM_SOURCE
+    # is true and we swap in docker-compose.build.yml instead, which builds
+    # langfuse-web/langfuse-worker from ./web and ./worker Dockerfiles (the
+    # other four services -- postgres/redis/clickhouse/minio -- still pull,
+    # since those are never locally modified here). This is a swap, not a
+    # layer: docker-compose.build.yml fully redeclares all six services, so
+    # merging it on top of docker-compose.yml would just be redundant.
+    local lf_base_compose="docker-compose.yml"
+    local lf_up_args=(up -d)
+    if [[ "${LANGFUSE_BUILD_FROM_SOURCE}" == true ]]; then
+        lf_base_compose="docker-compose.build.yml"
+        lf_up_args=(up -d --build)
+        log_info "Building langfuse-web/langfuse-worker from local source (local modifications detected in .tmp/langfuse) ..."
+    fi
     if [[ -f "${ENV_FILE}" ]]; then
-        if ! (cd "${LANGFUSE_DIR}" && COMPOSE_PROJECT_NAME="${langfuse_project}" docker compose --env-file "${ENV_FILE}" -f docker-compose.yml -f "${REPO_ROOT}/compose/langfuse.override.yml" up -d); then
+        if ! (cd "${LANGFUSE_DIR}" && COMPOSE_PROJECT_NAME="${langfuse_project}" docker compose --env-file "${ENV_FILE}" -f "${lf_base_compose}" -f "${REPO_ROOT}/compose/langfuse.override.yml" "${lf_up_args[@]}"); then
             log_error "Langfuse compose up failed"
             return 1
         fi
     else
         log_warn "No env file at ${ENV_FILE} -- starting Langfuse without LANGFUSE_INIT_* vars (no org/project will be auto-created)"
-        if ! (cd "${LANGFUSE_DIR}" && COMPOSE_PROJECT_NAME="${langfuse_project}" docker compose -f docker-compose.yml -f "${REPO_ROOT}/compose/langfuse.override.yml" up -d); then
+        if ! (cd "${LANGFUSE_DIR}" && COMPOSE_PROJECT_NAME="${langfuse_project}" docker compose -f "${lf_base_compose}" -f "${REPO_ROOT}/compose/langfuse.override.yml" "${lf_up_args[@]}"); then
             log_error "Langfuse compose up failed"
             return 1
         fi
@@ -615,6 +658,69 @@ start_ollama() {
         fi
     fi
 }
+
+# ---------------------------------------------------------------------------
+# Local-modification detection (--check-local-mods)
+#
+# Certifier and Langfuse can each run from either a locally-built image or a
+# prebuilt one pulled from a registry (see start_certifier/start_langfuse
+# above). Pulling is fine -- and is all a read-only registry account can ever
+# do -- as long as the corresponding checkout has no uncommitted changes. If
+# it does, pulling silently serves stale behavior with no error. This check
+# surfaces that mismatch and asks per-component whether to build from source
+# instead, so registry pull-only access never costs you your own edits.
+# ---------------------------------------------------------------------------
+path_is_locally_modified() {
+    local dir="$1"
+    [[ -d "${dir}/.git" || -f "${dir}/.git" ]] || return 1
+    [[ -n "$(git -C "${dir}" status --porcelain 2>/dev/null)" ]]
+}
+
+confirm_build_from_source() {
+    local label="$1" reply
+    read -r -p "  ${label} has local modifications. Build from source instead of pulling a prebuilt image? [Y/n] " reply
+    [[ -z "${reply}" || "${reply}" =~ ^[Yy] ]]
+}
+
+run_local_mod_check() {
+    log_info "Checking for local modifications that a pulled image would mask ..."
+
+    if [[ "${RUN_CERTIFIER}" == true ]]; then
+        if path_is_locally_modified "${REPO_ROOT}/certifier"; then
+            log_warn "certifier/ (submodule) has uncommitted local changes."
+            if [[ "${PULL_CERTIFIER}" == true ]]; then
+                if confirm_build_from_source "certifier"; then
+                    PULL_CERTIFIER=false
+                    log_success "certifier: will build from source -- local changes will be included."
+                else
+                    log_warn "certifier: proceeding with --pull-certifier -- local changes will NOT be reflected in the running container."
+                fi
+            else
+                log_success "certifier: already building from source by default -- local changes will be included."
+            fi
+        fi
+    fi
+
+    if [[ "${RUN_LANGFUSE}" == true ]]; then
+        local lf_dir="${REPO_ROOT}/.tmp/langfuse"
+        if [[ -d "${lf_dir}" ]] && path_is_locally_modified "${lf_dir}"; then
+            log_warn ".tmp/langfuse (upstream clone) has local modifications."
+            if [[ -f "${lf_dir}/docker-compose.build.yml" ]] && confirm_build_from_source "langfuse"; then
+                LANGFUSE_BUILD_FROM_SOURCE=true
+                log_success "langfuse: will build langfuse-web/langfuse-worker from source -- local changes will be included."
+            else
+                log_warn "langfuse: proceeding with pulled images -- local changes will NOT be reflected."
+            fi
+        fi
+    fi
+
+    if [[ "${RUN_LITELLM}" == true ]]; then
+        log_info "litellm: proxy image (litellm/litellm:v1.82.0-stable) is always pulled -- there is no local-build path for it in this repo. litellm_config.yaml and patches/ollama_chat_transformation.py are bind-mounted into the container at runtime, so edits to those two files apply regardless of build vs. pull."
+    fi
+    echo ""
+}
+
+[[ "${CHECK_LOCAL_MODS}" == true ]] && run_local_mod_check
 
 # ---------------------------------------------------------------------------
 # Run

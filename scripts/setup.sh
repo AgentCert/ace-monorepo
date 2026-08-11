@@ -452,18 +452,22 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo -e "${BOLD}▸ OpenRouter${NC}  ${DIM}(Enter to skip)${NC}"
     OPENROUTER_KEY="$(ask OPENROUTER_API_KEY 'API key')"; OPENROUTER_KEY="$(echo "${OPENROUTER_KEY}" | tr -d '[:space:]')"
 
-    echo -e "${BOLD}▸ Ollama${NC}  ${DIM}(local open-weight model; Enter to skip)${NC}"
+    echo -e "${BOLD}▸ Ollama${NC}  ${DIM}(local open-weight model — pulls a multi-GB image + model; can take a long time)${NC}"
     _cur_ollama="$(cur OLLAMA_MODEL)"
-    if   [[ -n "$_cur_ollama" ]]; then _ollama_def="${_cur_ollama}"
-    elif [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then _ollama_def="qwen2.5:32b-instruct"
-    else _ollama_def=""; fi
-    if [[ -n "${_ollama_def}" ]]; then
-        read -rp "$(echo -e "  Model ${DIM}[${_ollama_def}]${NC}: ")" _or; OLLAMA_MODEL_TAG="${_or:-${_ollama_def}}"
+    _last_ollama="$(cur OLLAMA_MODEL_LAST_USED)"
+    if   [[ -n "$_cur_ollama" ]]; then _ollama_def="${_cur_ollama}"; _ollama_use_def="y"
+    elif [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then _ollama_def="${_last_ollama:-qwen2.5:32b-instruct}"; _ollama_use_def="y"
+    else _ollama_def="${_last_ollama}"; _ollama_use_def="n"; fi
+    _ollama_use_hint="y/N"; [[ "${_ollama_use_def}" == "y" ]] && _ollama_use_hint="Y/n"
+    read -rp "$(echo -e "  Set up Ollama? ${DIM}[${_ollama_use_hint}]${NC}: ")" _ollama_use
+    _ollama_use="${_ollama_use:-${_ollama_use_def}}"
+    if [[ "${_ollama_use,,}" == y* ]]; then
+        read -rp "$(echo -e "  Model ${DIM}[${_ollama_def:-qwen2.5:32b-instruct}]${NC}: ")" _or
+        OLLAMA_MODEL_TAG="${_or:-${_ollama_def:-qwen2.5:32b-instruct}}"
     else
-        read -rp "$(echo -e "  Model ${DIM}(Enter to skip)${NC}: ")" _or; OLLAMA_MODEL_TAG="${_or}"
+        OLLAMA_MODEL_TAG=""
     fi
     OLLAMA_MODEL_TAG="$(echo "${OLLAMA_MODEL_TAG}" | tr -d '[:space:]')"
-    [[ "${OLLAMA_MODEL_TAG,,}" == "none" || "${OLLAMA_MODEL_TAG,,}" == "skip" ]] && OLLAMA_MODEL_TAG=""
     [[ -n "${OLLAMA_MODEL_TAG}" ]] && OLLAMA_ALIAS="$(echo "${OLLAMA_MODEL_TAG}" | tr ':' '-')" || OLLAMA_ALIAS=""
     echo
 
@@ -647,27 +651,28 @@ OPENROUTER_KEY="$(echo "${OPENROUTER_KEY}" | tr -d '[:space:]')"
 echo
 
 echo -e "   ${BOLD}d) Ollama${NC} ${DIM}(local open-weight model — no external API key required)${NC}"
-echo -e "      ${DIM}The model is pulled automatically via 'ollama pull'. Press Enter for the default,${NC}"
-echo -e "      ${DIM}or leave blank (type a space then Enter, or 'none') to skip Ollama.${NC}"
+echo -e "      ${DIM}Pulls a multi-GB image + model via 'ollama pull' — can take a long time on a slow link.${NC}"
 # Smart default: offer the qwen2.5 32b only when no external provider is configured
 # (or when the user already has OLLAMA_MODEL set in .env). If they have API keys, skip.
 _cur_ollama="$(cur OLLAMA_MODEL)"
+_last_ollama="$(cur OLLAMA_MODEL_LAST_USED)"
 if [[ -n "$_cur_ollama" ]]; then
-    _ollama_def="${_cur_ollama}"
+    _ollama_def="${_cur_ollama}"; _ollama_use_def="y"
 elif [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" ]]; then
-    _ollama_def="qwen2.5:32b-instruct"
+    _ollama_def="${_last_ollama:-qwen2.5:32b-instruct}"; _ollama_use_def="y"
 else
-    _ollama_def=""
+    _ollama_def="${_last_ollama}"; _ollama_use_def="n"
 fi
-if [[ -n "${_ollama_def}" ]]; then
-    read -rp "$(echo -e "  ${BOLD}Ollama model${NC} ${DIM}[${_ollama_def}]${NC}: ")" _ollama_reply
-    OLLAMA_MODEL_TAG="${_ollama_reply:-${_ollama_def}}"
+_ollama_use_hint="y/N"; [[ "${_ollama_use_def}" == "y" ]] && _ollama_use_hint="Y/n"
+read -rp "$(echo -e "  ${BOLD}Set up Ollama?${NC} ${DIM}[${_ollama_use_hint}]${NC}: ")" _ollama_use
+_ollama_use="${_ollama_use:-${_ollama_use_def}}"
+if [[ "${_ollama_use,,}" == y* ]]; then
+    read -rp "$(echo -e "  ${BOLD}Ollama model${NC} ${DIM}[${_ollama_def:-qwen2.5:32b-instruct}]${NC}: ")" _ollama_reply
+    OLLAMA_MODEL_TAG="${_ollama_reply:-${_ollama_def:-qwen2.5:32b-instruct}}"
 else
-    read -rp "$(echo -e "  ${BOLD}Ollama model${NC} ${DIM}(Enter to skip; or e.g. qwen2.5:32b-instruct, llama3.3:70b)${NC}: ")" _ollama_reply
-    OLLAMA_MODEL_TAG="${_ollama_reply}"
+    OLLAMA_MODEL_TAG=""
 fi
 OLLAMA_MODEL_TAG="$(echo "${OLLAMA_MODEL_TAG}" | tr -d '[:space:]')"
-[[ "${OLLAMA_MODEL_TAG,,}" == "none" || "${OLLAMA_MODEL_TAG,,}" == "skip" ]] && OLLAMA_MODEL_TAG=""
 OLLAMA_ALIAS=""
 [[ -n "${OLLAMA_MODEL_TAG}" ]] && OLLAMA_ALIAS="$(echo "${OLLAMA_MODEL_TAG}" | tr ':' '-')"
 echo
@@ -812,21 +817,44 @@ if flash_model:
     sets["FLASH_AGENT_MODEL"] = flash_model
 
 # ── Ollama model ──────────────────────────────────────────────────────────────
+# OLLAMA_MODEL is the "live" tag: non-empty means setup.sh actively manages
+# the container (ensures it's running, pulls this tag, wires litellm_config
+# and flash-agent). OLLAMA_MODEL_LAST_USED is a separate, purely cosmetic
+# memory of the most recent real tag typed in, used ONLY to pre-fill the
+# wizard's prompt default after a decline — it never drives any deploy
+# behavior on its own, so remembering it doesn't resurrect anything.
 ollama_model = os.environ.get("_OLLAMA_MODEL_TAG", "")
+cur_lines = open(path).read()
 if ollama_model:
     sets["OLLAMA_MODEL"] = ollama_model
+    sets["OLLAMA_MODEL_LAST_USED"] = ollama_model
     # Set sensible defaults for OLLAMA_BASE_URL and OPENAI_COMPATIBLE_BASE_URL
     # if not already in .env. Both use the UID-derived OLLAMA_PORT (written to
     # .env by the backfill block earlier in this script) so they reach THIS
     # checkout's ACE-owned Ollama container, not the system Ollama on :11434.
     # k8s_env_patch overwrites both with in-cluster Service names at K8s deploy.
-    cur_lines = open(path).read()
     m = re.search(r'^OLLAMA_PORT=(\d+)', cur_lines, re.MULTILINE)
     ollama_port = m.group(1) if m else "11434"
     if "OLLAMA_BASE_URL=" not in cur_lines:
         sets.setdefault("OLLAMA_BASE_URL", f"http://host.docker.internal:{ollama_port}")
     if "OPENAI_COMPATIBLE_BASE_URL=" not in cur_lines:
         sets.setdefault("OPENAI_COMPATIBLE_BASE_URL", f"http://host.docker.internal:{ollama_port}/v1")
+else:
+    # The user was asked "Set up Ollama?" this run and declined — clear any
+    # OLLAMA_MODEL left over from a previous run. Without this, a stale value
+    # from an earlier setup keeps flash-agent's Ollama route "configured" and
+    # the Ollama-ensure-running block below (which falls back to reading
+    # OLLAMA_MODEL straight from .env for --restart) would resurrect the
+    # container + model pull despite the explicit "no" just given. Before
+    # clearing it, stash whatever it was into OLLAMA_MODEL_LAST_USED (if not
+    # already blank) so the next wizard run still pre-fills the same tag
+    # instead of making the user retype it — the container/volume with the
+    # actual downloaded model is untouched either way.
+    prev_m = re.search(r'^OLLAMA_MODEL=(.+)$', cur_lines, re.MULTILINE)
+    prev_ollama_model = prev_m.group(1).strip() if prev_m else ""
+    if prev_ollama_model:
+        sets["OLLAMA_MODEL_LAST_USED"] = prev_ollama_model
+    sets["OLLAMA_MODEL"] = ""
 
 # ── Docker Hub ────────────────────────────────────────────────────────────────
 dh_user = os.environ.get("_DH_USER", "")
@@ -983,6 +1011,8 @@ if [[ -n "$OPENROUTER_KEY" ]]; then
 fi
 if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
     ok "Ollama         ${OLLAMA_ALIAS}  (model: ${OLLAMA_MODEL_TAG})"
+else
+    echo -e "  ${DIM}Ollama         skipped — no local container will be created or model pulled${NC}"
 fi
 if [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" && -z "${OLLAMA_MODEL_TAG:-}" ]]; then
     warn "No LLM providers configured — agents won't be able to make LLM calls (re-run to add one)."
@@ -1902,6 +1932,11 @@ helm_deploy() {
     create_ca_configmap "${NS}"
 
     # 5) Run helm — it owns namespace, secret, and all workloads
+    if ! command -v helm >/dev/null 2>&1; then
+        warn "helm not found on PATH — cannot deploy. Install it, e.g.:"
+        warn "  curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh"
+        return 1
+    fi
     local helm_cmd=(
         helm upgrade --install ace "${CHART_DIR}"
         --namespace "${NS}"
@@ -1935,8 +1970,16 @@ helm_deploy() {
         echo "  (helm is waiting for the mongodb-rs-init hook to complete…)"
       done ) &
     _HELM_WATCH_PID=$!
+    local helm_rc=0
+    set +e
     "${helm_cmd[@]}"
-    kill "${_HELM_WATCH_PID}" 2>/dev/null; unset _HELM_WATCH_PID
+    helm_rc=$?
+    set -e
+    kill "${_HELM_WATCH_PID}" 2>/dev/null; wait "${_HELM_WATCH_PID}" 2>/dev/null; unset _HELM_WATCH_PID
+    if [[ ${helm_rc} -ne 0 ]]; then
+        warn "helm upgrade --install failed (exit ${helm_rc})."
+        return 1
+    fi
 
     # 5a) --local-build against an already-running release: force a restart so
     # the freshly built/kind-loaded images are actually picked up (see comment

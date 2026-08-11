@@ -641,7 +641,7 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 ### Prerequisites
 
 - Docker Engine 28+ (user in `docker` group)
-- `kind` v0.20+ and `kubectl` v1.27+ (for Kubernetes deployment)
+- `kind` v0.20+, `kubectl` v1.27+, and `helm` v3.12+ (for Kubernetes deployment)
 - `git` with submodule support
 - Python 3.12 (certifier, scripts)
 - Go 1.24 (AgentCert backend changes)

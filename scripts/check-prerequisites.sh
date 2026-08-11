@@ -31,6 +31,7 @@ set -euo pipefail
 MIN_DOCKER="28.0.0"
 MIN_KIND="0.20.0"
 MIN_KUBECTL="1.27.0"
+MIN_HELM="3.12.0"
 MIN_NODE="20.0.0"
 
 # Reuse the caller's colors/helpers when sourced from a script that already
@@ -157,6 +158,18 @@ else
     fi
 fi
 
+if ! command -v helm >/dev/null 2>&1; then
+    warn "helm not found -- only needed if you plan to deploy to Kubernetes (skip if Compose-only)."
+    warn "  curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh"
+else
+    _hv="$(_extract_ver "$(helm version --short 2>/dev/null)")"
+    if [[ -n "$_hv" ]] && version_ge "$_hv" "$MIN_HELM"; then
+        ok "helm ${_hv}"
+    else
+        warn "helm ${_hv:-unknown} found, but ${MIN_HELM}+ is recommended."
+    fi
+fi
+
 # --- Optional: Node.js (web frontend work only) --------------------------------
 if command -v node >/dev/null 2>&1; then
     _nv="$(_extract_ver "$(node --version)")"
@@ -179,9 +192,9 @@ fi
 echo -e "${CYAN}-------------------------------${NC}"
 if [[ $CHECK_FAILED -eq 1 ]]; then
     err "docker, docker compose, and git are required for any setup path. Install the missing ones above, then re-run."
-    unset _dv _kv _kubv _nv
+    unset _dv _kv _kubv _hv _nv
     return 1 2>/dev/null || exit 1
 fi
 ok "All required prerequisites satisfied."
 echo
-unset _dv _kv _kubv _nv
+unset _dv _kv _kubv _hv _nv

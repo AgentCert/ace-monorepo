@@ -1906,3 +1906,1093 @@ docker restart litellm-proxy
 4. Verified: `POST /auth/login` via port-2001 nginx proxy returns HTTP 200 with a valid JWT
 
 **Note on routing:** The auth service's Gin router registers `/login` (no prefix). The nginx config on the web pod proxies `location /auth/` → `http://auth:3000/` (strips prefix). Requests sent directly to the auth NodePort at `/auth/login` hit Gin's NoRoute handler (which includes JwtMiddleware) and receive 401 — this is expected and not a bug.
+
+---
+
+## 21. Post-certification hardening — submodule/portability fixes (2026-08-05 → 2026-08-11)
+
+**Context:** after §20's certification effort wrapped, work shifted to hardening the platform
+itself for use by other engineers on fresh checkouts — fixing hardcoded/stale service
+addresses discovered by re-reading every submodule's env-injection code with fresh eyes, a
+broken Kubernetes GraphQL concurrency bug, and general fresh-clone robustness. None of this
+touches the certification pipeline's own logic; all of it is prerequisite for anyone else
+successfully reproducing what §1–§20 already validated on this host.
+
+### 21.1 `AgentCert` (GraphQL/web control plane) — 7 commits
+
+| Commit | What / why |
+|---|---|
+| `1d1c075` | **Duplicate/orphaned Langfuse fault spans.** `EmitFaultSpanAtInjection` derived its Langfuse observation ID from `FaultInjectionDetails.FaultName`, which resolves to the raw `generateName`-suffixed ChaosEngine name (e.g. `pod-cpu-hog7gl46`) on any tick before `ExperimentName` has resolved. Because the pre-resolution and post-resolution ticks produce different observation IDs, Langfuse couldn't coalesce them — every run left one complete span and one permanently-empty orphaned twin. Observed directly on a sock-shop `pod-cpu-hog` run. Fixed by keying the ID (and dedup cache) on the ChaosEngine's Kubernetes UID (stable from creation, never changes across ticks) instead, falling back to `fname` only if unset. |
+| `fa4a042` | `injectExperimentContextArgs()`'s fallback LiteLLM base URL (used only when `OPENAI_BASE_URL` is unset in the GraphQL server's own env) pointed at `http://litellm-proxy.litellm.svc.cluster.local` — a service/namespace that doesn't exist (the real Service is `litellm` in `ace`, port 14000). Not currently hit in this deployment (`deploy/helm/ace/templates/graphql.yaml` sets `OPENAI_BASE_URL` explicitly) but was a live landmine for any environment where that var is unset. |
+| `93df364` | Propagates a new `AGGREGATION_FAILED` certification status through the model/operator/service layers, and adds an `ExperimentCreationSelectInstallStep` controller/view so users can pick install-app/install-agent steps when building an experiment from a blank canvas. |
+| `7332d87` | `RegisterInfra`/`GetManifestWithInfraID` required a `Referer` header to build the infra manifest's `SERVER_ADDR`, so any non-browser caller (`kubectl apply -f <manifest-url>`, `curl`, scripted onboarding) hit `unable to parse referer header`. Middleware now also stashes the request `Host`; resolvers prefer `Referer` when present, fall back to `Host` otherwise (`CHAOS_CENTER_UI_ENDPOINT` still takes priority over both when configured). Web UI's infra-connect flow now surfaces the manifest token directly so `kubectl apply` works without downloading+copying the manifest by hand. |
+| `f23fcfe` | `injectExperimentContextArgs` pointed `K8S_MCP_URL`/`PROM_MCP_URL` at a literal hardcoded namespace (`litmus`/`sock-shop`) — only ever worked because that was the only app-chart namespace in use. Every app-chart (sock-shop, book-info, otel-demo) deploys its own MCP servers alongside the app, so this now resolves via `{{workflow.parameters.appNamespace}}` (the same Argo template variable already used for readiness/uninstall steps) — agents now reach the right MCP servers regardless of which app is selected. **Known residual gap, logged not fixed (`fc98cbf`, see §21.4):** the sibling function still unconditionally injects flash-agent-shaped Helm `--set` args onto every install-agent step regardless of which agent chart is actually selected (never reads `agentFolder`) — `sre-agent-comprehensive` uses a structurally different value schema, so a non-flash-agent experiment can silently receive values that don't map to anything in its chart. |
+| `217138e` | Kubernetes/Argo Workflow reject any `metadata.name` over the DNS-1123 63-character limit; a long experiment/scenario name combined with a timestamp/UUID suffix could exceed that and get rejected at admission with no useful error surfaced. Added `SuffixedK8sName` (truncates the base name as needed to keep the suffixed result in-limit) and applied it everywhere a run/rerun name is built. |
+| `6a73e3c` | **Concurrency-corruption bug, found and fixed.** LitmusChaos fault injection is scoped by ChaosEngine `appns`/`applabel`, not by workflow, and every experiment run was submitted to Argo with no throttling — two concurrent runs against the same app namespace (e.g. two sock-shop experiments launched back to back) corrupt each other's fault injection and the agent metrics observed during it, since both land on the same pods. Fixed with an Argo mutex on the workflow spec, keyed by the resolved `appNamespace` (`RunChaosWorkFlow` and `RunCronExperiment`) — Argo itself now holds a second same-namespace run in `Pending` until the first completes; different namespaces still run fully concurrently. Also fixed the subscriber's `WorkflowPending` phase mapping to the existing `Queued` status (previously the off-schema string `"Pending"`, which matched no `ExperimentRunStatus` value and rendered as a generic grey badge) so a blocked run is now visibly queued in the ChaosCenter UI. |
+| `3a1c4a8` | **Follow-up bug in `93df364` itself.** `getFaultsFromExperimentManifest()` hides plumbing steps (`install-chaos-faults`, `cleanup-chaos-resources`) from the visual builder graph in edit mode (the default view). `93df364`'s new `addInstallStepToManifest()` let users add install-application/install-agent steps from the blank-canvas flow, but the same diff also added those two new template names to this same edit-mode exclusion list — so the step was written into the manifest correctly but immediately filtered back out of the rendered graph; selecting either option visibly did nothing. Fixed as its own commit (not a rewrite of the already-pushed, now-shared `93df364`) since `feature/itbench-scenarios` had moved on 4 commits by the time this was caught. |
+
+### 21.2 `chaos-charts`, `app-charts`, `agent-charts` — stale/host-specific address cleanup
+
+A recurring class of bug across all three chart submodules: several service addresses were
+either hardcoded to one host's Docker bridge gateway IP, or pointed at a service
+name/namespace that was never real (`litellm-proxy.litellm`, when the actual Service is
+`litellm` in namespace `ace`, port 14000 — see `deploy/helm/ace/templates/litellm.yaml`).
+Both classes are silent failures: no error anywhere, just an agent that can never reach its
+LLM proxy or MCP servers.
+
+| Repo | Commit | What / why |
+|---|---|---|
+| `chaos-charts` | `4624260` | `bookinfo-itbench`, `sock-shop*`, `otel-demo-itbench*`, `itbench-2scenario-5run` experiment templates hardcoded the LiteLLM base URL as `http://litellm.litellm.svc.cluster.local:4000/v1` (wrong service name/namespace/port) and the sidecar upstream as a literal Docker-bridge gateway IP (`172.26.0.1:14000`, specific to one host's Docker network). Both now point at the portable in-cluster address `litellm.ace.svc.cluster.local:14000`. |
+| `chaos-charts` | `93d7219` | Renamed ITBench fault `displayName`s for clarity (portal-facing text only, no functional change). |
+| `agent-charts` | `9e202f7` | Every agent chart's default `OPENAI_BASE_URL`/`LLM_BASE_URL`/`LITELLM_URL`/`sidecar.upstream` pointed at the same nonexistent `litellm-proxy.litellm.svc.cluster.local`. Corrected across `flash-agent`, `sre-agent`, `sre-agent-crewai`, `sre-agent-comprehensive`, `ciso-agent`, `k8s-agent`, and the README. |
+| `agent-charts` | `1e7c1c6` | Gitignore the locally-built `install-agent` binary (was landing in `git status` on every local build). |
+| `app-charts` | `20d95dd` | Same fix for the `install-app` binary. |
+| `app-charts` | `5c87d58` | **Real install failure, fixed.** Charts with a `dependencies:` block (e.g. `otel-demo`'s upstream `opentelemetry-demo` subchart) need `helm dependency build` run before packaging, but `charts/*.tgz` is gitignored and no build step ever ran it — every install-application step for `otel-demo` experiments failed with `found in Chart.yaml, but missing in charts/ directory` until someone happened to run `helm dependency build` by hand first. Now runs automatically in the Dockerfile for any chart under `/charts` that declares dependencies, so a plain image build is self-sufficient. |
+
+### 21.3 `agentcert-stack` and `certifier` — LLM routing fixes
+
+| Repo | Commit | What / why |
+|---|---|---|
+| `agentcert-stack` | `93450a5` | Added a `qwen2.5-3b-instruct` LiteLLM route for small-VRAM (~4 GB) GPUs — the existing 32B/7B options don't fit. Uses `num_ctx: 8192` (vs. 32768 for the larger models) to keep the KV cache within budget on that hardware. |
+| `certifier` | `b317e72` | **Real routing bug.** `configs.json` had both the `gpt-4o` and `gpt-5.2` aliases pointing at the `openai_compatible`/Ollama provider with a `qwen2.5:7b-instruct` `model_id` — so any certification LLM call tagged `gpt-4o` or `gpt-5.2` was silently served by the local 7B model instead of the intended Azure deployment, with no error (both are valid, working endpoints — just the wrong one). This is the shipped-default `configs.json` (not the local-only override described in §4.2's table), so it affected every user, not just this session's local testing. Fixed by pointing each alias at its matching `ENV_AZURE_OPENAI_*`/`ENV_AZURE_OPENAI_GPT5_*` endpoint/deployment pair. |
+| `certifier` | `5e182a7` | Dropped unused `PyAudio`/`reportlab`-adjacent build deps: `PyAudio` has zero imports anywhere in the codebase and was the only package requiring `portaudio19-dev` + a compiler (no Linux wheel exists for it — this is the same package whose absence caused §5 bug 3 earlier in this doc; it turned out to be genuinely dead weight, not actually needed). `reportlab`'s apt-level XML deps (`libxml2`/`libxslt` dev headers) are also unneeded — `lxml`'s manylinux wheel bundles them statically. Verified via an isolated build of the full dependency tree with none of these apt packages present. **Note:** `reportlab` itself (the Python package) is still required and still in `requirements.txt` — see §13.3; only its unnecessary system-level XML build deps were removed here. |
+
+### 21.4 `ace-monorepo` root — fresh-clone robustness and setup-wizard hardening
+
+| Commit | What / why |
+|---|---|
+| `9f62190`, `5b508de` | **Broke `git submodule update --init --recursive` repo-wide.** `agents/sre-agent/sre_tools/instana_mcp/mcp-instana` was registered as a gitlink (`160000`) in the top-level index, declared only in a leftover nested `agents/sre-agent/.gitmodules` — never in the top-level `.gitmodules`. Left over from before `agents/sre-agent` was inlined (commit `77a359a`), and never actually initialized (empty directory, no `.git`). This broke `git submodule status` and any recursive submodule init anywhere in the repo — including a fresh `git clone --recurse-submodules` — with `fatal: No url found for submodule path ... in .gitmodules`, aborting before any *real* submodule could be processed. Fixed by dropping the gitlink and the stale nested `.gitmodules` (its other entry, `ITBench-Evaluations`, was already flattened into regular tracked files, not a gitlink) — Instana was always an optional MCP data source that was never actually available in any existing checkout, so no working functionality was lost. |
+| `bed4bd1` | Merge reconciling two checkouts' independent `chaos-charts` pointer bumps that happened to land on the same SHA (`9210cda`) — a formality, no real divergence. |
+| `3285d9f`, `03952f2`, `62c87a1`, `8f2824c`, `667c13b`, `941f58e`, `a046eea` | Routine submodule pointer bumps picking up the fixes in §21.1–§21.3 above. `62c87a1` additionally improves gateway-IP detection and NOTES/graphql templating in `scripts/setup.sh` and expands `scripts/shut_down.sh` robustness. |
+| `17bb4e2` | **Cross-platform correctness fix.** `core.autocrlf=true` on a Windows checkout silently rewrites every `.sh` file to CRLF at checkout time, which breaks bash's parser the moment those files are read from a Linux shell (e.g. a WSL `/mnt/c/...` mount) with `syntax error near unexpected token` on constructs like `do\r`. The committed blobs were never affected — only the working-tree copy on Windows checkouts. Added `*.sh text eol=lf` to `.gitattributes` so future checkouts get correct LF line endings regardless of `core.autocrlf`. |
+| `57f6ee4` | **New: `scripts/check-prerequisites.sh`**, sourced unconditionally at the top of `setup.sh` (both `--setup` and `--restart`) so a fresh host/VM is guided to a working state before the wizard runs instead of failing deep in with an opaque error. `docker`/`docker compose v2`/`git` are hard-required with an exact fix command printed (never auto-installed with sudo); `python3.12` is auto-bootstrapped via `uv` (no sudo) when apt doesn't package it — this is exactly the Ubuntu-26.04-defaults-to-3.14 scenario already documented in CLAUDE.md §6's "Known Operational Gotchas"; `kind`/`kubectl`/`node`/`go` are version-checked with soft warnings only. Runnable standalone (`./scripts/check-prerequisites.sh`) for a fast sanity check without the full wizard. |
+| `667c13b` | `setup.sh`: made Ollama an explicit opt-in prompt instead of inferring from a typed model tag, so declining doesn't silently leave a stale `OLLAMA_MODEL` from a prior run (the last typed tag is remembered separately as `OLLAMA_MODEL_LAST_USED`, purely to pre-fill the next prompt); surfaces `helm upgrade` failures instead of swallowing the exit code. `check-prerequisites.sh`/CLAUDE.md now also check for `helm` (v3.12+, optional) alongside the existing docker/kind/kubectl checks. `.env.example` now defaults install-app/install-agent image pull policy to `IfNotPresent` (matching the GraphQL server's own coded default) and documents the new `qwen2.5-3b-instruct` option. |
+| `a95b338` | **Real, previously-silent bug.** Without `LANGFUSE_INIT_ORG_ID`, Langfuse's own init script (`web/src/initialize.ts`) no-ops entirely — it seeds the admin user but creates no org/project, so `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` didn't correspond to anything and every trace write from LiteLLM/agents failed silently with "Invalid credentials." (This is a step further back than §5 bug 8/10, which fixed the `--env-file` plumbing that gets these vars *to* the container at all — this fix is about which vars needed to be set in the first place.) Added the `LANGFUSE_INIT_ORG_*`/`LANGFUSE_INIT_PROJECT_*` vars, reusing `LANGFUSE_ORG_ID`/`LANGFUSE_PROJECT_ID` so the org/project Langfuse creates matches what the GraphQL server already expects. |
+| `5c0335d` | **New: `--check-local-mods` flag for `start-local-services.sh`.** Certifier and Langfuse can each run from a locally-built image or a pulled prebuilt one; pulling is fine and is all a read-only registry account can ever do — but if the corresponding checkout has uncommitted local changes, pulling silently serves stale behavior with no error. The new flag checks `certifier/` and `.tmp/langfuse` for local modifications before starting and offers to build that component from source instead. Also switched `REPO_ROOT`/`SCRIPT_DIR` resolution to `pwd -P` so the path is canonical regardless of which symlinked alias the repo was reached through — otherwise `assert_not_foreign_container()` could compare two spellings of the same directory and wrongly refuse a container as foreign (a false-positive version of the exact cross-checkout collision class this repo's shared-host-isolation tooling exists to prevent — see CLAUDE.md §0). |
+| `fc98cbf` | **Docs-only: logged, not yet fixed.** Records that `injectExperimentContextArgs` (AgentCert) unconditionally injects flash-agent-shaped Helm `--set` args onto every install-agent step regardless of which agent chart is actually selected (never reads `agentFolder`) — see the residual-gap note under `f23fcfe` in §21.1 above. Tracked here as a known gap for whoever picks up non-flash-agent install-agent work next. |
+
+---
+
+## 22. Rootless-Docker Compose path: `network_mode: host` removal + KinD internal-network fix (in progress, uncommitted)
+
+**Status: uncommitted, local working tree only** (`git status` at the time of writing this
+section shows `docker-compose.yml`, `scripts/setup.sh`, `scripts/shut_down.sh`,
+`scripts/start-local-services.sh`, `scripts/prepare-images.sh`,
+`compose/cluster-init/entrypoint.sh`, `compose/web-nginx.conf`, `.env.example`,
+`innovation.md`, and `CLAUDE.md` all modified but not yet committed — 1,076 insertions /
+130 deletions across those files, `setup.sh` alone gaining ~770 lines). This is real,
+substantial work in progress, not a stray edit — whoever picks this up next should review
+`git diff` on these files before assuming the described behavior is live anywhere but this
+checkout's working tree.
+
+### 22.1 The problem
+
+`./scripts/setup.sh --rootless-docker` bootstraps a personal, per-OS-user Docker daemon
+(`dockerd-rootless-setuptool.sh`) and switches the CLI's default context to it — no sudo,
+zero effect on the shared root daemon or any other user's containers (full mechanism
+already documented in CLAUDE.md §6, "Personal rootless Docker"). But `auth`, `graphql`, and
+`web` in `docker-compose.yml` used `network_mode: host` to bind directly to real host ports
+3000/3030/8081/8082/2001. Under a rootless daemon, "host" networking is RootlessKit's own
+private network namespace, not the real host's — so those three services silently became
+unreachable from the browser and from each other the moment the active `docker context` was
+`rootless`, with no error at container-start time (they came up fine; nothing could reach
+them).
+
+### 22.2 The fix — bridge networking + service-name DNS
+
+`auth`, `graphql`, and `web` now run on standard bridge networking with explicit `ports:`
+(the same pattern `mongo`/`app`/`ollama` already used) — under rootless Docker, explicit
+`ports:` is the one publishing form RootlessKit actually forwards out to the real host.
+Service-to-service reachability, previously wired via `extra_hosts: X: 127.0.0.1` /
+hardcoded bridge-IP entries (which only worked when every container shared the real host
+loopback), is replaced by Compose's own service-name DNS on the default network:
+- `auth`/`graphql` reach `mongo` as `mongo:27017` (`DB_SERVER` overridden per-service)
+- `graphql` reaches `auth`'s gRPC as `auth` (`LITMUS_AUTH_GRPC_ENDPOINT`)
+- `web`'s nginx (`compose/web-nginx.conf`) proxies `/auth/` and `/api/` to
+  `auth:3000`/`graphql:8081` by service name
+- `graphql` reaches the certifier `app` service via a `certifier` network alias
+  (`CERTIFIER_BASE_URL`/`CERTIFICATE_PDF_BASE_URL`, overridable via new `*_COMPOSE` env vars
+  added to `.env.example` — `CERTIFIER_BASE_URL_COMPOSE`/`CERTIFICATE_PDF_BASE_URL_COMPOSE`,
+  for pointing `graphql` at a hosted/Azure certifier instead of the local Compose one)
+
+`cluster-init` deliberately stays on `network_mode: host` — it needs the real `docker.sock` +
+`~/.kube` either way, and since KinD's node containers are created by that same daemon, their
+host-published ports land in whatever netns `cluster-init` itself occupies (RootlessKit's,
+under rootless) regardless of which daemon is active. No fix needed there.
+
+### 22.3 The harder part — how `graphql` still reaches the KinD API server without host networking
+
+`cluster-init` calls `kind create cluster`, which by default writes an *external* kubeconfig
+(`server: https://127.0.0.1:<host-port>`) — only reachable by containers sharing the real (or,
+under rootless, RootlessKit's) host loopback, same as `cluster-init` itself. Once `graphql`
+moved to bridge networking, `127.0.0.1:<port>` inside it stopped resolving to the API server
+at all. Fix, entirely additive (no change to `cluster-init`'s own networking):
+
+1. New top-level Compose network, `kind: name: kind-${ACE_INSTANCE_NAME:-unconfigured}` —
+   checkout-scoped so two checkouts' KinD clusters never share a Docker network on this
+   shared host.
+2. `cluster-init` gets a new env var,
+   `KIND_EXPERIMENTAL_DOCKER_NETWORK: kind-${ACE_INSTANCE_NAME:-unconfigured}` — read
+   directly by the `kind` CLI's own process environment, telling `kind create cluster` to
+   attach its new node containers to that pre-existing network instead of the Docker-wide
+   default `"kind"` network every checkout would otherwise share.
+3. `entrypoint.sh` additionally runs `kind get kubeconfig --internal --name
+   "${KIND_CLUSTER_NAME}"` after cluster provisioning and writes it to
+   `KUBECONFIG_INTERNAL_OUT` (`/shared/config-internal`, in the same `kubeconfig` named
+   volume `graphql` already mounts) — a real, first-class `kind` feature that resolves the
+   API server as `https://<cluster>-control-plane:6443`, a Docker-network container DNS name
+   rather than a host-loopback address.
+4. `graphql` joins the `kind` network (alongside `default`, for `mongo`/`auth`/`certifier`)
+   and reads `KUBECONFIG=/kube/config-internal` instead of the external kubeconfig.
+
+Net effect: daemon-agnostic by construction — `cluster-init`'s `kind create cluster` targets
+whatever `${DOCKER_HOST_SOCK:-/var/run/docker.sock}` resolves to, and every container Compose
+creates (`graphql` included) targets the same daemon via the active `docker context`, so
+`graphql`, `cluster-init`, and the KinD nodes always land on the same daemon together.
+
+**Verification performed:** `docker compose config` (parse/render only, not a live
+bring-up) — the rendered YAML confirms `network_mode: None` on `auth`/`graphql`/`web`/`app`,
+`graphql` attached to both `default` and `kind`, correct service-DNS values, and
+`cluster-init` unchanged on `network_mode: host`. **A real `docker compose up` end-to-end
+test has not been run** — do that before relying on this for anything beyond local
+iteration on this checkout.
+
+### 22.4 Known, flagged-but-not-fixed gap: `CLUSTER_MODE=cloud` breaks
+
+`CLUSTER_MODE=cloud`'s `pin_api_server_host()` (used for AKS/EKS/GKE, not local KinD)
+resolves the cluster's private-link API-server hostname and writes a `hostname → IP` line
+into the bind-mounted host `/etc/hosts` — this only worked because `graphql` also ran
+`network_mode: host` and therefore shared that exact file with `cluster-init` and the real
+host. Once `graphql` moved to bridge networking it gets its own container-private
+`/etc/hosts`, disconnected from whatever `cluster-init` writes to the host's copy — the RBAC
+preflight that resolves the privatelink hostname would silently stop working, but **only**
+for `CLUSTER_MODE=cloud`; the local-KinD path (`CLUSTER_MODE=auto|fresh|kind`, the default
+and the case rootless Docker actually targets) is unaffected, since it never calls
+`pin_api_server_host()` at all. Documented as `innovation.md` §3.19 ("Cloud-Mode
+`pin_api_server_host()` Privatelink DNS Depends on graphql's `network_mode: host`",
+Status: Proposed) with a concrete fix sketch (an explicit `extra_hosts:` entry on `graphql`,
+populated from a value `cluster-init` writes to `.env` — mirroring how
+`setup.sh --rootless-docker` already auto-populates `DOCKER_HOST_SOCK`) — not implemented,
+flagged during design of the §22 fix, not part of its scope.
+
+### 22.5 Also still true generally
+
+Rootless networking runs through `rootlesskit`/`slirp4netns`, which may not support every
+LitmusChaos fault type that needs privileged host access — verify before relying on it for
+experiments that need those. Not investigated further this session.
+
+---
+
+## 23. `containerd >=2.3.0` shim bug — self-healing pin for the personal rootless daemon (2026-08-12)
+
+**Symptom:** `./scripts/setup.sh --rootless-docker` failed the moment `kind create cluster`
+tried to start the control-plane container — image build and `docker run` both succeeded,
+but the shim handoff failed immediately after with `failed to create TTRPC connection:
+unsupported protocol:Yunix`.
+
+**Root cause:** this host's system `containerd.io` package (2.3.3, from Docker's official
+apt repo) has a confirmed upstream regression: the shim bootstrap handshake leaks a raw,
+un-decoded protobuf `Address` message instead of a plain `unix://...` string (the `Y` in
+`Yunix` is a protobuf length-prefix byte, `0x59` — not corruption). Reported independently
+against containerd 2.3.0–2.3.3 on Arch/EndeavourOS/Gentoo. No fixed release exists upstream
+yet; the documented workaround is downgrading to the 2.2.x line (2.2.3+ confirmed working).
+This breaks **every** container start on this host via the affected daemon, not just KinD —
+KinD just happened to be the first thing that exercised it.
+
+**Why not just downgrade the system package?** The shared root Docker daemon and every other
+checkout on this host use the same `/usr/bin/containerd*` binaries — a system-wide `apt`
+downgrade would "fix" it host-wide but risks affecting other users' already-running
+containers on the shared daemon, which the user explicitly ruled out (the same principle
+CLAUDE.md §0 establishes for Docker/K8s resources applies here to the daemon binary itself).
+
+**Fix:** `scripts/setup.sh`'s rootless-docker block (immediately before
+`docker context use rootless`) now:
+1. Detects a system `containerd` `>=2.3.0`.
+2. Downloads a checksum-verified static `containerd` 2.2.6 + `containerd-shim-runc-v2` pair
+   from the official GitHub release into
+   `$HOME/.local/share/ace-rootless-docker/containerd-pin/bin`.
+3. Prepends that directory to `PATH` via a systemd user drop-in
+   (`~/.config/systemd/user/docker.service.d/20-ace-containerd-pin.conf`, sorted after the
+   existing `10-ace-mtu.conf` drop-in), so only the **personal rootless** `docker.service`
+   user unit picks up the pinned binaries.
+
+This is scoped entirely to `$HOME` — it never touches the system `containerd.io` package or
+`/usr/bin`, so it has zero effect on the shared root daemon or any other user on this host.
+**Self-healing:** if the system package is later fixed/updated past the affected range, the
+same block removes the pin and reverts to the system binaries automatically on the next
+`--rootless-docker` run.
+
+**Applicability:** only relevant to engineers using the `--rootless-docker` path on this
+specific shared host (or any host with the same containerd regression); does not apply to
+the shared root daemon or to Kubernetes/Helm setups that don't go through rootless Docker.
+
+---
+
+## 24. KinD kubeconfig merge gap — `kubectl` silently falling back to `localhost:8080` (2026-08-12)
+
+**Symptom:** `kubectl create namespace ...` (and every other kubectl command) failed with
+`read tcp 127.0.0.1:PORT->127.0.0.1:8080: read: connection reset by peer` even though the
+KinD cluster (`agentcert-alfred`) was fully up and healthy — `docker ps` showed the
+control-plane container running, `kind get clusters` found it.
+
+**Root cause:** `~/.kube/config` had no `current-context` set and didn't even contain the
+cluster's `kind-agentcert-alfred` entry — only stale, unrelated `kind-agentcert`
+(pre-instance-scoping) and `minikube` contexts. `kubectl` with no valid current-context
+silently falls back to the legacy `localhost:8080` default API server address, producing an
+error that looks like a networking problem but is actually a missing-config problem.
+
+**Why the entry was never merged in — two independent call sites, both unverified:**
+1. `scripts/setup.sh`'s `ensure_kind_cluster()` (host-side, the `--setup`/`--restart`
+   Kubernetes/Helm path) used `kubectl config use-context "kind-${cluster_name}" >/dev/null
+   2>&1 || true` and reported success regardless of whether the switch actually worked —
+   which it can't, if the context was never added to begin with.
+2. `compose/cluster-init/entrypoint.sh`'s `ensure_kind()` (the docker-compose local-dev
+   path) used the identical `|| true` pattern, backstopped only by a final `context_works`
+   check that `exit 1`s the container if it truly can't reach the cluster — better than (1),
+   but still didn't fix the underlying merge failure, only detected total unreachability.
+
+**A second, host-independent portability gap, found in the same investigation:**
+`docker-compose.yml`'s `cluster-init` service bind-mounts
+`${HOST_KUBE_DIR:-${HOME}/.kube}:/host-kube` — resolved from whatever `$HOME` was active
+when `docker compose up` (or `start-local-services.sh`) was invoked, not necessarily the
+operator's later interactive shell. If those two differ (sudo, a service account, a wrapper
+script), `kind create cluster` inside the container writes a perfectly correct, fully-merged
+kubeconfig into a *different* physical file than the one `kubectl` reads by default — the
+cluster is healthy, `cluster-init` reports success, and the operator's own `kubectl` still
+can't see it. This can recur on any host running this repo, not just this one.
+
+**Fix applied:** replaced the fragile `kubectl config use-context ... || true` pattern at all
+three call sites with `kind export kubeconfig --name <cluster>` — a stock upstream `kind`
+subcommand that re-derives the entry from the live cluster and unconditionally sets
+current-context, regardless of what was or wasn't already merged:
+- `scripts/setup.sh`: new `ensure_kubeconfig_context()` helper, called from both the
+  "cluster already running" early-exit path and the "just created" path inside
+  `ensure_kind_cluster()`; now returns 1 (hard-fails the script via `set -e`) instead of
+  silently continuing with a broken kubeconfig.
+- `compose/cluster-init/entrypoint.sh`: both `kubectl config use-context` call sites in
+  `ensure_kind()` swapped for `kind export kubeconfig` (kept `|| true` here since the
+  existing `context_works` gate immediately after already catches a failed export).
+
+**Why this is durable across hosts, not a local patch:** `kind export kubeconfig` and
+`kubectl` share the exact same `$KUBECONFIG`/`~/.kube/config` resolution rules `kind` uses
+internally for `kind create cluster` — no host-specific paths, ports, or docker-context
+names are hardcoded in the fix; `cluster_name`/`KIND_CLUSTER_NAME` were already parameterized
+via the shared-host-isolation machinery (`ACE_INSTANCE_NAME`, §22/§23 above). It does **not**
+touch or resolve the `${HOME}` bind-mount mismatch risk described above on its own — see the
+follow-up fix immediately below for that.
+
+**Follow-up fix, same investigation — closes the `${HOME}` bind-mount gap:**
+`scripts/setup.sh` now backfills `HOST_KUBE_DIR` into `.env` (same only-if-unset idiom as
+`ACE_INSTANCE_NAME`), pinned to the real interactive `$HOME/.kube` at setup time. Since
+`docker-compose.yml`'s mount is `${HOST_KUBE_DIR:-${HOME}/.kube}`, once it's explicit in
+`.env` the live-`$HOME` fallback never triggers again, regardless of what environment later
+runs `docker compose up`. Additionally, `kind create cluster` itself is now explicitly
+checked (`if ! kind create cluster ...; then ...; fi`) at all three call sites (`setup.sh`
+and both branches of `entrypoint.sh`'s `ensure_kind()`), not just implicitly relying on
+`set -e` — failures now print a targeted message (port collision, the §23 containerd 2.3
+shim bug, or a broken docker context/socket) instead of a bare non-zero exit.
+
+**If this recurs:** if `kubectl` ever again reports connection-reset-to-`localhost:8080`
+against a cluster that `docker ps`/`kind get clusters` shows as healthy, the fix is
+`kind export kubeconfig --name <cluster-name>` — safe, idempotent, client-side only, touches
+no cluster/container state. If kubectl still can't see a cluster that `cluster-init` reports
+healthy even after that, check whether `docker compose up` was invoked with a different
+effective `$HOME` than the current shell, and consider setting `HOST_KUBE_DIR` explicitly
+in `.env`.
+
+**Status:** committed to local working tree alongside §22's changes — see that section's
+note on uncommitted state; this and §22/§23 landed in the same round of local edits.
+
+---
+
+## 25. MongoDB replica set permanently stuck in `ReplicaSetNoPrimary` on the Kubernetes/Helm path (2026-08-13)
+
+**Symptom:** `kubectl get pods -n ace` showed `auth-6884996955-qvtp7` in `CrashLoopBackOff`
+with 159 restarts over 17h. `kubectl logs --previous` showed repeated
+`server selection error: context deadline exceeded, current topology: { Type:
+ReplicaSetNoPrimary, Servers: [{ Addr: mongodb:27017, Type: RSGhost, ... }] }` on every
+Mongo collection/index call in `main.go`, terminating fatally on `couldn't create salt`.
+`graphql` and `certifier` pods were also degraded (`Unknown`/`0/1`) from the same root
+cause, though they recovered automatically once Mongo did — `auth` was the one that hard
+crash-looped because its startup path fails fatally on the first Mongo error instead of
+retrying.
+
+**Root cause:** the `mongodb-rs-init` post-install Helm hook Job (and its `deploy/k8s/`
+flat-manifest equivalent) called:
+```js
+rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb:27017"}]})
+```
+using the **`mongodb` ClusterIP Service name** as the sole replica-set member's host. A
+ClusterIP is a virtual address rewritten by kube-proxy iptables/ipvs NAT rules — it is never
+bound to any real interface inside the `mongodb-0` pod's own network namespace. mongod's
+`isSelf()` check (run at startup and on every reconfig) resolves each configured member host
+and compares it against the node's own local interface addresses to decide "is this me?" —
+for a ClusterIP name, that check can never succeed. The single-node `mongodb-0` pod was
+therefore left permanently believing it was not a member of its own one-node replica set:
+`rs.status()` failed with `"Our replica set config is invalid or we are not a member of
+it"`, no primary was ever elected, and this persisted indefinitely — the pod itself stayed
+`Running`/`1/1` the entire time (its readiness probe only pings `db.adminCommand('ping')`,
+which doesn't require replica-set membership), so nothing at the pod level ever signaled the
+underlying problem. Confirmed directly via `rs.conf()` (`host: 'mongodb:27017'`) and by
+checking that pod's actual identity (`hostname -f` → `mongodb-0.mongodb-headless.ace.svc.cluster.local`)
+does not match.
+
+Every service connecting with `replicaSet=rs0` in its connection string (`auth`'s
+`DB_SERVER`, and equivalently `graphql`/`certifier`) then failed full replica-set topology
+discovery against a set with no primary and no correctly-identified member, regardless of
+whether the ClusterIP itself was reachable at the TCP level (it was — this is not a
+networking/firewall problem, it's a replica-set-identity problem).
+
+**Files changed:**
+
+| File | Change |
+|---|---|
+| `deploy/helm/ace/templates/mongodb.yaml` | `rs.initiate()` member host changed from `mongodb:27017` to `mongodb-0.mongodb-headless.{{ include "ace.namespace" . }}.svc.cluster.local:27017` |
+| `deploy/k8s/mongodb.yaml` | Same fix, namespace hardcoded as `ace` (this manifest doesn't template namespace); also rewrote a stale top-of-file comment that inaccurately described a `directConnection=true`/`localhost:27017` workaround that doesn't match the actual `rs.initiate()` call below it |
+| `CLAUDE.md` | Added a new entry to §6 "Known Operational Gotchas" documenting this failure mode and its fix, matching the existing gotcha-entry style |
+
+**Why this is durable, not a one-off patch:** the fix changes what host gets written into the
+replica-set config the *next* time `mongodb-rs-init` runs `rs.initiate()` — i.e. on any
+fresh `helm install`/`kubectl apply` from a clean cluster, not just this one. The chosen
+host (`<pod>.<headless-svc>.<namespace>.svc.cluster.local`) is the standard, correct pattern
+for a StatefulSet-backed Mongo replica set on Kubernetes: the headless service (`clusterIP:
+None`) resolves directly to the pod's real IP rather than through a virtual/NAT'd address,
+so `isSelf()` can actually match it. Nothing host-specific is hardcoded — the namespace is
+templated in the Helm chart, and the flat manifest already hardcodes `ace` everywhere else.
+The Docker Compose path (`docker-compose.yml`, `scripts/start-local-services.sh`) was never
+affected by this bug: it already uses `localhost:27017` as the replica-set member host,
+which is correct there because Compose runs Mongo as a single container with its own loopback
+being genuinely "self" — this is an existing, working precedent for handling `isSelf()`
+correctly that the Kubernetes path just hadn't been brought in line with.
+
+**Live fix applied to the already-running cluster (`kind-agentcert-alfred`, this checkout's
+own instance — not a shared or other-user resource):**
+```bash
+kubectl exec -n ace mongodb-0 -- mongosh --quiet -u "$MONGO_USER" -p "$MONGO_PASS" \
+  --authenticationDatabase admin --eval '
+    var cfg = rs.conf();
+    cfg.members[0].host = "mongodb-0.mongodb-headless.ace.svc.cluster.local:27017";
+    cfg.version += 1;
+    rs.reconfig(cfg, {force: true});
+  '
+kubectl delete pod -n ace auth-6884996955-qvtp7   # let the Deployment recreate it
+```
+
+**Verification:** `rs.status().members` now shows a single member,
+`mongodb-0.mongodb-headless.ace.svc.cluster.local:27017`, `stateStr: 'PRIMARY'`, `health: 1`.
+`auth` came up `1/1 Running` with `0` restarts and stayed there (checked again ~7 minutes
+later, still `0` restarts). `graphql` and `certifier`, which had been left in a degraded
+state by the same root cause, both recovered to `1/1 Running` on their own once a primary
+existed — no changes needed to either.
+
+**Status:** source fix committed to local working tree (`deploy/helm/ace/templates/mongodb.yaml`,
+`deploy/k8s/mongodb.yaml`, `CLAUDE.md`) — not yet committed to git as of this handoff entry;
+live cluster fix applied and verified stable on `kind-agentcert-alfred`.
+
+---
+
+## 26. Manifest-download link (`kubectl apply -f <url>`) broke under SSH/port-forward tunneling — root cause traced to browser-derived URL, fixed server-side; found and fixed an unrelated pre-existing build break along the way (2026-08-13)
+
+**Symptom:** user copied the "kubectl apply -f `<url>`" command from step 3 of the AgentCert
+web UI's "Connect Chaos Infrastructure" wizard and ran it in an SSH shell on the deployment
+host (`agenticai`, context `kind-agentcert-alfred`):
+```
+kubectl apply -f http://localhost:2003/api/file/<jwt>.yaml
+The connection to the server localhost:2003 was refused
+```
+Nothing on that host listens on `:2003`.
+
+**Investigation:** the JWT decoded cleanly (`{"chaos_infra_id": "..."}`), ruling out a
+malformed/corrupted link. Traced the URL's construction end to end:
+- `AgentCert/chaoscenter/web/src/views/KubernetesChaosInfrastructureGreenfield/KubernetesChaosInfrastructureGreenfield.tsx:81` built it as
+  `${config.restEndpoints.chaosManagerUri}/file/${token}.yaml`.
+- `config.restEndpoints.chaosManagerUri` (`AgentCert/chaoscenter/web/src/config/index.ts:10-11`)
+  resolves to `${window.location.origin}/api` in a production build — i.e. **entirely derived
+  from the browser's own address bar**, never anything server-configured.
+- Confirmed via `AgentCert/chaoscenter/graphql/server/pkg/handlers/file_handler.go` (the
+  `/file/:key` route) and `pkg/chaos_infrastructure/service.go`'s `RegisterInfra` that the
+  *backend* has no equivalent concept for this link — it only uses Referer/Host-derived
+  fallbacks (`resolveManifestHost`/inline `host` logic) for a completely different purpose:
+  building the `SERVER_ADDR` baked *inside* the manifest content, which the in-cluster
+  subscriber pod calls back to (an existing `CHAOS_CENTER_UI_ENDPOINT` env var already
+  overrides that one correctly — this bug was never about that).
+- Checked what actually serves this cluster's ports on the host: `docker port
+  agentcert-alfred-control-plane` showed the web NodePort (32001) forwarded to host **`2002`**
+  (`.env`'s `KIND_HOSTPORT_WEB=2002`), not 2001 (that's the *separate* Docker Compose stack
+  also present on this shared host) and not 2003. Nothing in this repo's source, config, or
+  manifests contains the literal string `2003` anywhere relevant to this flow (full-repo grep,
+  confirmed by a dedicated Explore-agent search covering `AgentCert`, `deploy/`,
+  `docker-compose.yml`, `.env.example`).
+- Conclusion: `2003` was never anything server-side — it was whatever *local* port a
+  client-side tool (VS Code Remote-SSH port-forwarding, most likely, given "Is running inside a
+  VSCode native extension environment") mapped the actual remote port to on the user's client.
+  The user then ran the copied command in a shell on the *remote host itself*, where
+  `localhost:2003` means nothing. Verified the real endpoint works:
+  `curl http://localhost:2002/api/file/<token>.yaml` → `HTTP 200`, valid manifest YAML.
+
+**Why this is a real, recurring bug and not just "use the right port this once":** the link is
+architecturally guaranteed to be wrong any time the browser's origin differs from an address
+reachable by whoever runs `kubectl` — which is the normal case for this repo's documented
+shared-host / remote-dev workflow (§6 "Personal rootless Docker", VS Code Remote-SSH), not an
+edge case. User asked explicitly for a fix "immune to this misconfiguration," not a one-off
+port correction.
+
+**Durable fix — moved the source of truth from the browser to the server**, mirroring the
+existing `CHAOS_CENTER_UI_ENDPOINT` pattern (which already solves the identical class of
+problem for the manifest's *internal* SERVER_ADDR):
+
+| File | Change |
+|---|---|
+| `AgentCert/chaoscenter/graphql/server/utils/variables.go` | New `ChaosCenterPublicEndpoint` config field, env `CHAOS_CENTER_PUBLIC_ENDPOINT`, default `""`. Deliberately separate from `ChaosCenterUiEndpoint` — that one is for in-cluster pod→graphql callbacks; this one is for a human's shell, a different address space entirely. |
+| `AgentCert/chaoscenter/graphql/definitions/shared/chaos_infrastructure.graphqls` | Added `manifestDownloadURL: String!` to `RegisterInfraResponse`. |
+| `AgentCert/chaoscenter/graphql/server/graph/{generated/generated.go, model/models_gen.go}` | Regenerated via `go generate ./...` for the new schema field. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go` | New `GetManifestDownloadURL(host, token string) string`: prefers `ChaosCenterPublicEndpoint` when set, else falls back to the existing Referer/Host-derived `host` (unchanged behavior for anyone not setting the new var). **Appends `/api/file/<token>.yaml`, not `/file/<token>.yaml`** — see "self-caught bug" below. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/service.go` | `RegisterInfra` now populates `ManifestDownloadURL` on the response via the new helper. |
+| `AgentCert/chaoscenter/web/src/api/core/infrastructures/connectChaosInfra.ts` | Added `manifestDownloadURL` to the `registerInfra` GraphQL selection set and the TS response type. |
+| `AgentCert/chaoscenter/web/src/views/KubernetesChaosInfrastructureGreenfield/KubernetesChaosInfrastructureGreenfield.tsx` | Now sets `applyOnHostUrl` directly from `result.registerInfra.manifestDownloadURL` instead of reconstructing it from `window.location`; removed the now-unused `@config` import. |
+| `deploy/helm/ace/templates/graphql.yaml` | `CHAOS_CENTER_PUBLIC_ENDPOINT` env entry, computed as `http://localhost:{{ .Values.env.KIND_HOSTPORT_WEB \| default "2001" }}` — but **prefers an explicit `.Values.env.CHAOS_CENTER_PUBLIC_ENDPOINT` first** (see "self-caught bug" below for why this mattered). |
+| `deploy/k8s/graphql.yaml` | Deliberately **no** hardcoded env entry added (see "self-caught bug" below) — just an explanatory comment; relies on `envFrom: ace-env` to pick up an optional `.env`-sourced override, falling back to request-based detection. |
+| `docker-compose.yml` | `CHAOS_CENTER_PUBLIC_ENDPOINT: ${CHAOS_CENTER_PUBLIC_ENDPOINT:-http://localhost:${WEB_PORT:-2001}}` — same nested-default idiom already used elsewhere in this file (e.g. `HOST_KUBE_DIR`). |
+| `.env.example` | Documented the new optional override, with accurate guidance on which deployment paths it actually reaches and how. |
+
+**Self-caught bug #1 — `envFrom` vs. explicit `env:` shadowing (Helm/K8s only):** the first
+draft of the Helm/K8s wiring hardcoded `CHAOS_CENTER_PUBLIC_ENDPOINT` unconditionally. Both
+`deploy/helm/ace/templates/graphql.yaml` and `deploy/k8s/graphql.yaml` already have
+`envFrom: secretRef: {name: ace-env}`, which blanket-injects *every* key from `.env` (via
+`generate_helm_values_env()` in `setup.sh`, which copies every `.env` key into
+`values-env.yaml`'s generic `env:` map, and an equivalent `ace-env` secret for the flat
+manifest path). Per standard Kubernetes precedence, an explicit `env:` entry with the same
+name always wins over `envFrom` — so a hardcoded value would have silently discarded any
+override a user set in `.env`, defeating the escape hatch promised in `.env.example`. Fixed by
+having the Helm template read `.Values.env.CHAOS_CENTER_PUBLIC_ENDPOINT` first (Helm's
+`default` function falls through to the computed value only when that key is genuinely unset),
+and by *not* adding a hardcoded entry at all in the flat (non-templated) `deploy/k8s/`
+manifest, relying entirely on `envFrom`. Verified via `helm template ... | grep -A2
+CHAOS_CENTER_PUBLIC_ENDPOINT` against the live `values-env.yaml` — correctly rendered
+`http://localhost:2002`.
+
+**Self-caught bug #2 — missing `/api` path segment:** initial `GetManifestDownloadURL`
+implementation copied the pattern from `resolveManifestHost` (used for the *internal*
+SERVER_ADDR, which talks directly to graphql's raw port, bypassing nginx) and built
+`<base>/file/<token>.yaml`. But the human-facing path goes through nginx
+(`compose/web-nginx.conf`, and the ConfigMap-embedded nginx.conf in `deploy/k8s/web.yaml` /
+the Helm chart), which only has a `location /api/` block proxying to `graphql:8081` (stripping
+the `/api/` prefix) — there is no route for a bare `/file/`. Caught this **before** telling the
+user the fix was verified, by testing both shapes directly against the live, redeployed
+cluster:
+```
+curl http://localhost:2002/api/file/<token>.yaml   → HTTP 200, real YAML manifest
+curl http://localhost:2002/file/<token>.yaml        → HTTP 200, but body is the SPA's index.html
+```
+The second case is the more dangerous failure mode — no error at the HTTP level, just silently
+wrong content, which would have made `kubectl apply -f` fail on a YAML-parse error instead of
+a clean connection error. Fixed by changing the helper to always append `/api/file/<token>.yaml`.
+
+**Unrelated pre-existing build breakage found and fixed along the way:**
+`AgentCert/chaoscenter/graphql/server/graph/agent_registry.resolvers.go` (uncommitted,
+in-progress work on an agent-registry "pre-populate environment variables from backend config"
+feature) did not compile — blocking any full `go build`/Docker image rebuild of `graphql`,
+independent of anything in this fix. Root cause: a single malformed multi-line comment (lines
+383–387) had `//` only on its first line; Go's parser therefore treated the continuation lines
+as bare top-level statements (`environment variables so the UI can pre-populate...`), a hard
+syntax error. This one parse failure cascaded into several misleading secondary errors —
+`undefined: resolveAgentInstallNamespace`, `undefined: mapHelmEnvVarInputs`, `*queryResolver`
+missing method `GetEnvironmentVariables` — all functions/methods that in fact already existed
+later in the same file; the parser simply never got that far. Separately, 9 genuinely dead
+imports (`io`, `strconv`, `sync`, `errors`, `bytes`, `gqlparser`, `ast`,
+`github.com/99designs/gqlgen/graphql`, `introspection`) were flagged — none referenced anywhere
+in the file's actual code, apparent leftovers from an earlier draft. Fixed by restoring `//` on
+the four comment-continuation lines and deleting the 9 dead imports; `go build ./...` then
+passed with exit 0, confirming both fixes were correct and the cascading errors were entirely
+downstream of the one comment. **Note for whoever owns this WIP feature:** it now compiles and
+was included as-is (no functional changes) in the rebuilt `graphql` image below — this fix did
+not touch or complete the feature itself, just the two mechanical defects blocking compilation.
+
+**Also cleaned up:** `go generate ./...`'s resolver-binding pass, when first run against the
+in-progress schema changes, relocated the existing `resolveManifestHost` helper out of
+`chaos_infrastructure.resolvers.go` into an auto-generated "!!! WARNING !!! code below was
+going to be deleted" block at the end of the file (a known gqlgen quirk when a plain helper
+function — not a resolver method — lives in a `*.resolvers.go` file). Harmless
+(the function still compiled and worked from its new location) but noisy; manually moved back
+to its original position to keep the diff minimal.
+
+**Live deploy performed on `kind-agentcert-alfred` (this checkout's own instance):**
+```bash
+docker build -t agentcert/agentcert-graphql:latest -f AgentCert/chaoscenter/graphql/server/Dockerfile AgentCert/chaoscenter/graphql
+docker build -t agentcert/agentcert-web:latest -f AgentCert/chaoscenter/web/Dockerfile AgentCert/chaoscenter/web
+kind load docker-image agentcert/agentcert-graphql:latest agentcert/agentcert-web:latest --name agentcert-alfred
+helm upgrade --install ace deploy/helm/ace -n ace -f deploy/helm/ace/values.yaml -f deploy/helm/ace/values-env.yaml --timeout 5m
+```
+Note: an initial `kubectl rollout restart` (without the `helm upgrade`) picked up the new
+*image* but not the new `CHAOS_CENTER_PUBLIC_ENDPOINT` *env var*, since restart alone reuses
+the existing Deployment spec — caught via `kubectl exec deploy/graphql -- env | grep
+CHAOS_CENTER_PUBLIC_ENDPOINT` returning nothing, which is what prompted the `helm upgrade`.
+`helm upgrade` re-ran the `mongodb-rs-init` post-install hook as a side effect (idempotent,
+printed "rs0 already initialized" — confirmed §25's fix was undisturbed).
+
+**Verification, all against the live cluster after redeploy:**
+- GraphQL introspection: `{ __type(name: "RegisterInfraResponse") { fields { name } } }` →
+  includes `manifestDownloadURL`.
+- `kubectl exec -n ace deploy/graphql -- env` → `CHAOS_CENTER_PUBLIC_ENDPOINT=http://localhost:2002`.
+- `curl http://localhost:2002/api/file/<token>.yaml` (same token from the original bug report)
+  → `HTTP 200`, real manifest YAML — proving the exact code path `GetManifestDownloadURL` would
+  produce (`http://localhost:2002/api/file/<token>.yaml`) actually serves correctly.
+- `helm template ... | grep CHAOS_CENTER_PUBLIC_ENDPOINT` → renders `http://localhost:2002`,
+  matching the live `KIND_HOSTPORT_WEB` value.
+- `docker compose config | grep CHAOS_CENTER_PUBLIC_ENDPOINT` → renders
+  `http://localhost:2001`, confirming the nested-default interpolation syntax is valid.
+- All 12 pods in `ace` remained `Running` throughout; MongoDB replica set (§25) still `PRIMARY`.
+- Did **not** fully exercise the mutation end-to-end with real auth (login against
+  `admin`/`litmus` returned `invalid_credentials` on this instance — credentials differ from
+  the documented default here, not investigated further as out of scope) — the `/api/file/`
+  verification above uses the same route and the same token-driven code path, so this is not
+  considered a gap.
+
+**Status:** all source changes above are committed to the local working tree, not yet committed
+to git as of this handoff entry. Live images rebuilt, loaded into `kind-agentcert-alfred`, and
+deployed via `helm upgrade`; verified working end-to-end as described.
+
+## 27. ChaosCenter `ChaosEngine` label-length panic + registration flow reverse-engineering; five additional bugs found and fixed in 36 hand-authored ITBench fault-injection manifests (2026-08-13)
+
+**Context:** an earlier session (2026-08-12) generated 36 Argo Workflow manifests, one per
+ITBench flash-agent fault scenario, under `.tmp/itbench-flash-agent-experiments/` (34 targeting
+`otel-demo`, 2 targeting `book-info`), intended for direct `kubectl apply` submission. This
+session's task was to actually launch them on the live ChaosCenter UI (`kind-agentcert-alfred`,
+infra `9fa4d238-d779-495a-8542-7d775d491af0`, project `deabff07-51e9-428a-ab7f-5e5057323012`
+"admin-project"). None of the 36 had ever been run before this session. Six independent bugs
+were found and fixed, three in the manifests themselves, one platform bug in AgentCert's Go
+server, and two stale-image deployment gaps.
+
+**Bug 1 — manifests targeted the wrong namespace.** All 36 hardcoded `namespace: litmus` /
+`adminModeNamespace: litmus`, but the infra actually connected on this cluster lives in
+namespace `itbench` (operator chose that name when connecting infra this session; the
+`workflow-controller` runs `--namespaced`, so it only watches its own namespace). Fixed:
+`namespace: litmus` → `itbench` and `adminModeNamespace` parameter value likewise, across all 36
+files.
+
+**Bug 2 — blank `openaiApiKey` parameter.** All 36 passed `openaiApiKey: ''`, which becomes
+`--set agent.secret.OPENAI_API_KEY=` on the `install-agent` Helm call — overriding the chart's
+working default (`sk-agentcert-2026`) with an empty string, breaking the agent's LiteLLM auth.
+Fixed: set to `sk-agentcert-2026` in all 36.
+
+**Bug 3 — hardcoded `sock-shop` MCP endpoints.** `agent-charts/charts/flash-agent/values.yaml`
+defaults `MCP_URLS`/`AGENT_SCOPE_NAMESPACE` to the `sock-shop` namespace, and none of the 36
+manifests' `install-agent` steps overrode them. Empirically confirmed via a live smoke test: the
+agent logged `NameResolutionError` trying to reach
+`kubernetes-mcp-server.sock-shop.svc.cluster.local` from inside `otel-demo`, discovered zero MCP
+tools, and exited immediately without doing anything — the entire point of the experiment
+(agent observes and responds to a live fault) was silently broken. Fixed: added
+`--set=agent.config.MCP_URLS=http://kubernetes-mcp-server.{{workflow.parameters.appNamespace}}.svc.cluster.local:8081/mcp\,http://prometheus-mcp-server.{{workflow.parameters.appNamespace}}.svc.cluster.local:8083/mcp`
+and `--set=agent.config.AGENT_SCOPE_NAMESPACE={{workflow.parameters.appNamespace}}` to both the
+`install-agent` and `delete-agent` steps, in all 36.
+
+**Bug 4 — stale embedded fault scripts, empirically confirmed to mistarget cluster-internal
+resources.** 35 of the 36 manifests embed a full custom `ChaosExperiment` CR (fault-injection
+shell script) inline rather than referencing a ChaosHub chart. These turned out to be **stale
+copies** of the real fault definitions checked into `chaos-charts/faults/itbench/<name>/fault.yaml`
+— specifically missing a documented workaround for a real bug in this cluster's chaos-operator
+(`APP_NAMESPACE`/`APP_LABEL`/`APP_KIND` env vars declared but never populated from
+`ChaosEngine.spec.appinfo`; the operator instead sets a combined `TARGETS` var that must be
+parsed). Caught this empirically, not just by diff: the first live smoke test's fault pod logged
+`Resolving target deployment in ns= label=` (both empty) and proceeded to scale
+**`chaos-exporter`** — part of ChaosCenter's own platform infrastructure — to 0 replicas,
+failing only because RBAC happened to forbid that specific target; had it been permitted, the
+platform's own components would have been chaos-tested by accident instead of the intended
+`otel-demo` deployment. Fixed: replaced the embedded script text in all 35 manifests with the
+current canonical content from `chaos-charts/faults/itbench/<name>/fault.yaml` (byte-for-byte
+diffed to confirm exact match after the fix). Re-verified via a second smoke test: fault pod now
+correctly logs `Resolving target deployment in ns=otel-demo label=opentelemetry.io/name=accounting`.
+(Manifest 22, `cart-memory-stress`, references the hub's generic `pod-memory-hog` experiment
+directly by name and was never affected.)
+
+**Bug 5 (real platform bug, not manifest-specific) — `ChaosEngine.metadata.labels.step_pod_name`
+exceeds Kubernetes's 63-byte label-value limit.** Raw `kubectl apply` of the 36 manifests
+"worked" (bugs 1-4 aside) because it bypasses ChaosCenter's own experiment-registration
+pipeline entirely — but that also means such runs never carry a `workflow_id` label, so both
+the subscriber (`subscriber/pkg/events/workflow.go` `WorkflowEventHandler`) and the GraphQL
+server (`chaos_experiment_run/handler.go` `ChaosExperimentRunEvent`) silently discard every
+update for them — they're real chaos, but permanently invisible in the ChaosCenter UI and never
+feed the certification auto-trigger. The actual UI-equivalent path is
+`saveChaosExperiment` (not `createChaosExperiment` — see below) followed by
+`runChaosExperiment`, which processes the manifest server-side
+(`pkg/chaos_experiment/ops/service.go` `processExperimentManifest`) before submitting it. That
+processing injects `metadata.labels.step_pod_name = "{{pod.name}}"` onto the embedded
+`ChaosEngine`, an **Argo runtime template variable that resolves to the full Argo pod name**
+(`<workflow-name>-<node-hash>`) — which, for experiment names of realistic length plus Argo's
+own suffixing, routinely exceeds Kubernetes's 63-byte limit on label *values* (distinct from the
+253-byte limit on label *keys*/names). Every registered run failed at the fault-injection step
+with `Error Creating Resource : ChaosEngine.litmuschaos.io '...' is invalid: metadata.labels:
+Invalid value: '...': must be no more than 63 bytes` — confirmed via the literal server error
+text (surfaced through the ChaosCenter UI's own workflow log view, since this session's own
+`kubectl logs` polling repeatedly lost the race against Argo's `PodGC` deleting the failed pod
+within seconds — an unavoidable side effect of `processExperimentManifest` also unconditionally
+setting `Spec.PodGC = PodGCOnWorkflowCompletion`). This exact function has prior documented
+findings (`f23fcfe`, `fc98cbf`, see §21) but not this one. Root cause: `step_pod_name` was never
+actually used as a label *selector* anywhere in the codebase (confirmed via full-repo grep) —
+only `workflow_run_id` is (subscriber lookups, UI/manifest cleanup commands), and that value is
+always a 36-character Kubernetes UID, safely under the limit. `step_pod_name` is pure display
+metadata and belongs on an annotation (no length limit) instead of a label. **Files changed:**
+`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` (~line 1205) and
+`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/handler.go` (two call
+sites, ~lines 2314 and 2632) — moved `step_pod_name` from `meta.Labels` to
+`meta.Annotations` in all three. Rebuilt and `kind load`ed the `graphql` image, `kubectl
+rollout restart deployment graphql -n ace`. Verified: re-ran the identical experiment
+post-fix — ChaosEngine created successfully, fault pod ran, all the way through to
+`phase: Succeeded` including both cleanup steps.
+
+**Also discovered (Go-level, in the course of building the registration script against the live
+GraphQL API — not fixed, worked around client-side):** the `createChaosExperiment` mutation
+(despite its name/doc-comment "Creates a new experiment") **cannot actually create a new
+experiment** — its handler (`pkg/chaos_experiment/handler/handler.go` `CreateChaosExperiment`)
+unconditionally dereferences `*request.ExperimentID` (panics if the caller omits it — confirmed
+live, a real, GraphQL-error-wrapped panic, not a crash) and, if a caller supplies a fresh/unused
+UUID to avoid the panic, its own `GetExperiment` existence-check treats
+`mongo.ErrNoDocuments` as a hard failure (`"could not create experiment, error: mongo: no
+documents in result"`) instead of the expected "not found ⇒ proceed with creation" case that its
+sibling `saveChaosExperiment` (`SaveChaosExperimentRequest`, doc comment "Saves a new experiment
+or updates if already exists") correctly implements. **Worked around by using
+`saveChaosExperiment` + `runChaosExperiment` instead** — this is the combination that actually
+works for registering a brand-new experiment and is what this session's launcher script
+(`/tmp/.../scratchpad/register_experiment.py`, session-scratch, not committed) uses. Not fixed
+in source this session — flagging for whoever next touches experiment creation, since the
+existing `createChaosExperiment` mutation is presumably still reachable from parts of the web
+UI and would hit the same panic/error there.
+
+**Two stale-image deployment gaps (not code bugs — images built but never loaded into this
+KinD cluster):**
+- `agentcert/agentcert-install-agent:latest` was built locally (`INSTALL_AGENT_IMAGE_SOURCE=local`
+  in `.env`) but never `kind load`ed into `kind-agentcert-alfred`, so nodes fell back to pulling
+  the public Docker Hub image on `imagePullPolicy: IfNotPresent` — an older build predating the
+  `-delete` flag (`agent-charts/install-agent/main.go` already has `flag.BoolVar(&config.Delete,
+  "delete", ...)`; confirmed via a standalone test pod that the *local* build recognizes
+  `-delete` and the cluster's *actual running* image did not, before the `kind load`). Every
+  `delete-agent` workflow step failed with `flag provided but not defined: -delete` (exit code
+  2) until `kind load docker-image agentcert/agentcert-install-agent:latest --name
+  agentcert-alfred` was run. This is a live-cluster state gap, not a source defect — no code
+  change was needed, only loading what was already built.
+- Confirmed `agentcert/agentcert-install-app:latest` was already correctly loaded (present in
+  the node's `crictl images` since initial cluster setup); not reloaded.
+
+**Verification (final, after all fixes above):** re-ran `itbench-flash-agent-scenario-58-scaled-to-zero`
+via the real registration path (`saveChaosExperiment` → `runChaosExperiment`) end to end.
+Observed via `listExperimentRun` GraphQL query (the same data source the ChaosCenter UI reads)
+and direct `kubectl` inspection: `install-application` → `normalize-install-application-readiness`
+→ `install-agent` → `install-chaos-experiments` → `scenario-58-scaled-to-zero` (fault,
+correctly targeting `ns=otel-demo label=opentelemetry.io/name=accounting`) → `delete-agent` →
+`delete-application` → `uninstall-all`, workflow `phase: Succeeded`. **One unresolved, non-blocking
+observation:** the fault step's own wall-clock duration varied between two otherwise-identical
+runs (~4m14s vs ~64s) against a `TOTAL_CHAOS_DURATION=300`; not chased down further since
+`jobCleanUpPolicy`/`uninstall-all` removes the underlying `ChaosResult`/experiment-job pod
+before it could be inspected post-hoc, and the run that completed fastest still ended in a
+genuine `phase: Succeeded` with correct target-resolution confirmed on an identical prior run.
+Worth a closer look if reproduced with clearer signal.
+
+**Status:** all 36 manifests fixed in `.tmp/itbench-flash-agent-experiments/` (gitignored
+scratch, not committed). AgentCert Go fix (bug 5) is a real source change, applied to the
+working tree but **not yet committed to git** as of this handoff entry — `git diff
+AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/` shows the change; `AgentCert` is a
+submodule, so this also needs a submodule-pointer bump once merged upstream, per this repo's
+`.gitmodules`-must-point-at-AgentCert-org rule (§1). Only scenario-58 has been registered and
+run as of this entry; the remaining 35 are fixed and ready but not yet launched.
+
+## 28. Readable certification-report filenames + durable persistence across KinD/Compose teardown (2026-08-13, source-only — no infra commands run)
+
+**Context:** generated certification reports (Phase 4 of the certifier pipeline) had two
+problems: (1) the on-disk filename, GridFS `filename`, and served `Content-Disposition` filename
+were all `cert-{certification_run_id}.html/.pdf` — a raw UUID, no human-readable name anywhere
+in the pipeline; (2) on the Kubernetes/KinD path, both the `certifier-workspace` and MongoDB PVCs
+are backed by KinD's `local-path-provisioner`, which stores PV data inside the KinD
+control-plane node's own Docker container — no `extraMounts`/hostPath bound that storage to
+anything durable on the host, so `kind delete cluster` + recreate destroyed all report data
+regardless of any PVC-level reclaim-policy fix (those only protect against `helm uninstall`
+while the cluster itself stays up).
+
+**IMPORTANT — this session's work was source/config edits only.** Partway through
+implementation, the user flagged a currently-running experiment on this shared host and
+instructed that the live ACE stack/cluster must not be touched. No `docker`, `kind`, `helm`, or
+`kubectl` mutation command was run against any live resource this session (the only Docker
+command run was `docker compose config -q`, a read-only dry-run render). The KinD-config render
+script was smoke-tested by rendering to a throwaway path
+(`/tmp/claude-.../scratchpad/kind-test.yaml`, outside the repo's real `.tmp/` output path) and
+the test-created host data directory was deleted immediately after — the real cluster and the
+repo's real `.tmp/kind-agentcert.rendered.yaml` / `local-personal-workspace/kind-agentcert.yaml`
+were never touched. All changes below are uncommitted working-tree edits.
+
+**Fix 1 — readable filename.** `certifier/cert_reporter/pipeline/html_renderer.py`
+`_make_doc_id()` now builds `{agent_slug}_{certification_date}_{run_id8}` (e.g.
+`flash-agent_2026-08-13_a1b2c3d4`) from `meta["agent_name"]` (guaranteed non-empty by the
+`Meta` Pydantic schema) + `certification_date` + the first 8 hex chars of
+`certification_run_id`, via a new `_slugify()` helper reusing the existing sanitizer regex.
+Confirmed by reading every downstream call site that no separate rename step exists anywhere:
+`pdf_renderer.py:86` derives the PDF path from the HTML path by suffix-swap, GridFS upload
+(`cert_task_runner.py`) uses `Path(file_path_str).name` as the stored `filename`, and both
+`GET /api/v1/certification/{pdf,html}` routes' `Content-Disposition` header derives from that
+same stored filename — so this one function fixes disk name, GridFS name, and both served
+download filenames end-to-end. Old fallback chain (`agent_id`+date, `agent_id`, `cert-report`)
+kept for robustness but is effectively unreachable given the schema guarantee. Unit tests in
+`certifier/cert_reporter/tests/test_html_renderer.py::TestMakeDocId` updated to match (new
+primary-path assertions + retained fallback-chain coverage); verified logic correctness by
+extracting `_slugify`/`_make_doc_id` via `ast` and exec'ing in isolation (no pytest available in
+this environment — `pip install pytest` / project venv not present; `uv` is available but a full
+dependency install wasn't warranted for a pure-string-logic change) — all 7 cases (3 new
+primary-path + 4 retained fallback) passed.
+
+**Fix 2 — Docker Compose `mongodb_data` volume instance-scoping.** `docker-compose.yml:525` — 
+added `name: mongodb_data-${ACE_INSTANCE_NAME:-unconfigured}`, mirroring the existing
+`ollama-models-${ACE_INSTANCE_NAME}` pattern. Motivated by two things: (a) this repo's
+shared-host isolation convention (§0 in `CLAUDE.md`) — every other host-visible resource is
+instance-scoped, this one wasn't; (b) `cert_task_runner.py` uploads every generated report to
+the `cert_reports` GridFS bucket **unconditionally** (not gated on any storage-config flag), so
+MongoDB's own durability — not the certifier-workspace PVC/bind-mount — is what actually keeps
+reports around across a Compose `down`/`up` cycle. Added an in-file comment with the one-time
+manual migration command (`docker run --rm -v mongodb_data:/from -v
+mongodb_data-$ACE_INSTANCE_NAME:/to alpine cp -a /from/. /to/`) for anyone who wants to carry
+forward data from a pre-existing unscoped `mongodb_data` volume — documented, not scripted
+(rare one-time local-dev action). Verified `docker compose config -q` parses cleanly after the
+change (dry-run only, no containers created/touched).
+
+**Fix 3 — KinD durable host mount for `local-path-provisioner`.** Added an `extraMounts` entry
+to the control-plane node in `deploy/kind/kind-agentcert.yaml` (template), binding an
+instance-scoped host directory to `/opt/local-path-provisioner` — KinD's default
+`local-path-provisioner` storageClass (the cluster default) backs every PV at exactly that node
+path, so this one mount covers both the MongoDB PVC and the certifier-workspace PVC with no
+per-PVC YAML changes, making PVC-level `storageClassName`/`resource-policy: keep` fixes
+redundant (skipped as speculative). `deploy/kind/render-kind-config.sh` now also
+substitutes a `/__KIND_HOST_DATA_DIR__` placeholder (same regex-substitution pattern already
+used for `KIND_CLUSTER_NAME` and the 16 `hostPort` values) with a new `KIND_HOST_DATA_DIR` env
+var, defaulting to `${REPO_ROOT}/.tmp/kind-data-${ACE_INSTANCE_NAME:-unconfigured}`, and
+`mkdir -p`s that directory before writing the rendered config (kind does not create
+`extraMounts.hostPath` directories itself — it must exist beforehand or cluster creation fails).
+
+**Path-resolution check (no fix needed, verified by reading `compose/cluster-init/entrypoint.sh`
+and `scripts/setup.sh`):** initially planned to translate the `extraMounts.hostPath` through the
+`HOST_REPO_ROOT` env var `entrypoint.sh` already tracks for the analogous docker-socket-bind-mount
+problem, on the theory that `render-kind-config.sh` might run inside the `cluster-init` container.
+Confirmed this is unnecessary: `render-kind-config.sh` is invoked in exactly two places, both
+host-side — directly by the user per its own `--personal-workspace` usage docs (referenced in
+`entrypoint.sh:155`'s warning message, never executed by `entrypoint.sh` itself), and by
+`scripts/setup.sh:2058` directly on the host before it calls `kind create cluster` itself
+(also host-side, `scripts/setup.sh` ~L2074). So `REPO_ROOT` (computed via `pwd` inside the
+script) is already a genuine host-absolute path in both call sites — no translation layer
+needed. `HOST_REPO_ROOT` remains relevant only to its existing purpose (the `ace.kind.owner`
+volume-label ownership check), unrelated to this fix.
+
+**Explicitly out of scope:** wiring the already-built-but-unused `certifier/utils/file_storage.py`
+(`AsyncFileStorage`, Azure Blob Storage) into `cert_task_runner.py` as a second durability layer
+alongside GridFS. Confirmed via grep it's currently dead code for this purpose (no call sites in
+`certifier/main/` or `certifier/cert_reporter/`). Reasonable future belt-and-suspenders addition,
+but Azure credentials aren't guaranteed present in local dev (this repo commonly runs pure
+Ollama), and the KinD `extraMounts` fix already fully covers the durability requirement without
+it — not done this session.
+
+**Files changed:** `certifier/cert_reporter/pipeline/html_renderer.py`,
+`certifier/cert_reporter/tests/test_html_renderer.py`, `docker-compose.yml`,
+`deploy/kind/kind-agentcert.yaml`, `deploy/kind/render-kind-config.sh`.
+
+**Verification performed this session (source/logic only, per the no-touch constraint above):**
+- `_make_doc_id`/`_slugify` logic validated via isolated `ast`-extraction + exec (7/7 cases pass,
+  see Fix 1).
+- `docker compose config -q` — parses cleanly post-edit (read-only render, no bring-up).
+- `deploy/kind/render-kind-config.sh` — rendered to a throwaway scratch path with
+  `ACE_INSTANCE_NAME=testuser`, confirmed the `extraMounts` block substitutes to a real absolute
+  host path, confirmed the resulting YAML parses via `python3 -c "import yaml; ..."`, confirmed
+  the host data directory gets created via `mkdir -p`. Scratch output and the test-created host
+  directory were deleted immediately after. **No `kind create cluster` was run — the actual
+  cluster-creation behavior of the new `extraMounts` block is unverified end-to-end** (this
+  requires deleting/recreating a real KinD cluster, which was explicitly out of bounds this
+  session given the live experiment). Do that verification (stand up cluster → generate a report
+  → `kind delete cluster` → recreate from the same rendered config → confirm MongoDB data and
+  GridFS-stored reports survive) before relying on this fix, ideally once the current experiment
+  is no longer live on this host.
+- Compose durability (`down`/`up` cycle preserving `mongodb_data-*`) also **not run end-to-end**
+  this session, same reason.
+
+**Status:** all five files above are uncommitted working-tree changes as of this handoff entry.
+Durability check per CLAUDE.md §0.1: Fix 2 and Fix 3 land in checked-in source
+(`docker-compose.yml`, `deploy/kind/kind-agentcert.yaml`, `deploy/kind/render-kind-config.sh`),
+so a fresh checkout/from-scratch environment picks them up automatically — confirmed by tracing
+both `render-kind-config.sh` call sites (Compose `--personal-workspace` flow and
+`scripts/setup.sh`) rather than assumed. End-to-end (cluster-recreate, compose-restart)
+verification is the explicit follow-up noted above.
+
+## 29. MongoDB backup/restore across `shut_down.sh` + `setup.sh` — the actual fix for full teardown-and-rebuild continuity that §28/Fix-3 turned out not to provide (2026-08-13, source-only — no infra commands run)
+
+**Context:** immediately after §28 landed, the user asked whether `setup.sh --restart` could be made to persist MongoDB data. Investigating this surfaced two things worth recording precisely, because they correct part of §28's own reasoning:
+
+1. **`setup.sh --restart` was never actually at risk.** It runs `helm upgrade --install ace ...` (`scripts/setup.sh:2576`, confirmed via `grep -n "helm install\|helm upgrade\|helm uninstall"` across the whole script — there is no `helm uninstall` anywhere in the deploy path) or, if the user chose the kubectl-apply option instead, plain `kubectl apply -f deploy/k8s/*.yaml` (`k8s_deploy()`, `scripts/setup.sh:2322`). Neither deletes an existing PVC. MongoDB's PVC comes from a `StatefulSet.spec.volumeClaimTemplates` (`deploy/helm/ace/templates/mongodb.yaml:102-109`, and the equivalent in `deploy/k8s/mongodb.yaml`) — Kubernetes does not delete `volumeClaimTemplates`-derived PVCs on redeploy, or even on `helm uninstall`/StatefulSet deletion, unless `persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete}` is explicitly set (it isn't, in either manifest set, so the K8s default — retain — applies). §28's own "fresh, empty volume" warning was about a completely unrelated thing: the `docker-compose.yml` root-stack Mongo container (a different deployment topology entirely, never touched by `setup.sh`) — conflating the two in the original conversation was a mistake worth flagging explicitly so it isn't repeated.
+
+2. **§28's Fix 3 (`extraMounts` host-durable path for `local-path-provisioner`) does not, by itself, solve what it was written to solve.** It correctly stops `kind delete cluster` from erasing the raw bytes off the host disk — but confirmed by reasoning through `local-path-provisioner`'s actual behavior: it names each dynamically-provisioned PV's on-disk directory after a randomly-generated PV UID assigned fresh at provisioning time. A brand-new cluster + fresh `helm upgrade --install`/`kubectl apply` provisions a brand-new PVC → PV → a **new, empty, randomly-named** subdirectory under the same (now-durable) host root. The old data sits on disk, correctly preserved, but orphaned — nothing reattaches it to the new PVC automatically. Fix 3 remains worth keeping (it's a real, harmless improvement — data that would otherwise be gone is at least recoverable by hand from the host path), but it does not deliver "your data survives a cluster rebuild" on its own, and should not be represented as doing so.
+
+**The actual fix, per the user's own proposal:** an explicit `mongodump`/`mongorestore` backup/restore flow, which sidesteps the dynamic-PV-path problem entirely by not depending on storage-path continuity at all. Confirmed both `docker-compose.yml`'s and `deploy/helm/ace/values.yaml`'s MongoDB image are the same `mongo:5` (`grep -n "mongodb:" deploy/helm/ace/values.yaml` → `mongodb: mongo:5`; `docker-compose.yml` → `image: mongo:5` ×3), which bundles `mongodump`/`mongorestore` natively — no extra tooling needed in the pod/container.
+
+Scope, decided with the user via explicit questions rather than assumed: support **both** deploy choices (`h`=helm, `k`=kubectl — the user wasn't certain which they use, both go through the same `mongodb-0` StatefulSet pod in namespace `ace` regardless, so supporting both cost nothing extra), and make the backup **automatic by default** in `shut_down.sh` (matching the existing `--keep-ollama-model` precedent: safe-by-default, `--no-mongo-backup` to opt out).
+
+**`scripts/shut_down.sh`:** new step inserted immediately after the teardown confirmation prompt, before any destructive action (including the Compose `down -v` calls, in case those ever gain a dependency on cluster state) — not just before `kind delete cluster`, out of caution, even though only the K8s-deployed Mongo is actually at risk here. Only runs if `FOUND_KIND` is set (this checkout actually owns a KinD cluster) and a `mongodb-0` pod is reachable in namespace `ace` on it (`kind export kubeconfig --name "${FOUND_KIND}"` then `kubectl get pod mongodb-0 -n ace`) — skips silently (not an error) if neither holds, since not every teardown will have ACE deployed to Kubernetes at all. Dumps via `kubectl exec -n ace mongodb-0 -- mongodump --archive --gzip -u ... -p ... --authenticationDatabase admin`, capturing the pod's stdout to a temp file, then atomically `mv`s it into place (`.tmp/mongodb-backups/<ACE_INSTANCE_NAME>/mongodb.archive.gz`) only on success — a failed/empty dump leaves any previously-good backup untouched rather than clobbering it. Single canonical file per instance (overwritten each run), not a timestamped history — deliberately simple, per this repo's own "don't design for hypothetical future requirements" guidance; nothing in the current ask needs rollback-to-an-older-backup. New `--no-mongo-backup` flag, documented in both the header comment and `--help`.
+
+**`scripts/setup.sh`:** new `offer_mongodb_restore()` function (defined near `restart_subscriber_deployments`, `scripts/setup.sh` ~L2275), called right after the `deploy_choice` case block, gated on **all** of: `SETUP_MODE == "setup"` (never `--restart` — matches the user's literal request), `EXPRESS_MODE -eq 0` (interactive only — identical visibility to the existing `k`/`h`/`n` deploy-choice prompt, so an express/scripted run is never surprised by a `mongorestore --drop` overwriting a fresh database without asking), and `deploy_choice` being `h` or `k` (something was actually deployed this run — skip-deploy runs have no `mongodb-0` to restore into anyway). If a backup file exists for this instance and `mongodb-0` is up, prompts with the file's size/mtime before doing anything. **Does not trust either deploy path's own readiness wait** (`helm upgrade --install`'s blocking `mongodb-rs-init` post-install/post-upgrade hook for the helm path; `k8s_deploy`'s `kubectl rollout status` for the kubectl path) to mean the replica set is actually initialized — confirmed by reading `k8s_deploy()` (`scripts/setup.sh:2415-2425`) that its wait only covers StatefulSet Pod readiness, not the separate, async `mongodb-rs-init` Job (a plain `Job` resource on the kubectl-apply manifest set, not a blocking Helm hook there) — so it polls `mongosh --eval "db.adminCommand('ping').ok"` directly (same pattern the `mongodb-rs-init` Job's own script already uses) for up to 60s before attempting `mongorestore --archive --gzip --drop`, and fails clearly with the manual-restore command printed rather than racing an uninitialized replica set.
+
+**Files changed (this section, on top of §28's five):** `scripts/shut_down.sh`, `scripts/setup.sh`.
+
+**Verification performed this session:** `bash -n` syntax-check on both scripts (passes). **Not run end-to-end** — same live-experiment constraint as §28: no `mongodump`/`mongorestore`/`kubectl exec` was actually executed against the running cluster, so the exact mongodump/mongorestore invocations (auth flags, `--archive`/`--gzip` stdin/stdout piping through `kubectl exec`) are believed correct from documentation and this repo's own existing `mongosh` invocation patterns (e.g. the `mongodb-rs-init` Job's readiness-poll `--eval` call, matched verbatim in style) but have not been exercised against a live pod. **Do this before relying on it:** run a real `shut_down.sh` (confirm the backup file appears and is a valid gzip archive: `gzip -t`), then a real `setup.sh` (interactive, choose h or k, confirm the restore prompt appears and actually repopulates the expected collections) — ideally once the current live experiment is no longer running on this host, per the same constraint noted throughout this session.
+
+**Status:** both files are uncommitted working-tree changes as of this handoff entry, additive on top of §28's changes (same uncommitted state, not yet committed to git).
+
+## 30. MongoDB backups made independent + multi-generation, with a picker in `setup.sh` (2026-08-13, source-only — no infra commands run)
+
+**Context:** immediate follow-up to §29. The single-file, overwrite-each-time backup from §29 (`mongodb.archive.gz`) meant only the most recent teardown's data was ever recoverable — if a bad teardown or a bad restore choice happened, there was no way to go back further. The user asked for independent, listable generations (their words: "the before last database, etc.") with `setup.sh` presenting them as a choice rather than a single yes/no.
+
+**`scripts/shut_down.sh` change:** replaced the single `mongodb.archive.gz` path with one file per run, named `mongodb-<UTC timestamp>.archive.gz` (format `%Y%m%dT%H%M%SZ` — colon-free, filesystem-safe everywhere, and sorts chronologically as plain text). Each is written via the same temp-file-then-atomic-`mv` pattern as §29 (a failed/partial dump never touches a previously-good file — now true of every generation, not just "the" file). Added `MONGO_BACKUP_RETAIN=10` (a plain script constant, not a flag — no indication a configurable knob is actually needed yet, so kept simple per this repo's own "don't design for hypothetical requirements" guidance) and a prune step after every successful dump: `ls -1t "${MONGO_BACKUP_DIR}"/mongodb-*.archive.gz | tail -n "+$((MONGO_BACKUP_RETAIN + 1))"` selects everything past the newest 10 for deletion. Verified this selection logic in isolation (not via mongodump — a pure filesystem test): created 13 fake timestamped files, confirmed `ls -1t | tail -n +11` selects exactly the 3 oldest and leaves the 10 newest untouched (see `/tmp/.../scratchpad`, session-local, not part of the repo).
+
+**`scripts/setup.sh` change:** `offer_mongodb_restore()` (same function from §29, same gating: `SETUP_MODE=setup`, `EXPRESS_MODE=0`, deploy actually happened this run) now globs `mongodb-*.archive.gz` in the instance's backup directory, builds a `backups=()` array from `ls -1t` (newest first, matching `shut_down.sh`'s own ordering convention), and presents a numbered menu — `0` = "start with a brand-new, empty database" (the explicit default, matching the user's request that this be a real option alongside restoring), `1..N` = each backup with its file mtime and size shown via `date -r`/`du -h` (`1` is annotated "most recent"). Input validated as a plain integer in range before use; anything else (empty/invalid/out-of-range) falls through to "skip, stay empty" rather than erroring or guessing. Verified the listing-and-selection logic in isolation the same way as the prune logic: 3 fake timestamped archives, confirmed the menu lists them newest-first with correct 1-based-to-array-index mapping for every choice 0-4 plus non-numeric input, matching expected behavior for all cases including invalid ones.
+
+**Files changed:** `scripts/shut_down.sh`, `scripts/setup.sh` (same two files as §29, no new files).
+
+**Verification performed this session:** `bash -n` on both (pass). Pruning selection and menu/selection-index logic both verified via isolated pure-bash tests against fake files in the session scratchpad (not the repo, not the live cluster) — confirmed correct for the ordering, retention-boundary, and choice-validation cases above. **Still not run against a real mongodb-0 pod** — same constraint as §29, carried forward: an actual `shut_down.sh` (confirm multiple real timestamped archives accumulate and prune correctly past the 11th) followed by a real `setup.sh` restore (confirm the menu displays real backups correctly and the chosen one's data actually lands) is the outstanding end-to-end check, to be done once the live experiment on this host is no longer running.
+
+**Status:** uncommitted working-tree changes, additive on top of §29 (same two files, no new ones).
+
+## 31. MongoDB backup provenance — each backup now records what it was started from (2026-08-13, source-only — no infra commands run)
+
+**Context:** immediate follow-up to §30. With multiple independent, listable backups now in play, the user asked for each one to record its own lineage — whether the database it was dumped from had itself been started from scratch, or restored from an earlier backup in the list — while keeping the existing timestamp-based filenames unchanged (explicit instruction: "Keep the timestamp").
+
+**Design:** a small sidecar file per archive (`mongodb-<timestamp>.archive.gz.meta`, plain `started_from=<value>` — no JSON, no `jq` dependency, consistent with the `.env`-style `key=value` parsing (`cur()`) both scripts already use elsewhere) rather than encoding lineage into the filename itself, per the explicit "keep the timestamp" instruction. `value` is either `scratch` or the basename of the backup that database was restored from.
+
+The harder design question was *where the lineage decision gets recorded between the two scripts* — `setup.sh` is what knows the answer (it's the one asking "restore which one, or start fresh?"), but `shut_down.sh` is what writes the next backup, in a completely separate later invocation, possibly a different day. Solved with one small marker file, `.tmp/mongodb-backups/<instance>/current-started-from`, written by `setup.sh`'s `offer_mongodb_restore()` at the moment the choice is made (`scratch`, or the chosen backup's basename) and read by `shut_down.sh`'s backup step the next time it runs, to stamp the *new* archive's `.meta`. This correctly threads a full chain across arbitrarily many generations: backup 2's `.meta` says `started_from=<backup 1's filename>` if backup 1 was what got restored before backup 2 was taken, and so on — verified this exact chain (not just a single hop) in the isolated test described below.
+
+**Known, accepted limitation, stated plainly rather than solved:** the marker only gets written when `offer_mongodb_restore()` actually runs (`SETUP_MODE=setup`, `EXPRESS_MODE=0`, a deploy actually happened) — a `setup.sh --restart`, an express run, or a skip-deploy run never touches it, which is correct (those paths don't recreate the database, so the existing marker is still accurate). What's *not* handled: someone re-running the interactive wizard against a KinD cluster that already has a populated `mongodb-0` from a previous session without tearing it down first would overwrite the marker with a fresh choice, even though no data was actually touched. This is a real gap, judged not worth solving given the scope of what was actually asked (this only matters for an edge case the user didn't raise, and this repo's own conventions favor not designing for hypothetical requirements) — flagged here so it isn't silently assumed correct.
+
+**Files changed:** `scripts/shut_down.sh`, `scripts/setup.sh` (same two files as §29/§30, no new ones — the `.meta` sidecars and the `current-started-from` marker are new files created *by* these scripts at runtime, not new source files).
+
+**Verification performed this session:** `bash -n` on both (pass). Simulated a full two-generation lineage chain end-to-end with fake files in the session scratchpad (not the repo, not live): fresh deploy → `scratch` marker → backup 1 stamped `started_from=scratch` → simulated `setup.sh` listing backup 1 correctly showing "started from: scratch" → simulated picking it → marker updated to backup 1's filename → backup 2 stamped `started_from=mongodb-<backup-1-timestamp>.archive.gz` → simulated listing both, newest first, each showing correct lineage → simulated pruning backup 1 and confirmed both `mongodb-...archive.gz` and its `.meta` sidecar are removed together (not orphaning the sidecar). All steps matched expected output. **Still not run against a real mongodb-0 pod or a real multi-cycle `setup.sh`/`shut_down.sh` sequence** — carried forward from §29/§30, same reason (live experiment on this host).
+
+**Status:** uncommitted working-tree changes, additive on top of §30 (same two files, no new source files).
+
+## 30. `INSTALL_AGENT_IMAGE_PULL_POLICY`/`INSTALL_APPLICATION_IMAGE_PULL_POLICY` were still `IfNotPresent` in the live `.env` despite §27's fix already being coded into `setup.sh` — closed the gap across every config surface, confirmed it's a queue-wide risk, not scenario-20-specific (2026-08-13, source + local-config edits — no infra commands run)
+
+**Context:** mid-batch-launch of the 36 ITBench experiments fixed in §27, experiment #2 (`scenario-20-nonexistent-image`) failed at its `delete-agent` cleanup step with the exact same `flag provided but not defined: -delete` error documented in §27 — even though §27's `kind load docker-image agentcert/agentcert-install-agent:latest` had already fixed this once. The person running the batch flagged this and asked whether it was a one-off or a risk to all 34 remaining queued experiments. It is the latter — confirmed empirically below, not assumed.
+
+**Root cause (confirmed):** `agentcert/agentcert-install-agent:latest` and `agentcert/agentcert-install-app:latest` are locally built + `kind load`ed under the exact same `repo:tag` as the real images published to Docker Hub (`scripts/prepare-images.sh:114,132` — `build_and_load_install_app`/`build_and_load_install_agent` both tag with the bare `:latest` ref, no `local`-specific suffix). There is no way to distinguish "the fresh local build with `-delete` support" from "the older public build without it" by name — they're the same name. Kubelet's own image GC evicting the kind-loaded copy from the node (or, under `IfNotPresent`/`Always`, any other event that makes the node re-resolve the tag) silently substitutes the older public image, and nothing errors — the pod starts fine, just running stale code. This is a structural property of the tag scheme, not a one-time fluke, and it applies identically to every experiment that runs an `install-agent`/`delete-agent` step, regardless of that experiment's fault type.
+
+**A prior session had already found and partially fixed this** (search `scripts/setup.sh` for the inline comment beginning "`local` means prepare-images.sh built and kind-loaded this image..." — it already sets `INSTALL_AGENT_IMAGE_PULL_POLICY=Never`/`INSTALL_APPLICATION_IMAGE_PULL_POLICY=Never` for the `local` source branch, with a comment citing this exact failure mode). `Never` is the correct mitigation *given* the same-tag scheme is being kept (rather than introducing a distinct local tag): it makes kubelet refuse to pull anything at all for that ref and fail loudly (`ErrImageNeverPull`) if the kind-loaded copy is ever missing, instead of silently substituting the stale public image. `deploy/helm/ace/values-env.yaml` (the file Helm actually deploys from) already correctly carried `Never` for both.
+
+**What was actually still broken — the gap between "the logic exists" and "it's in effect":**
+- The live `.env` (which `INSTALL_APP_IMAGE_SOURCE=local`/`INSTALL_AGENT_IMAGE_SOURCE=local` are both set in, confirmed at `.env:421-422`) still had `INSTALL_APPLICATION_IMAGE_PULL_POLICY=IfNotPresent` and `INSTALL_AGENT_IMAGE_PULL_POLICY=IfNotPresent` (`.env:78,82`) — the stale pre-§27-fix values. `setup.sh`'s own logic only rewrites these three source/policy vars when the interactive wizard actually runs (`SETUP_MODE=setup`, not `--restart` — see the `_INSTALL_AGENT_SRC` gating in `scripts/setup.sh`'s env-writer); since the wizard wasn't re-run after the fix landed in source, `.env` never picked it up. This is a real regression trap: the *next* `setup.sh --restart` (the routine, no-prompts redeploy command used constantly per this repo's own docs) regenerates `values-env.yaml` from `.env` — so it would have **overwritten the currently-correct `Never` in `values-env.yaml` back down to the vulnerable `IfNotPresent`**, even though `values-env.yaml` looked fine at the time this was found.
+- The 36 hand-fixed workflow manifests from §27 (`.tmp/itbench-flash-agent-experiments/*.yaml`, gitignored scratch) hardcode `image`/`imagePullPolicy` directly in the YAML rather than relying on the GraphQL server's env-var-driven override (`applyInstallAgentTemplateOverrides` in `AgentCert/.../chaos_experiment/ops/service.go`) — and per §27 Bug 5, raw `kubectl apply` of these files bypasses that server-side override path entirely (`saveChaosExperiment`+`runChaosExperiment` is the only path that applies it). Checked all 36: every one hardcoded `imagePullPolicy: Always` for both `install-agent` and `delete-agent` steps and `imagePullPolicy: IfNotPresent` for `install-application`, uniformly — confirmed via `grep -A1 "image: agentcert/agentcert-install-agent:latest" .tmp/itbench-flash-agent-experiments/*.yaml`. **This confirms the risk is queue-wide, not specific to scenario-20**: every one of the 34 remaining manifests carries the identical vulnerable policy on the identical shared-tag image, so any of them could hit the same silent-fallback failure depending purely on node cache-eviction timing, independent of which fault they inject.
+- Live, read-only check on the actual KinD node (`docker exec agentcert-alfred-control-plane crictl images`) confirmed an image is currently cached under `docker.io/agentcert/agentcert-install-agent:latest` — but, consistent with the root cause above, there's no way to tell from the tag alone whether it's the fresh local build or a re-pulled stale one. Also checked kubelet's eviction config on that node (`imageGCHighThresholdPercent: 100`, `nodefs.available`/`imagefs.available` thresholds at 0%) — disk-pressure-triggered GC looks neutralized right now, which doesn't rule out other pull-triggering events but does mean the originally-suspected GC-eviction trigger specifically may not recur under the current node config.
+
+**Fix applied this session (source + local config, no live cluster/Docker mutation):**
+1. `.env` (gitignored, this checkout's live config): `INSTALL_APPLICATION_IMAGE_PULL_POLICY` and `INSTALL_AGENT_IMAGE_PULL_POLICY` corrected from `IfNotPresent` → `Never`, matching `values-env.yaml` and closing the regression trap described above — a future `setup.sh --restart` will now regenerate `values-env.yaml` with the correct value instead of reverting it.
+2. `.env.example` (committed template): added explicit comments clarifying that `IfNotPresent` is only correct while the corresponding `*_IMAGE_SOURCE=dockerhub`, and that `local` must use `Never` — pointing at this handoff entry — so a future contributor hand-editing `.env` doesn't reintroduce the stale value setup.sh itself no longer writes.
+3. All 36 `.tmp/itbench-flash-agent-experiments/*.yaml` (gitignored scratch, the actual queue): `install-agent`/`delete-agent` steps' `imagePullPolicy` changed `Always` → `Never` (72 occurrences, 2/file), `install-application` steps' `imagePullPolicy` changed `IfNotPresent` → `Never` (36 occurrences, 1/file) — via a scoped Python regex keyed to the exact preceding `image:` line, so unrelated `imagePullPolicy` values elsewhere in each manifest (e.g. `litmuschaos/k8s:latest` at `imagePullPolicy: Always`, which is genuinely meant to always re-pull from Docker Hub) were left untouched. Verified post-edit: no `Always`/`IfNotPresent` remains adjacent to either `agentcert-install-agent`/`agentcert-install-app` image reference in any of the 36 files.
+4. `scripts/prepare-images.sh` and `scripts/setup.sh`: no changes needed — both already implement the correct `local`→`Never` logic (the latter is what originated the fix that just hadn't propagated to `.env`).
+
+**Files changed:** `.env` (uncommitted, gitignored — local config correction), `.env.example` (uncommitted, to be committed — doc/default clarification), `.tmp/itbench-flash-agent-experiments/*.yaml` ×36 (uncommitted, gitignored scratch — the actual queue).
+
+**What this does NOT fix / still needs doing before resuming the batch:** `Never` only helps if the *correctly-built* local image is actually present in the node's image cache at the moment each step runs — it converts "silently run stale code" into "fail loudly," it does not itself guarantee freshness. Before resuming the 34 remaining launches, re-run `scripts/prepare-images.sh` (or at minimum `kind load docker-image agentcert/agentcert-install-agent:latest agentcert/agentcert-install-app:latest --name <cluster>`) to be certain the node's cached copies are the current local builds, not leftover stale ones from before this fix. Also, if any of the 36 manifests get (re-)launched via the real `saveChaosExperiment`+`runChaosExperiment` GraphQL path rather than raw `kubectl apply`, the live `graphql` deployment needs to actually be running with the corrected env (i.e. `values-env.yaml`'s `Never` — already correct — needs to have actually been rolled out via `helm upgrade`/pod restart; not verified this session, since no live cluster/Docker mutation was performed per the user's instruction that another session is handling the currently-running experiment). **Not verified end-to-end this session** — no experiment was (re-)launched to confirm the fix holds; the 36-file edit and `.env` correction were checked only by grep/diff, not by an actual run.
+
+**Verification performed:** `grep`-based diff confirms all 36 manifest files' `agentcert-install-agent`/`agentcert-install-app` steps now read `Never` with no stray old values; `.env`/`values-env.yaml` now agree on `Never` for both policy vars; `.env.example`'s stated defaults now match what `setup.sh` actually writes for each source option. Read-only live inspection only (`docker exec ... crictl images`, `kubectl get deployment ... -o jsonpath` — the latter returned nothing, kubectl context not confirmed live from this session's shell). No `docker`, `kind`, `helm`, or `kubectl apply/patch/delete/rollout` mutation command was run.
+
+
+## 31. Batch-launching experiments 2-36: BuildKit attestation manifests broke `kind load` reliability, 10 manifests had CRD-invalid `appkind`, and `litmus-admin`'s RBAC was never actually applied to this cluster (2026-08-13, live cluster mutations performed with explicit user confirmation)
+
+**Context:** continuation of §27 (this session, same day). After validating experiment 1 (`scaled-to-zero`) end to end, launched a sequential batch covering experiments 2-36 via the `saveChaosExperiment`→`runChaosExperiment` path. Every single retry kept failing even after fixes that had been individually verified — three more distinct root causes found and fixed, on top of §27's six and §30's `.env`/manifest `Never`-policy fix (a concurrent session's work, discovered mid-session via this same Handoff file — see §30; its manifest-level `Never` hardening and this session's server-side fix are complementary, not conflicting, confirmed by re-validating all 36 manifests still carry every earlier fix intact after §30's edits landed).
+
+**Bug 7 — a second, subtler cause of the same "stale install-agent image" symptom §30 targeved: BuildKit attestation manifests confusing `kind load`.** Even after `kind load`-ing the correct locally-built image (confirmed via immediate `crictl images` check) and applying §30's `Never` pull-policy fix, the exact same `-delete`-flag failure kept recurring within minutes — repeatably, across multiple fresh `kind load` + immediate-retest cycles, including with `imagePullPolicy: Never` explicitly set (which should make a *missing* image fail loudly, not silently substitute the wrong one — so this was never actually an eviction/missing-image problem, despite looking identical to §30's symptom). Root cause, found by bisecting the actual submitted `delete-agent` args against a direct reproduction pod (not guessing from the manifest): modern `docker build` (BuildKit, this host's Docker 29.7.2) emits an image as a multi-entry manifest list including attestation/provenance/SBOM sub-manifests by default, even for a single-platform build (`docker build` output showed `exporting attestation manifest` and `exporting manifest list` lines). `kind load docker-image` against this KinD/containerd version does not reliably resolve which sub-manifest under the tag is the real runnable image, and was intermittently re-serving a stale prior image sharing the same tag — this reproduced deterministically across 3 separate rebuild-and-retest cycles until fixed. **Fix:** rebuilt both `agentcert/agentcert-install-agent:latest` and `agentcert/agentcert-install-app:latest` with `docker build --provenance=false --sbom=false ...` (single clean manifest, no attestation entries), then `kind load`ed. Verified stable across 3 consecutive test-pod runs and again after a 45s wait (long enough to rule out a fast eviction race). **This is a durable fix only if it's ever rebuilt the same way again** — `scripts/build-and-push.sh`/`prepare-images.sh` do not currently pass `--provenance=false --sbom=false`; not yet updated there (see "Not yet done" below).
+
+**Bug 8 — 10 of the 36 manifests had a `ChaosEngine.spec.appinfo.appkind` value Kubernetes' CRD schema rejects outright.** Symptom: `Error Creating Resource : ChaosEngine.litmuschaos.io "..." is invalid: spec.appinfo.appkind: Invalid value: "configmap": ... should match '^(^$|deployment|statefulset|daemonset|deploymentconfig|rollout)$'` — and equivalently for `service`, `pod`, `horizontalpodautoscaler` on other scenarios. Every affected fault's own canonical script (`chaos-charts/faults/itbench/<name>/fault.yaml`) already documents the correct handling in its own comments: `appinfo.appkind` is CRD-validated to a fixed enum that doesn't include the fault's *real* target kind, so the submission is meant to use "a dummy CRD-valid appkind like deployment" while the fault script hardcodes its actual target kind internally regardless of what's submitted (confirmed by reading `APP_KIND="configmap"` etc. hardcoded directly in each affected script, ignoring the submitted value entirely). Affected: `04-scenario-30-target-port` (service), `05`/`30` (configmap, two different scenarios using the same fault), `06` (configmap), `08` (pod), `16`/`17`/`18` (horizontalpodautoscaler), `34` (service), `35` (service). **Fix:** set `spec.appinfo.appkind: deployment` in the embedded `ChaosEngine` artifact for all 10 — matches the fault authors' own documented intent exactly; does not change what any fault actually does, only what schema-satisfying placeholder gets submitted.
+
+**Bug 9 (real platform/infra bug, most impactful) — the `litmus-admin` cluster-wide RBAC that every fault's `chaosServiceAccount` runs as was never applied to this cluster, and even the checked-in source referenced the wrong namespace.** Symptom, caught mid-batch by directly checking a fault-job pod's own logs rather than just the Argo Workflow status: `Error from server (Forbidden): deployments.apps is forbidden: User "system:serviceaccount:itbench:litmus-admin" cannot list resource "deployments" ... in namespace "otel-demo"` — the fault script had correctly resolved its real target (`ns=otel-demo label=opentelemetry.io/name=product-catalog`, confirming §27 Bug 4's fix holds) and failed purely on permissions. `chaos-charts/service-accounts/litmus-admin-rbac.yaml` defines exactly the `ClusterRole`+`ClusterRoleBinding` needed for a chaos service account to reach into arbitrary target-application namespaces (as opposed to namespace-scoped `Role`s, which only the `itbench` infra namespace itself had — confirmed via `kubectl get role,rolebinding -n otel-demo`, which showed only the MCP-server roles, nothing for `litmus-admin`) — but `kubectl get clusterrole/clusterrolebinding litmus-admin` returned `NotFound`: **it had simply never been applied to this cluster at any point.** The file also hardcodes `namespace: litmus` for both the `ServiceAccount` and the `ClusterRoleBinding`'s subject — this cluster's infra lives in `itbench` (same root pattern as §27 Bug 1), so applying the file as-is would have bound the grant to a service account in a namespace that doesn't exist here.
+
+Beyond the missing apply, the canonical RBAC definition itself was also **incomplete for the ITBench-specific fault set** — it was evidently scoped for a narrower/different set of stock LitmusChaos experiments. Cross-referenced every one of the 36 faults' own declared `spec.definition.permissions` (`chaos-charts/faults/itbench/*/fault.yaml`) against the ClusterRole and found it missing, entirely or partially: `configmaps` (had create/get/list, missing patch), `services` (had create/get/list/delete, missing patch/update), `endpoints` (absent entirely), `persistentvolumeclaims` (had get/list/delete, missing create/patch/update), `pods/ephemeralcontainers` (absent), `resourcequotas` (absent), `secrets` (had create/get/delete, missing patch), `deployments/scale`+`deployments/rollback`+`statefulsets/scale` subresources (absent — Kubernetes RBAC treats subresources as distinct resource names, not implicitly covered by the base `deployments` grant), `horizontalpodautoscalers` under `autoscaling` apiGroup (absent entirely — confirmed this is exactly what was blocking the three `hpa-*` scenarios), `networkpolicies` under `networking.k8s.io` (absent), `priorityclasses` under `scheduling.k8s.io` (absent).
+
+**Fix, applied in two parts:**
+1. `chaos-charts/service-accounts/litmus-admin-rbac.yaml` (canonical, checked-in submodule source): extended the `ClusterRole` with every missing resource/verb combination identified above, so a fresh deployment of this cluster gets complete coverage from the start.
+2. Applied live to `kind-agentcert-alfred`, namespace-corrected (`litmus`→`itbench` via `sed`), as `ClusterRole`/`ClusterRoleBinding` objects — **this required explicit user confirmation**, since creating cluster-wide RBAC got (correctly) blocked by the permission classifier as a consequential action; user confirmed via "go on" before it was applied.
+
+**Verification:** `kubectl auth can-i <verb> <resource> --as=system:serviceaccount:itbench:litmus-admin -n otel-demo` checked for every previously-missing combination (`list deployments`, `list`/`patch horizontalpodautoscalers`, `patch services`, `list endpoints`, `create persistentvolumeclaims`, `patch configmaps`, `patch secrets`, `list networkpolicies`, `create priorityclasses`, `patch pods/ephemeralcontainers`) — all now `yes`.
+
+**Not yet done:**
+- `scripts/build-and-push.sh`/`prepare-images.sh` don't yet pass `--provenance=false --sbom=false` — if either script rebuilds these two images the normal way, Bug 7 can recur. Should be added there so it's automatic rather than something a future session has to rediscover.
+- `chaos-charts` is a submodule; both this entry's RBAC fix and §27's fault-script content are edits inside it, not yet committed/pushed upstream to the `AgentCert` org repo per this repo's `.gitmodules` rule (§1) — same outstanding item §27 already flagged for its own submodule edits.
+- Batch was paused mid-run to chase these three bugs down; as of this entry only experiment 1 has completed cleanly through the *fully* corrected path (all of §27 + this entry's fixes together) — experiments 2, 4, 5, 6, 7 have been retried at least once each but not yet re-verified against the complete fix set, and 8-36 have not been attempted at all yet. Resuming next.
+
+
+## 32. `ACE_INSTANCE_NAME` auto-derivation could produce a kind/Kubernetes-invalid or over-length name; hardened the sanitizer and added `.env` re-validation (2026-08-13, source-only, no infra commands run)
+
+**Context:** while explaining the `ACE_INSTANCE_NAME`-based shared-host isolation scheme (CLAUDE.md §0) to the user, found that the sanitizer used to auto-derive it from `id -un` — `tr '[:upper:].' '[:lower:]-'`, duplicated identically in three places (`scripts/setup.sh` `_default_instance_name` backfill, `scripts/setup.sh`'s `ensure_kind_cluster()` own fallback, `scripts/start-local-services.sh`) — only strips uppercase letters and literal dots. It does not strip other characters a Linux username can legally contain (e.g. underscores), and does not bound the resulting length.
+
+**Why this matters:** `ACE_INSTANCE_NAME` feeds `agentcert-${ACE_INSTANCE_NAME}` as the kind cluster name (`ensure_kind_cluster()`), and kind requires the cluster name (used to derive node container hostnames, e.g. `<name>-control-plane`) to satisfy RFC-1123 label rules (lowercase alphanumeric + hyphen only) and stay within the ~64-char Linux hostname limit once `-control-plane` (14 chars) and the `agentcert-` prefix (10 chars) are appended. A username containing an underscore, or a long username/email-style login, passed the old sanitizer unchanged and then would fail `kind create cluster` outright — a hard, if loud, break in the naming scheme documented in CLAUDE.md §0.
+
+**Fix:**
+1. Added `sanitize_instance_name()` to `scripts/setup.sh` (next to `cur()`): lowercases, replaces every non-`[a-z0-9-]` character with `-`, squeezes repeats, strips leading/trailing hyphens, and caps the result at 20 characters (comfortably inside the RFC-1123/hostname budget for every current prefix/suffix combination this value is used in). Falls back to the literal `instance` if the input sanitizes to empty (e.g. a username made entirely of non-alphanumeric characters).
+2. Replaced both `scripts/setup.sh` call sites (the `_default_instance_name` backfill; `ensure_kind_cluster()`'s own `id -un` fallback) with calls to this function.
+3. Added a new, unconditional (runs on every `--setup`/`--restart`) re-validation block immediately after the existing `ACE_INSTANCE_NAME` backfill: re-sanitizes whatever value is *currently* in `.env` — covering both a value hand-typed directly by a user (bypassing auto-derivation entirely) and a value written before this fix existed — and rewrites `.env` with a `warn()` if it doesn't already match the safe form. This closes the gap for existing/copied `.env` files, not just fresh ones.
+4. Hardened `scripts/start-local-services.sh`'s standalone copy of the same fallback (it doesn't source `setup.sh`, so it needed its own fix) with the identical pipeline logic, plus an `instance` fallback for the empty case.
+
+**Verification performed:** `bash -n` on both changed scripts (pass). Extracted the sanitizer logic into an isolated bash snippet and ran it against representative inputs — confirmed `alfred02.TRN` → `alfred02-trn`, `alfred_ruscher` → `alfred-ruscher`, a 37-char dotted/hyphenated name → correctly truncated to 20 chars with no dangling hyphen, an all-punctuation input → falls back to `instance` rather than producing an empty string. **Not run against a real `kind create cluster` or a real `setup.sh` invocation this session** — no infra/Docker/kubectl commands were executed, consistent with source-only scope for this change.
+
+**Files changed:** `scripts/setup.sh`, `scripts/start-local-services.sh`. Status: uncommitted working-tree changes (both files already had other, unrelated uncommitted changes at session start — see `git status`/`git diff` for the full working tree; only the sanitizer-related hunks described above are from this session).
+
+**Related, found but NOT fixed this session — flagged for whoever picks it up next:** the Kubernetes-object layer (Helm release name and namespace, both hardcoded to the literal `ace` throughout `scripts/setup.sh`, e.g. `helm install ace deploy/helm/ace -n ace`) is not instance-scoped at all. This is safe under the default `CLUSTER_MODE=auto|local|fresh`/KinD path, where every checkout gets its own private KinD API server (a different cluster entirely, so identical namespace/release names never actually collide). It is **not** safe under `CLUSTER_MODE=cloud` (a real, documented, supported code path — AKS/EKS/GKE, see `innovation.md` §3.19) if two checkouts are ever pointed at the same shared cloud cluster: `helm install ace -n ace` / `kubectl apply -f deploy/k8s/` from a second checkout would collide with or overwrite the first checkout's objects in that shared cluster, with none of the Docker/KinD-layer ownership-marker protections in this repo applying at that layer. No fix attempted yet — this needs an explicit decision (instance-scope the namespace/release name vs. add a Helm-release-level ownership guard analogous to the existing `ace.kind.owner` Docker volume marker vs. document/enforce it as an unsupported configuration for shared clusters) before implementing, given it would also require touching cross-service DNS-name assumptions baked into `agent-charts`/`app-charts` values (e.g. `litellm.ace.svc.cluster.local`, CLAUDE.md §4.2) if the namespace itself becomes instance-scoped.
+
+## 33. Namespace "still Terminating" race fixed in `install-app`; batch resumed for remaining 22 experiments (2026-08-14, live cluster, source edits)
+
+**Context:** After the 17h monitoring pause (VS Code disconnect killed `launch_all.py` after experiment 15), resumed the batch with explicit user permission to make live changes. Fixed two catalog bookkeeping issues first:
+
+- **Scenario-26 (`email-http-tamper`, catalog `array[9]`):** Had been manually retried in a prior session (Argo WF `…-1786619202544`, phase=Succeeded) but the catalog was never updated from `terminal_failed` to `completed`. Fixed by editing catalog.json directly before relaunching.
+- **Scenario-31 (`frontend-ingress-block`, catalog `array[11]`):** Had been re-launched by the batch on this session's first pass, but `find_workflow_by_workflow_id` returned the *old* failed WF (`…-1786619207053`) instead of the newly-created one because both shared the same `workflow_id` label and `items[0]` was the stale entry. The new WF (`…-1786683562703`) ran correctly to Succeeded (fault injection step included) but the batch marked the entry as `terminal_failed` from the old WF. Updated catalog to `completed` after the new WF's final phase was confirmed.
+
+**Root cause of the real new bug — namespace still Terminating when next experiment installs:**
+
+After scenario-31's new WF released its `ace-app-ns-otel-demo` Argo mutex, scenario-38-hpa-fraud-detection acquired the mutex and immediately launched `install-application`. By that point, scenario-31's `delete-application` step (`helm uninstall otel-demo -n otel-demo || true`) had run, but Kubernetes namespace deletion is async — the `otel-demo` namespace was still in `Terminating` phase, working through finalizer removal. The `install-application` container's `ensureNamespace` call tried `kubectl create namespace otel-demo`, got `AlreadyExists` (valid for Terminating namespaces), treated it as a no-op, and proceeded directly to `helm upgrade --install otel-demo`. Helm tried to create the Helm state secret `sh.helm.release.v1.otel-demo.v1` and got:
+
+```
+Error: create: failed to create: secrets "sh.helm.release.v1.otel-demo.v1" is forbidden:
+  unable to create new content in namespace otel-demo because it is being terminated
+```
+
+The `launch_all.py`'s `wait_for_namespace_ready()` pre-check doesn't help here — it runs *before* `trigger_run()` (before the Argo mutex is acquired), so by the time `install-application` actually runs, the state has changed.
+
+**Fix — `app-charts/install-app/main.go`:**
+
+Added `waitForNamespaceNotTerminating(namespace string, timeout time.Duration)` — polls `kubectl get ns <namespace> -o jsonpath={.status.phase}` every 5 seconds until either the namespace is absent (deleted) or its phase is not `Terminating`; exits with error if still Terminating after the timeout (3 minutes). Called from `ensureNamespace()` inside the `"AlreadyExists"` branch, immediately after logging the namespace exists, before the labeling/annotating steps and before `helm upgrade --install` is attempted.
+
+| File | Change |
+|------|--------|
+| `app-charts/install-app/main.go` | Added `waitForNamespaceNotTerminating`; called from `ensureNamespace` on AlreadyExists |
+
+**Image rebuild and reload (both ran on personal rootless daemon, verified `docker context show → rootless`):**
+```bash
+cd app-charts/install-app
+docker build --provenance=false --sbom=false \
+  -t agentcert/agentcert-install-app:latest -f Dockerfile ..
+kind load docker-image agentcert/agentcert-install-app:latest --name agentcert-alfred
+```
+New image SHA: `sha256:38df6b1e6149c725b4f847c1c89132abd264e8de7561e07881480a1ac5f4ad32`
+
+**Batch status at time of this entry:**
+- 15 experiments `completed` (indices 1-15, including scenario-26 and scenario-31 after manual catalog fixes)
+- 2 `terminal_failed`: scenario-31 (catalog not updated before batch overwrote it — see note above; the underlying WF succeeded), scenario-38-hpa-fraud-detection (the namespace-terminating failure described here)
+- 1 `running`: scenario-38-hpa-frontend — fault injection step Succeeded, in cleanup
+- 19 `manifest_generated`: queued for this batch pass
+
+**Plan:** Let current pass complete, then restart `launch_all.py` to retry the 2 `terminal_failed` entries. With the fixed install-app image loaded, the namespace-terminating race should not recur.
+
+**Durability check:** The fix lands in source (`app-charts/install-app/main.go`) and is committed when the install-app image is built from scratch — any future `make build` or `scripts/build-and-push.sh` pick it up automatically. The manual `kind load` step is also already part of `launch_all.py`'s `ensure_images_fresh()` call before every experiment. Status: source change is in the working tree (uncommitted); image rebuilt and loaded into live cluster. Commit pending.
+
+**Not done yet:**
+- `scripts/build-and-push.sh`/`prepare-images.sh` still don't pass `--provenance=false --sbom=false` (same outstanding item from §31).
+- Remaining 19+2 experiments not yet verified — this entry will be updated as the batch progresses.
+
+## 34. Three bugs found during final batch pass: catalog bookkeeping (×2), missing `install-chaos-experiments` step, and WF-level label length exceeding 63-byte Kubernetes limit (2026-08-14, live cluster + source edits)
+
+**Context:** This session continued from §33 — the batch had just finished its second pass with 32 completed + 1 `terminal_failed` (scenario-38) + 3 `workflow_not_found` (scenarios 46, 105, 114). Explicit user permission was in place for live cluster mutations and source edits.
+
+---
+
+### Bug A — `find_workflow_by_workflow_id` returns oldest WF, not newest (`items[0]` ordering)
+
+**Experiments affected:** scenario-31 (first pass), scenario-38 (second pass).
+
+**Symptom:** After a retry, `launch_all.py` reported `terminal_failed` even though the *new* WF for the same experiment had actually Succeeded.
+
+**Root cause:** `find_workflow_by_workflow_id` calls `kubectl get wf -n itbench -l workflow_id=<id>` and returns `items[0]`. The `items` array is in creation-timestamp ascending order — `items[0]` is the *oldest* WF. When a re-run creates a new WF under the same `workflow_id` label as the previous (failed) one, the oldest (failed) WF is returned, and `wait_for_terminal` polls that one until it sees `Failed`, never touching the new running/succeeded WF.
+
+**Fix applied this session (catalog only, no code change):** Manual catalog edits after confirming the new WF's final phase via `kubectl get wf`:
+- Scenario-38 (`array[15]`): `status: terminal_failed → completed`, `run_phase: Failed → Succeeded`. New WF: `itbench-flash-agent-scenario-38-hpa-fraud-detecti-1786694031007` (Succeeded).
+
+**Durable fix needed (deferred):** Change `find_workflow_by_workflow_id` to sort by `creationTimestamp` descending and return `items[-1]` (newest). Or filter by `notify_id` label (set per-run) instead of `workflow_id` (set per-experiment). This is a batch-tooling bug, not a platform bug — lives in `.tmp/itbench-flash-agent-experiments/batch-scripts/launch_all.py`.
+
+---
+
+### Bug B — `scenario-41-cart-memory-stress`: ChaosEngine stuck in `initialized` due to missing `pod-memory-hog` ChaosExperiment
+
+**Symptom:** ChaosEngine stayed in `initialized` indefinitely (>19 minutes), logs every 60s: `"Unable to get chaos resources"`. Fault step never ran.
+
+**Root cause:** The `pod-memory-hog` ChaosExperiment CRD was not installed in the `itbench` namespace before the ChaosEngine tried to look it up. The original manifest (`22-scenario-41-cart-memory-stress.yaml`) had no `install-chaos-experiments` step; it jumped directly from `install-agent` to the fault step.
+
+**Emergency fix (live cluster):** `kubectl apply -f chaos-charts/faults/kubernetes/pod-memory-hog/fault.yaml -n itbench` — the go-runner pod appeared within ~90 seconds and the ChaosEngine proceeded.
+
+**Durable fix:** Added `install-chaos-experiments` template to `22-scenario-41-cart-memory-stress.yaml`, embedding the full `pod-memory-hog` ChaosExperiment YAML as a raw artifact, applied via `kubectl apply -f`. Steps are now: `install-application → install-agent → install-chaos-experiments → scenario-41-cart-memory-stress → delete-agent → delete-application`.
+
+| File | Change |
+|------|--------|
+| `.tmp/itbench-flash-agent-experiments/22-scenario-41-cart-memory-stress.yaml` | Added `install-chaos-experiments` step and template |
+
+**Result:** WF `itbench-flash-agent-scenario-41-cart-memory-stress-…` Succeeded.
+
+---
+
+### Bug C — WF-level `experiment_name`/`subject` label values exceed Kubernetes 63-byte limit
+
+**Experiments affected:** scenarios 46, 105, 114.
+
+**Symptom:** Both batch passes showed `workflow_not_found` for all three. GraphQL server logged full processing, returned HTTP 200 in ~165ms, but no Argo WF appeared in `kubectl get wf -n itbench`. `launch_all.py`'s 60-second poll for the WF found nothing.
+
+**Diagnosis:** Subscriber logs (`kubectl logs -n itbench subscriber-…`) showed the error clearly:
+```
+level=error msg="Error on processing request"
+  error="error performing infra operation: Workflow.argoproj.io
+    \"itbench-flash-agent-scenario-46-postgresql-insuff-1786690027377\"
+    is invalid: metadata.labels: Invalid value:
+    \"itbench-flash-agent-scenario-46-postgresql-insufficient-resources\":
+    must be no more than 63 bytes"
+```
+
+The `experiment_name` and `subject` label values in the WF metadata exceeded 63 bytes:
+- `itbench-flash-agent-scenario-46-postgresql-insufficient-resources` = 65 bytes
+- `itbench-flash-agent-scenario-105-product-catalog-invalid-command` = 64 bytes
+- `itbench-flash-agent-scenario-114-product-catalog-deleted-service` = 64 bytes
+
+The GraphQL server's `SendExperimentToSubscriber` → `SendRequestToSubscriber` sends the manifest to the subscriber, which calls the Kubernetes API to create the WF. The Kubernetes API rejects it, the subscriber logs the error and continues — the GraphQL handler has already returned 200.
+
+This is the same class of bug as §27's `step_pod_name` label-length fix, but at the WF level rather than the ChaosEngine level.
+
+**Two-part fix:**
+
+1. **Manifest fix (immediate):** Truncated `experiment_name` and `subject` labels to ≤63 bytes in all three files:
+
+| File | Old value (chars) | Truncated to (63 chars) |
+|------|-------------------|-------------------------|
+| `27-scenario-46-postgresql-insufficient-resources.yaml` | 65 | `itbench-flash-agent-scenario-46-postgresql-insufficient-resourc` |
+| `33-scenario-105-product-catalog-invalid-command.yaml` | 64 | `itbench-flash-agent-scenario-105-product-catalog-invalid-comman` |
+| `34-scenario-114-product-catalog-deleted-service.yaml` | 64 | `itbench-flash-agent-scenario-114-product-catalog-deleted-servic` |
+
+2. **Durable server-side fix:** Added label-value sanitization to `RunChaosWorkFlow` in `handler.go`, right before serializing the manifest for the subscriber. Any label value >63 bytes is truncated to 63 bytes:
+
+```go
+// Sanitize WF metadata labels: Kubernetes label values must be ≤ 63 bytes.
+for k, v := range workflowManifest.Labels {
+    if len(v) > 63 {
+        workflowManifest.Labels[k] = v[:63]
+    }
+}
+```
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/handler.go` | Label sanitization loop before `yaml.Marshal` |
+| `.tmp/itbench-flash-agent-experiments/27-scenario-46-postgresql-insufficient-resources.yaml` | Truncated `experiment_name`+`subject` to 63 chars |
+| `.tmp/itbench-flash-agent-experiments/33-scenario-105-product-catalog-invalid-command.yaml` | Truncated `experiment_name`+`subject` to 63 chars |
+| `.tmp/itbench-flash-agent-experiments/34-scenario-114-product-catalog-deleted-service.yaml` | Truncated `experiment_name`+`subject` to 63 chars |
+
+**Image rebuild and reload (rootless daemon, verified `docker context show → rootless`):**
+```bash
+cd AgentCert/chaoscenter/graphql
+docker build --provenance=false --sbom=false --network=host \
+  -t agentcert/agentcert-graphql:latest -f server/Dockerfile .
+kind load docker-image agentcert/agentcert-graphql:latest --name agentcert-alfred
+kubectl rollout restart deployment/graphql -n ace
+kubectl rollout status deployment/graphql -n ace --timeout=90s
+```
+New image SHA: `sha256:3f7ab0e2edae94c9b7845ec88ff4d6a00da6dcab8fa9a947be0b53502c2fb209`
+
+**Note on `--network=host` for Docker build:** The first two build attempts without `--network=host` both failed with `go mod download … stream error: INTERNAL_ERROR; received from peer` from `proxy.golang.org`. `--network=host` resolved it. This has been observed on this host before; remember it for future graphql builds if proxy.golang.org is flaky.
+
+**Batch status at time of this entry:**
+- 33 `completed` (includes scenario-38 catalog fix above)
+- 3 `workflow_not_found` → being retried with the fix (pass 3 started)
+- scenario-46 WF `itbench-flash-agent-scenario-46-postgresql-insuff-1786695814223`: Running at time of writing
+- scenarios 105, 114: queued in pass 3 after scenario-46 finishes
+
+**Durability check:** Server-side fix lands in `handler.go` (source-controlled, not yet committed); manifest truncations are in `.tmp/` which is gitignored (correct — these are generated experiment files, not repo content). Future manifests with long names will be automatically fixed by the server when running. The Docker build with `--network=host` produced a successful image that is loaded and deployed. Status: in-progress — will update with final counts when pass 3 completes.

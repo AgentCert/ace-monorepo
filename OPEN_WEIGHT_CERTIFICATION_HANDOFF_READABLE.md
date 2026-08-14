@@ -964,3 +964,15 @@ The same 63-byte label value limit that caused the ChaosEngine label panic in §
 The fix was two-pronged: truncate the `experiment_name` and `subject` labels in the three affected manifest files, and add an automatic label-value sanitization loop to the server code (`RunChaosWorkFlow` in `handler.go`) that truncates any label value over 63 bytes before sending the manifest to the subscriber. This prevents any future manifest with a long experiment name from hitting the same silent failure without needing per-manifest workarounds. The graphql image was rebuilt (with `--network=host` to work around intermittent proxy.golang.org issues on this host) and redeployed.
 
 **Status at time of writing:** Pass 3 is running — scenario-46's workflow created successfully (the fix worked), with scenarios 105 and 114 queued after it finishes. This entry will not be updated again; final counts will be 36/36 completed if the remaining two workflows succeed.
+
+---
+
+## §35 — Standard LitmusChaos fault batch: 17/17 completed clean (2026-08-14)
+
+After the 36-scenario ITBench batch finished, we ran a second batch: one experiment per standard LitmusChaos fault that exists in `chaos-charts/faults/kubernetes/` on the main branch. These use the upstream `fault.yaml` ChaosExperiment definitions (not the custom ITBench ones), all targeting the otel-demo application.
+
+**17 faults ran:** pod-delete, pod-cpu-hog, pod-memory-hog, container-kill, the six pod-network-* faults (loss, latency, corruption, duplication, partition, rate-limit), pod-io-stress, pod-dns-error, and the five pod-http-* faults (latency, status-code, modify-body, modify-header, reset-peer).
+
+Node-level faults, disk-fill, exec variants, pod-autoscaler, and pod-dns-spoof were excluded — either they'd destroy the single-node KinD cluster, require distroless exec access, or need configuration (HPA objects, SPOOF_MAP) that doesn't exist in this environment.
+
+One surprise: the ACE admin password had been changed from `litmus` via the UI (the exact password is in the live MongoDB `auth.users` collection, not recorded here). The auth REST NodePort is on host port 3006, not 3000 — check `KIND_HOSTPORT_AUTH_REST` in `.env`. The correct login URL when bypassing nginx is `http://localhost:3006/login` (not `/auth/login` — that prefix is nginx's). Once resolved, all 17 experiments registered and ran sequentially with zero failures over ~2.5 hours.

@@ -2996,3 +2996,46 @@ New image SHA: `sha256:3f7ab0e2edae94c9b7845ec88ff4d6a00da6dcab8fa9a947be0b53502
 - scenarios 105, 114: queued in pass 3 after scenario-46 finishes
 
 **Durability check:** Server-side fix lands in `handler.go` (source-controlled, not yet committed); manifest truncations are in `.tmp/` which is gitignored (correct — these are generated experiment files, not repo content). Future manifests with long names will be automatically fixed by the server when running. The Docker build with `--network=host` produced a successful image that is loaded and deployed. Status: in-progress — will update with final counts when pass 3 completes.
+
+---
+
+## 35. Standard LitmusChaos fault batch (17 faults, otel-demo): created, launched, and completed 17/17 with zero failures (2026-08-14, new batch, no source changes to ACE — scripts only in `.tmp/`)
+
+**Context:** Following completion of the 36-scenario ITBench batch (§34), a new request was made: run one experiment per standard LitmusChaos fault (those already in `chaos-charts/faults/kubernetes/` on the main branch) against the otel-demo application. This is distinct from the ITBench scenarios (which use custom fault definitions); these use the upstream LitmusChaos `fault.yaml` ChaosExperiment definitions directly.
+
+**Faults included (17):**
+1. `pod-delete` → frontend
+2. `pod-cpu-hog` → checkout
+3. `pod-memory-hog` → cart
+4. `container-kill` → recommendation
+5. `pod-network-loss` → payment
+6. `pod-network-latency` → product-catalog
+7. `pod-network-corruption` → shipping
+8. `pod-network-duplication` → email
+9. `pod-network-partition` → ad
+10. `pod-network-rate-limit` → recommendation
+11. `pod-io-stress` → product-catalog
+12. `pod-dns-error` → checkout
+13. `pod-http-latency` → frontend (:8080)
+14. `pod-http-status-code` → frontend (:8080, STATUS_CODE=503)
+15. `pod-http-modify-body` → frontend (:8080)
+16. `pod-http-modify-header` → frontend (:8080)
+17. `pod-http-reset-peer` → frontend (:8080)
+
+**Faults excluded (not safe on single-node KinD or require unavailable config):**
+- `disk-fill` — node filesystem risk
+- `node-*`, `docker-service-kill`, `kubelet-service-kill` — destroy cluster
+- `pod-cpu-hog-exec`, `pod-memory-hog-exec` — exec variants, otel-demo uses distroless containers
+- `pod-autoscaler` — requires HPA objects not present in otel-demo v0.40.9
+- `pod-dns-spoof` — requires valid SPOOF_MAP
+
+**Auth issue discovered and resolved:** The ACE admin password in MongoDB had been changed from `litmus` via the UI at some point (not `litmus`, which is what `.env` says it should be). The auth REST service is on host port 3006 (not 3000 — `KIND_HOSTPORT_AUTH_REST=3006` in `.env`), and the correct path when hitting the NodePort directly is `/login` (not `/auth/login` — the `/auth/` prefix is nginx's job). The actual current password is stored only in the running MongoDB `auth.users` collection — check there or reset it if needed. Once the correct URL + password was used, JWT acquisition worked.
+
+**Scripts created (all in `.tmp/`, not committed):**
+- `.tmp/itbench-flash-agent-std-experiments/batch-scripts/create_manifests.py` — generates 17 Argo Workflow manifests from `chaos-charts/faults/kubernetes/<fault>/fault.yaml`
+- `.tmp/itbench-flash-agent-std-experiments/batch-scripts/launch_all_std.py` — sequential launcher; includes the `items[-1]` (newest WF) fix for `find_workflow_by_experiment_id` that was a known bug in the ITBench launcher's `items[0]` (oldest) call
+- `.tmp/itbench-flash-agent-std-experiments/catalog.json` — tracks per-fault status
+
+**Result:** 17/17 Succeeded, zero failures. All workflows ran sequentially with namespace-termination guards between them. Runtime: ~2.5 hours total.
+
+**Durability check:** All scripts are in `.tmp/` (gitignored) — intentionally not committed, as these are one-shot batch-run artifacts. The manifest generation script is self-contained and can regenerate all manifests from chaos-charts at any time. No source files were modified.

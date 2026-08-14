@@ -9,12 +9,14 @@
 #   INSTALL_APP_IMAGE_SOURCE    dockerhub | jfrog | local
 #   INSTALL_AGENT_IMAGE_SOURCE  dockerhub | jfrog | local
 #   LITMUS_IMAGES_SOURCE        dockerhub | local
+#   SRE_AGENTS_IMAGE_SOURCE     dockerhub | local
 #   JFROG_HOST, JFROG_REGISTRY_PATH, JFROG_USER, JFROG_TOKEN
 #   KIND_CLUSTER_NAME, ACE_INSTANCE_NAME
 #   APP_CHARTS_ROOT, AGENT_CHARTS_ROOT  (set by setup.sh to absolute paths)
 #
 # For "local":
 #   install-app / install-agent  — docker build from source + kind load
+#   sre-agent-comprehensive / sre-agent-crewai — build from agents/ + kind load
 #   litmuschaos images           — docker pull from Docker Hub + kind load
 # For "jfrog":
 #   Creates a docker-registry Secret and patches the argo-chaos ServiceAccount
@@ -42,10 +44,12 @@ cur() { grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2-; }
 APP_SRC="$(cur INSTALL_APP_IMAGE_SOURCE)"
 AGENT_SRC="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
 LITMUS_SRC="$(cur LITMUS_IMAGES_SOURCE)"
+SRE_AGENTS_SRC="$(cur SRE_AGENTS_IMAGE_SOURCE)"
 
 APP_SRC="${APP_SRC:-dockerhub}"
 AGENT_SRC="${AGENT_SRC:-dockerhub}"
 LITMUS_SRC="${LITMUS_SRC:-dockerhub}"
+SRE_AGENTS_SRC="${SRE_AGENTS_SRC:-local}"
 
 JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
 JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
@@ -65,11 +69,24 @@ fi
 echo
 echo -e "${CYAN}=======================================================${NC}"
 echo -e "${CYAN}  Preparing experiment images${NC}"
-echo -e "${CYAN}  install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}${NC}"
+echo -e "${CYAN}  install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}${NC}"
 echo -e "${CYAN}=======================================================${NC}"
 echo
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+# ACE_ALREADY_BUILT_IMAGES: space-separated image tags setup.sh's own build
+# loop already built + kind-loaded THIS run (set when "a" — build ALL locally
+# — was chosen, which also sets INSTALL_APP_IMAGE_SOURCE/INSTALL_AGENT_IMAGE_
+# SOURCE=local, triggering this script right afterward). Without this check,
+# build_and_load_install_app/agent below would rebuild + reload the exact
+# same image from scratch a second time, every "build ALL locally" run.
+# Unset when this script is run standalone (its normal, intended use) — every
+# branch below then behaves exactly as it always has.
+ALREADY_BUILT_IMAGES=" ${ACE_ALREADY_BUILT_IMAGES:-} "
+image_already_built() {
+    [[ "${ALREADY_BUILT_IMAGES}" == *" $1 "* ]]
+}
 
 kind_load() {
     local img="$1"
@@ -99,6 +116,10 @@ build_and_load_install_app() {
     local dockerfile="${APP_CHARTS_ROOT}/install-app/Dockerfile"
     local ctx="${APP_CHARTS_ROOT}/install-app"
     local img="agentcert/agentcert-install-app:latest"
+    if image_already_built "${img}"; then
+        ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
+        return 0
+    fi
     if [[ ! -f "${dockerfile}" ]]; then
         warn "Dockerfile not found: ${dockerfile} — skipping install-app local build"
         return 1
@@ -113,12 +134,35 @@ build_and_load_install_agent() {
     local dockerfile="${AGENT_CHARTS_ROOT}/install-agent/Dockerfile"
     local ctx="${AGENT_CHARTS_ROOT}/install-agent"
     local img="agentcert/agentcert-install-agent:latest"
+    if image_already_built "${img}"; then
+        ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
+        return 0
+    fi
     if [[ ! -f "${dockerfile}" ]]; then
         warn "Dockerfile not found: ${dockerfile} — skipping install-agent local build"
         return 1
     fi
     info "Building ${img} from ${ctx} …"
     docker build -t "${img}" -f "${dockerfile}" "${ctx}"
+    ok "Built ${img}"
+    kind_load "${img}"
+}
+
+build_and_load_sre_agent() {
+    local name="$1"   # e.g. sre-agent-comprehensive
+    local img="$2"    # e.g. agentcert/sre-agent-comprehensive:latest
+    local ctx="${REPO_ROOT}/agents/${name}"
+    local dockerfile="${ctx}/Dockerfile"
+    if image_already_built "${img}"; then
+        ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
+        return 0
+    fi
+    if [[ ! -f "${dockerfile}" ]]; then
+        warn "Dockerfile not found: ${dockerfile} — skipping ${name} local build"
+        return 1
+    fi
+    info "Building ${img} from ${ctx} …"
+    docker build --network=host -t "${img}" -f "${dockerfile}" "${ctx}"
     ok "Built ${img}"
     kind_load "${img}"
 }
@@ -135,22 +179,65 @@ pull_and_load_litmus_images() {
         "alexeiled/stress-ng:latest-ubuntu"
         "gaiadocker/iproute2:latest"
     )
-    for img in "${images[@]}"; do
-        info "Pulling ${img} from Docker Hub …"
-        if docker pull "${img}"; then
-            ok "Pulled ${img}"
-            kind_load "${img}"
 
-            # Also load Scarf-proxy alias for go-runner (referenced in chaos-charts source YAMLs)
-            if [[ "${img}" == "litmuschaos/go-runner:latest" ]]; then
-                local scarf="litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest"
-                docker tag "${img}" "${scarf}"
-                kind_load "${scarf}"
+    # Each image pulls (network-bound) and kind-loads independently of every
+    # other, so serializing all 6 was pure wall-clock waste -- bounded rather
+    # than unbounded for the same shared-host reason as setup.sh's build loop
+    # (see ACE_BUILD_PARALLELISM there); override via ACE_PULL_PARALLELISM.
+    # `kind load docker-image` against the same node concurrently from
+    # multiple processes isn't officially documented as safe, but containerd's
+    # content store is content-addressed with its own internal locking and
+    # this is a common pattern in CI pipelines; a failed load here was already
+    # a non-fatal warning before this change, so the worst case is unchanged.
+    local parallelism="${ACE_PULL_PARALLELISM:-4}"
+    local results_dir; results_dir="$(mktemp -d "${REPO_ROOT}/.tmp/litmus-pull-results.XXXXXX" 2>/dev/null || mktemp -d)"
+    local log_dir="${REPO_ROOT}/.tmp/litmus-pull-logs"
+    rm -rf "${log_dir}"; mkdir -p "${log_dir}"
+
+    _pull_and_load_one() {
+        local img="$1" idx="$2"
+        {
+            echo "Pulling ${img} from Docker Hub …"
+            if docker pull "${img}"; then
+                echo "Pulled ${img}"
+                kind_load "${img}"
+                if [[ "${img}" == "litmuschaos/go-runner:latest" ]]; then
+                    local scarf="litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest"
+                    docker tag "${img}" "${scarf}"
+                    kind_load "${scarf}"
+                fi
+                echo ok > "${results_dir}/${idx}.status"
+            else
+                echo "Pull failed for ${img}"
+                echo failed > "${results_dir}/${idx}.status"
             fi
-        else
-            warn "Pull failed for ${img}"
+        } >"${log_dir}/${idx}.log" 2>&1
+    }
+
+    info "Pulling ${#images[@]} litmus helper image(s), up to ${parallelism} at a time — logs: ${log_dir}/"
+    local idx=0 running=0
+    for img in "${images[@]}"; do
+        _pull_and_load_one "${img}" "${idx}" &
+        idx=$(( idx + 1 ))
+        running=$(( running + 1 ))
+        if (( running >= parallelism )); then
+            wait -n
+            running=$(( running - 1 ))
         fi
     done
+    wait
+    unset -f _pull_and_load_one
+
+    local i status
+    for (( i = 0; i < idx; i++ )); do
+        status="$(cat "${results_dir}/${i}.status" 2>/dev/null || echo missing)"
+        if [[ "${status}" == "ok" ]]; then
+            ok "Pulled + loaded: ${images[i]}"
+        else
+            warn "Failed: ${images[i]} — log: ${log_dir}/${i}.log"
+        fi
+    done
+    rm -rf "${results_dir}"
 }
 
 # ─── jfrog: create pull secret + patch service account ───────────────────────
@@ -238,6 +325,18 @@ case "${LITMUS_SRC}" in
         ;;
     dockerhub)
         info "litmuschaos helpers: Docker Hub — no action needed (pulled at runtime)"
+        ;;
+esac
+
+case "${SRE_AGENTS_SRC}" in
+    local)
+        info "sre-agent-comprehensive: local build"
+        build_and_load_sre_agent "sre-agent-comprehensive" "agentcert/sre-agent-comprehensive:latest" && _did_something=1
+        info "sre-agent-crewai: local build"
+        build_and_load_sre_agent "sre-agent-crewai" "agentcert/sre-agent-crewai:latest" && _did_something=1
+        ;;
+    dockerhub)
+        info "sre-agents: Docker Hub — no action needed (pulled at runtime)"
         ;;
 esac
 

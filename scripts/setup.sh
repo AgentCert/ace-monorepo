@@ -12,10 +12,35 @@ set -euo pipefail
 # Idempotent: re-run any time. It reads your current .env (or .env.example) for
 # defaults, so pressing Enter keeps the existing value. Nothing is committed —
 # .env is gitignored.
+#
+#   ./scripts/setup.sh --rootless-docker            (combine with --setup, the default)
+#   ./scripts/setup.sh --restart --rootless-docker
+#
+# Modifier flag, not a standalone action: bootstraps a private, per-user
+# rootless Docker daemon and switches the Docker CLI's default context to it
+# — so this checkout's containers/images/volumes/KinD cluster land under
+# $HOME/.local/share/docker instead of the shared host daemon's data-root —
+# then falls straight through into the wizard (or --restart) under that new
+# context, no separate follow-up invocation needed. No sudo, and zero impact
+# on other users' containers on this shared host — see CLAUDE.md section 6,
+# "Personal rootless Docker (avoiding the shared host's data-root)".
+#
+# Plain `./scripts/setup.sh` (--setup, no flag) asks this as a y/N question
+# instead, right at the start, before anything else. `--restart` never asks —
+# it skips all prompts by design — so pass the flag explicitly there.
 # =============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# `pwd -P` (not plain `pwd`) is required here: plain `pwd` returns whatever
+# symlink alias the CWD was reached through, while the KinD ownership marker
+# (assert_kind_cluster_ownership below) records/compares REPO_ROOT as a
+# literal string. On hosts where the repo is reachable through more than one
+# symlinked path (e.g. /home/<user>/... symlinked to
+# /Innovation/home/<user>/...), running this script through a different alias
+# than whatever created the cluster would make that comparison see two
+# spellings of the SAME checkout and wrongly refuse it as foreign. See the
+# matching fix/comment in scripts/start-local-services.sh.
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -P "${SCRIPT_DIR}/.." && pwd -P)"
 ENV_FILE="${REPO_ROOT}/.env"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
@@ -43,21 +68,10 @@ warn() { echo -e "${YELLOW}!${NC} $*"; }
 # shellcheck source=scripts/check-prerequisites.sh
 source "${SCRIPT_DIR}/check-prerequisites.sh"
 
-# --- Invocation mode ----------------------------------------------------------
-#   --setup    (default) full first-time wizard: prompts, writes .env, deploys
-#   --restart  skip all prompts and .env edits; just re-apply the stack
-SETUP_MODE="setup"
-BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
-for _arg in "$@"; do
-    case "$_arg" in
-        --restart)     SETUP_MODE="restart" ;;
-        --setup)       SETUP_MODE="setup"   ;;
-        --local-build) BUILD_MODE="local"   ;;
-    esac
-done
-unset _arg
-
 # --- prep .env -------------------------------------------------------------
+# Moved ahead of the rootless Docker bootstrap (below) so it can read/write
+# .env (DOCKER_HOST_SOCK) even on a brand-new checkout that has never run the
+# full wizard yet.
 if [[ ! -f "${EXAMPLE_FILE}" ]]; then
     echo "ERROR: ${EXAMPLE_FILE} not found — run from a full checkout." >&2
     exit 1
@@ -69,8 +83,379 @@ else
     ok "Using existing .env (press Enter at each prompt to keep current values)"
 fi
 
-# current value of KEY in .env (empty if unset)
+# current value of KEY in .env (empty if unset). Defined here (ahead of
+# --rootless-docker below) so that action can read/write .env too.
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
+
+# Kind cluster names (and every Docker/K8s resource name derived from
+# ACE_INSTANCE_NAME) must be RFC-1123 safe: lowercase alphanumeric + hyphen
+# only, short enough that "agentcert-<name>-control-plane" fits the ~64-char
+# Linux hostname limit kind's node containers use. A raw `id -un` (or a
+# hand-edited .env value) can contain other characters or run long;
+# sanitize instead of letting `kind create cluster` fail on it.
+sanitize_instance_name() {
+    local clean
+    clean="$(printf '%s' "$1" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -c 'a-z0-9-' '-' \
+        | tr -s '-' \
+        | sed -e 's/^-*//' -e 's/-*$//' \
+        | cut -c1-20 \
+        | sed -e 's/-*$//')"
+    echo "${clean:-instance}"
+}
+
+# --- Invocation mode ----------------------------------------------------------
+#   --setup            (default) full first-time wizard: prompts, writes .env, deploys
+#   --restart          skip all prompts and .env edits; just re-apply the stack
+#   --rootless-docker   modifier, see header comment above; runs before --setup/--restart, does not exit
+SETUP_MODE="setup"
+BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
+ROOTLESS_DOCKER_ACTION=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --restart)         SETUP_MODE="restart" ;;
+        --setup)           SETUP_MODE="setup"   ;;
+        --local-build)     BUILD_MODE="local"   ;;
+        --rootless-docker) ROOTLESS_DOCKER_ACTION=1 ;;
+    esac
+done
+unset _arg
+
+# --- Rootless Docker bootstrap (opt-in modifier — runs before --setup/--restart) --
+# Sets up a private, per-user Docker daemon via dockerd-rootless-setuptool.sh
+# and switches the CLI's default context to it. Rationale: the shared system
+# dockerd on this host backs EVERY user's containers/images/volumes with one
+# data-root (typically /var/lib/docker on the host's root filesystem, not
+# /Innovation — verify with `docker info | grep "Docker Root Dir"`).
+# Relocating that data-root means stopping the daemon for the whole host,
+# which stops every other user's running containers too — see CLAUDE.md
+# section 0. Rootless mode sidesteps that: a private daemon, socket, and
+# data-root scoped to this OS user (defaults to $HOME/.local/share/docker),
+# set up and torn down with zero sudo and zero effect on the shared daemon or
+# anyone else's resources. Docker CLI context selection (`docker context
+# use`) persists in ~/.docker/config.json, so every later `docker`/`kind`/
+# `docker compose` invocation — from this script, start-local-services.sh,
+# compose-up-guard.sh, or a fresh shell — transparently targets the rootless
+# daemon afterward.
+#
+# One thing context-switching does NOT cover: docker-compose.yml's
+# cluster-init service bind-mounts the Docker socket by host path
+# (`/var/run/docker.sock`) so `kind create` can run inside that container.
+# A bind-mount source is a literal filesystem path, not context-aware — left
+# alone it would keep resolving to the SHARED root daemon's socket even after
+# `docker context use rootless`, silently defeating the whole point. This
+# block writes the rootless daemon's real socket path to .env as
+# DOCKER_HOST_SOCK, and docker-compose.yml reads that instead of hardcoding
+# the path (see the cluster-init service).
+#
+# Also generates a personal CDI (Container Device Interface) GPU spec under
+# $HOME/.config/cdi and a per-user ~/.config/docker/daemon.json pointing only
+# at that directory, when an NVIDIA GPU + nvidia-ctk are present — this is
+# what lets Ollama's `devices: ["nvidia.com/gpu=all"]` request (see
+# docker-compose.yml) resolve under the rootless daemon. Deliberately never
+# touches the shared /etc/cdi or /etc/nvidia-container-runtime/config.toml —
+# those affect every other user's containers on this host too.
+#
+# Idempotent: safe to re-run; skips straight to the context switch if the
+# rootless daemon is already installed and running.
+#
+# When --rootless-docker wasn't passed on the command line, the first-time
+# wizard (--setup) asks this as a plain y/N question instead — before
+# anything else, so a "yes" here still runs ahead of the .env backfills below
+# (KIND_CLUSTER_NAME detection etc.) just like the flag path does. --restart
+# never asks (it skips all prompts by design); pass the flag explicitly if
+# you want rootless there.
+if [[ "${ROOTLESS_DOCKER_ACTION}" -ne 1 && "${SETUP_MODE}" == "setup" ]]; then
+    echo
+    echo -e "${BOLD}Personal rootless Docker?${NC} ${DIM}(sudo-free daemon isolated from other users on this shared host — see CLAUDE.md §6)${NC}"
+    read -rp "$(echo -e "  Set up and use rootless Docker for this checkout? ${DIM}[y/N]${NC}: ")" _rootless_ans
+    [[ "${_rootless_ans,,}" == y* ]] && ROOTLESS_DOCKER_ACTION=1
+    unset _rootless_ans
+fi
+
+if [[ "${ROOTLESS_DOCKER_ACTION}" -eq 1 ]]; then
+    echo
+    echo -e "${CYAN}=======================================================${NC}"
+    echo -e "${CYAN}  Rootless Docker setup (personal, sudo-free)${NC}"
+    echo -e "${CYAN}=======================================================${NC}"
+    echo
+
+    if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
+        echo "ERROR: dockerd-rootless-setuptool.sh not found (docker-ce-rootless-extras package)." >&2
+        echo "ERROR: this is a one-time host-admin install (needs sudo): sudo apt install -y docker-ce-rootless-extras" >&2
+        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+        exit 1
+    fi
+    if ! grep -q "^$(id -un):" /etc/subuid 2>/dev/null || ! grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
+        echo "ERROR: no subuid/subgid range provisioned for $(id -un) (required for rootless mode)." >&2
+        echo "ERROR: ask a host admin to run: sudo usermod --add-subuids 200000-265535 --add-subgids 200000-265535 $(id -un)" >&2
+        exit 1
+    fi
+    # newuidmap/newgidmap (uidmap package) are a separate, also-sudo-required
+    # prerequisite from docker-ce-rootless-extras above — RootlessKit needs them
+    # to apply the subuid/subgid mapping just verified. Without this check,
+    # dockerd-rootless-setuptool.sh install (below) fails on it deep inside the
+    # third-party tool with a raw, non-ACE-styled error instead of the clean
+    # early-exit pattern used by the other checks here.
+    if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
+        echo "ERROR: newuidmap/newgidmap not found (uidmap package) — required for rootless Docker." >&2
+        echo "ERROR: this is a one-time host-admin install (needs sudo): sudo apt install -y uidmap" >&2
+        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+        exit 1
+    fi
+
+    # MTU fix, checked/applied on EVERY run (not just first install), matching
+    # the linger pattern below. dockerd-rootless.sh's own default for the
+    # slirp4netns network driver is an unconditional 65520, regardless of the
+    # host's actual interface MTU (see /usr/bin/dockerd-rootless.sh, "if [ -z
+    # "$mtu" ]" block). That default assumes slirp4netns's userspace
+    # fragmentation absorbs the mismatch transparently; in practice, on any
+    # network where routers/firewalls drop ICMP "fragmentation needed"
+    # messages (common), TCP flows through the tap device silently blackhole
+    # instead of erroring at the real 1500-ish MTU hop, rather than just
+    # running slower. Symptom: large image/model layers complete (masked by
+    # retries/reconnects), a small layer or manifest request hangs
+    # indefinitely mid-pull. Detected fresh from the live default route on
+    # every run so this stays correct if the checkout (or this script) moves
+    # to a different host/network — never hardcode a specific MTU value here.
+    _rootless_iface="$(ip -o route get 8.8.8.8 2>/dev/null | grep -oP '(?<=dev )\S+' | head -1)"
+    _rootless_mtu="$(ip -o link show dev "${_rootless_iface}" 2>/dev/null | grep -oP '(?<=mtu )\d+' | head -1)"
+    _rootless_mtu="${_rootless_mtu:-1500}"
+    _rootless_dropin_dir="${HOME}/.config/systemd/user/docker.service.d"
+    _rootless_dropin="${_rootless_dropin_dir}/10-ace-mtu.conf"
+    _rootless_dropin_desired="[Service]
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_MTU=${_rootless_mtu}
+"
+    _rootless_mtu_changed=0
+    if [[ ! -f "${_rootless_dropin}" ]] || [[ "$(cat "${_rootless_dropin}" 2>/dev/null)" != "${_rootless_dropin_desired}" ]]; then
+        mkdir -p "${_rootless_dropin_dir}"
+        printf '%s' "${_rootless_dropin_desired}" > "${_rootless_dropin}"
+        _rootless_mtu_changed=1
+        systemctl --user daemon-reload
+        say "Pinned rootless Docker MTU to ${_rootless_mtu} (detected from ${_rootless_iface:-default route}) — overrides dockerd-rootless.sh's slirp4netns default of 65520, which blackholes on networks that drop ICMP frag-needed."
+    fi
+    unset _rootless_dropin_desired
+
+    if systemctl --user is-active --quiet docker 2>/dev/null; then
+        if [[ "${_rootless_mtu_changed}" -eq 1 ]]; then
+            say "Restarting rootless Docker to apply the corrected MTU..."
+            systemctl --user restart docker
+            for _i in $(seq 1 30); do
+                systemctl --user is-active --quiet docker 2>/dev/null && break
+                sleep 1
+            done
+            unset _i
+            ok "Rootless Docker restarted with MTU=${_rootless_mtu}"
+        else
+            ok "Rootless Docker already running for $(id -un)"
+        fi
+    else
+        say "Installing rootless Docker for $(id -un) — no sudo, doesn't touch the shared daemon..."
+        # --force: dockerd-rootless-setuptool.sh refuses by default when a
+        # rootful daemon is already reachable, assuming that's a mistake. On
+        # this shared host it's the opposite of a mistake — the rootful
+        # daemon stays up for every other user's checkout, and this rootless
+        # one is meant to run alongside it, not replace it. Without --force
+        # this fails identically on every rerun since rootful Docker is
+        # always present here, not just on a first attempt.
+        # install --force regenerates the base docker.service unit but never
+        # touches docker.service.d/ drop-ins, so the MTU pin above survives it.
+        dockerd-rootless-setuptool.sh install --force
+        systemctl --user enable --now docker
+        ok "Rootless Docker installed and running (MTU=${_rootless_mtu})"
+    fi
+    unset _rootless_iface _rootless_mtu _rootless_mtu_changed
+
+    # Linger is a hard requirement, not a nice-to-have: without it, the rootless
+    # daemon -- and everything running under it (KinD nodes, Ollama) -- dies the
+    # moment this login session ends, silently killing anything mid-run (e.g. an
+    # N=30 certification sweep). Verified on EVERY run (not just first install),
+    # so a host where a previous enable-linger attempt silently failed doesn't
+    # keep reporting success on every subsequent re-run.
+    if command -v loginctl >/dev/null 2>&1 && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
+        loginctl enable-linger "$(id -un)" 2>/dev/null || true
+        if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
+            echo "ERROR: linger is not enabled for $(id -un) — the rootless daemon would stop at logout, silently killing anything running under it (KinD cluster, Ollama, an in-progress N=30 run)." >&2
+            echo "ERROR: this is a one-time host-admin step (needs sudo): sudo loginctl enable-linger $(id -un)" >&2
+            echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+            exit 1
+        fi
+    fi
+
+    # Pinned containerd (personal, not the system package) — works around a
+    # confirmed upstream regression in containerd >=2.3.0: the shim bootstrap
+    # handshake leaks a raw, un-decoded protobuf Address message where a plain
+    # "unix://..." string is expected, so EVERY container fails to start with
+    # "failed to create TTRPC connection: unsupported protocol:Yunix" (the
+    # "Y" is literally a protobuf length-prefix byte, 0x59, misread as text —
+    # not corruption). Reported independently against containerd 2.3.0-2.3.3
+    # on Arch/EndeavourOS/Gentoo; documented workaround is the 2.2.x line.
+    # There is no newer fixed release to upgrade to yet.
+    #
+    # dockerd resolves "containerd" (which in turn resolves
+    # "containerd-shim-runc-v2") via a plain $PATH lookup — visible in any
+    # running rootless daemon's process tree as `containerd --config <path>`
+    # with no absolute path. That means this can be fixed for ONLY this
+    # personal daemon by putting a matched, known-good containerd + shim pair
+    # ahead of /usr/bin in this unit's PATH, via a drop-in that sorts after
+    # 10-ace-mtu.conf (systemd: the later Environment=KEY=... for a given key
+    # wins). The system containerd.io package — and therefore the SHARED root
+    # daemon every other user on this host relies on — is never touched.
+    # Self-healing: if the system containerd is later fixed/updated past the
+    # buggy range, this removes its own pin and reverts to it automatically.
+    _civ_pin_version="2.2.6"
+    _civ_arch="$(uname -m)"; case "${_civ_arch}" in x86_64) _civ_arch="amd64" ;; aarch64) _civ_arch="arm64" ;; esac
+    _civ_pin_dir="${HOME}/.local/share/ace-rootless-docker/containerd-pin"
+    _civ_sys_ver="$(containerd --version 2>/dev/null | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    _civ_sys_major="${_civ_sys_ver%%.*}"
+    _civ_sys_rest="${_civ_sys_ver#*.}"
+    _civ_sys_minor="${_civ_sys_rest%%.*}"
+    _civ_dropin_dir="${HOME}/.config/systemd/user/docker.service.d"
+    _civ_dropin="${_civ_dropin_dir}/20-ace-containerd-pin.conf"
+
+    if [[ -n "${_civ_sys_major}" && -n "${_civ_sys_minor}" && "${_civ_sys_major}" -eq 2 && "${_civ_sys_minor}" -ge 3 ]]; then
+        _civ_dropin_desired="[Service]
+Environment=PATH=${_civ_pin_dir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+"
+        _civ_need_restart=0
+        if [[ ! -x "${_civ_pin_dir}/bin/containerd" ]] || [[ "$("${_civ_pin_dir}/bin/containerd" --version 2>/dev/null | grep -oP 'v\K[0-9.]+' | head -1)" != "${_civ_pin_version}" ]]; then
+            say "System containerd is ${_civ_sys_ver} — affected by a confirmed upstream shim-bootstrap regression (breaks ALL container starts, including KinD). Pinning a personal containerd ${_civ_pin_version} for this rootless daemon only (system package untouched)..."
+            mkdir -p "${_civ_pin_dir}/bin"
+            _civ_tmp="$(mktemp -d)"
+            _civ_asset="containerd-${_civ_pin_version}-linux-${_civ_arch}.tar.gz"
+            _civ_url="https://github.com/containerd/containerd/releases/download/v${_civ_pin_version}/${_civ_asset}"
+            if curl -fsSL -o "${_civ_tmp}/${_civ_asset}" "${_civ_url}" \
+               && curl -fsSL -o "${_civ_tmp}/${_civ_asset}.sha256sum" "${_civ_url}.sha256sum" \
+               && (cd "${_civ_tmp}" && sha256sum -c "${_civ_asset}.sha256sum"); then
+                tar -xzf "${_civ_tmp}/${_civ_asset}" -C "${_civ_tmp}"
+                install -m 755 "${_civ_tmp}/bin/containerd" "${_civ_tmp}/bin/containerd-shim-runc-v2" "${_civ_pin_dir}/bin/"
+                ok "Downloaded and checksum-verified containerd ${_civ_pin_version} (${_civ_arch}) to ${_civ_pin_dir}/bin"
+            else
+                warn "Failed to download/verify pinned containerd ${_civ_pin_version} — leaving system containerd ${_civ_sys_ver} in place. KinD cluster creation under this rootless daemon will likely fail with 'unsupported protocol:Yunix' until this is resolved."
+            fi
+            rm -rf "${_civ_tmp}"
+            unset _civ_tmp _civ_asset _civ_url
+        fi
+        if [[ -x "${_civ_pin_dir}/bin/containerd" ]]; then
+            if [[ ! -f "${_civ_dropin}" ]] || [[ "$(cat "${_civ_dropin}" 2>/dev/null)" != "${_civ_dropin_desired}" ]]; then
+                mkdir -p "${_civ_dropin_dir}"
+                printf '%s' "${_civ_dropin_desired}" > "${_civ_dropin}"
+                _civ_need_restart=1
+                systemctl --user daemon-reload
+            fi
+            if [[ "${_civ_need_restart}" -eq 1 ]]; then
+                say "Restarting rootless Docker to pick up pinned containerd ${_civ_pin_version}..."
+                systemctl --user restart docker
+                for _i in $(seq 1 30); do
+                    systemctl --user is-active --quiet docker 2>/dev/null && break
+                    sleep 1
+                done
+                unset _i
+                ok "Rootless Docker now running on personal containerd ${_civ_pin_version} (system containerd.io ${_civ_sys_ver} untouched, shared daemon unaffected)"
+            else
+                ok "Rootless Docker already pinned to containerd ${_civ_pin_version}"
+            fi
+        fi
+        unset _civ_dropin_desired _civ_need_restart
+    elif [[ -f "${_civ_dropin}" ]]; then
+        say "System containerd ${_civ_sys_ver} is no longer in the buggy >=2.3.0 range — removing this checkout's containerd pin and reverting to it..."
+        rm -f "${_civ_dropin}"
+        systemctl --user daemon-reload
+        systemctl --user restart docker
+        for _i in $(seq 1 30); do
+            systemctl --user is-active --quiet docker 2>/dev/null && break
+            sleep 1
+        done
+        unset _i
+        ok "Reverted to system containerd ${_civ_sys_ver}"
+    fi
+    unset _civ_pin_version _civ_arch _civ_pin_dir _civ_sys_ver _civ_sys_major _civ_sys_minor _civ_sys_rest _civ_dropin_dir _civ_dropin
+
+    docker context use rootless >/dev/null
+    ok "Docker CLI default context switched to 'rootless' — persists across shells."
+    say "   (switch back any time with: docker context use default)"
+
+    _rootless_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "${HOME}/.local/share/docker")"
+    echo
+    say "  Data root: ${_rootless_root}"
+    df -h "${_rootless_root}" 2>/dev/null | tail -1
+    unset _rootless_root
+
+    # DOCKER_HOST_SOCK: real host-side path to the rootless daemon's socket.
+    # docker-compose.yml's cluster-init service bind-mounts this instead of a
+    # hardcoded /var/run/docker.sock — see comment above.
+    echo
+    _rootless_sock="$(docker context inspect rootless --format '{{.Endpoints.docker.Host}}' 2>/dev/null)"
+    _rootless_sock="${_rootless_sock#unix://}"
+    if [[ -n "${_rootless_sock}" ]]; then
+        if grep -q '^DOCKER_HOST_SOCK=' "${ENV_FILE}" 2>/dev/null; then
+            sed -i "s|^DOCKER_HOST_SOCK=.*|DOCKER_HOST_SOCK=${_rootless_sock}|" "${ENV_FILE}"
+        else
+            echo "DOCKER_HOST_SOCK=${_rootless_sock}" >> "${ENV_FILE}"
+        fi
+        ok "Set DOCKER_HOST_SOCK=${_rootless_sock} in .env — cluster-init's kind create will now target this daemon, not the shared root one."
+    else
+        warn "Could not detect the rootless socket path automatically — DOCKER_HOST_SOCK left unset (docker-compose.yml falls back to /var/run/docker.sock, the SHARED root daemon)."
+        warn "Set it manually: check 'docker context inspect rootless --format \"{{.Endpoints.docker.Host}}\"' and add DOCKER_HOST_SOCK=<path> to .env"
+    fi
+    unset _rootless_sock
+
+    # Personal CDI GPU spec (opt-in, only if an NVIDIA GPU + nvidia-ctk exist).
+    # Writes only under $HOME — never touches /etc/cdi or
+    # /etc/nvidia-container-runtime/config.toml (shared, affects other users).
+    echo
+    if command -v nvidia-ctk >/dev/null 2>&1 && compgen -G "/dev/nvidia[0-9]*" >/dev/null 2>&1; then
+        say "NVIDIA GPU detected — setting up a personal CDI device spec (needed for Ollama GPU access under rootless)..."
+        mkdir -p "${HOME}/.config/cdi" "${HOME}/.config/docker"
+        if nvidia-ctk cdi generate --output="${HOME}/.config/cdi/nvidia.yaml" >/dev/null 2>&1; then
+            ok "Generated ${HOME}/.config/cdi/nvidia.yaml"
+            _daemon_json="${HOME}/.config/docker/daemon.json"
+            _before="$(cat "${_daemon_json}" 2>/dev/null || true)"
+            python3 - "${_daemon_json}" "${HOME}/.config/cdi" <<'PY'
+import json, os, sys
+path, cdi_dir = sys.argv[1], sys.argv[2]
+cfg = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError:
+        cfg = {}
+cfg.setdefault("features", {})["cdi"] = True
+dirs = cfg.get("cdi-spec-dirs", [])
+if cdi_dir not in dirs:
+    dirs.append(cdi_dir)
+cfg["cdi-spec-dirs"] = dirs
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+            _after="$(cat "${_daemon_json}" 2>/dev/null || true)"
+            if [[ "${_before}" != "${_after}" ]]; then
+                ok "Configured ${_daemon_json} (cdi-spec-dirs -> ${HOME}/.config/cdi only)"
+                systemctl --user restart docker
+                ok "Rootless daemon restarted — GPU now available via CDI device 'nvidia.com/gpu=all'"
+            else
+                ok "${_daemon_json} already configured for CDI — no restart needed"
+            fi
+            unset _daemon_json _before _after
+        else
+            warn "nvidia-ctk cdi generate failed — GPU passthrough under rootless won't work until this is resolved manually."
+        fi
+    else
+        say "No NVIDIA GPU / nvidia-ctk detected — skipping personal CDI GPU setup (Ollama will run CPU-only under this daemon)."
+    fi
+
+    echo
+    warn "Your existing shared-daemon containers (this checkout's KinD cluster, Ollama) are untouched and still running there."
+    warn "They won't show up under 'docker ps' / 'kind get clusters' anymore (those now talk to the rootless daemon) until you switch back."
+    say "(optional) tear down the old shared-daemon ones once you've confirmed the new context works:"
+    say "  docker context use default && kind delete cluster --name \$(grep -m1 '^KIND_CLUSTER_NAME=' \"${ENV_FILE}\" 2>/dev/null | cut -d= -f2-) && docker context use rootless"
+    echo
+    say "Continuing into $( [[ "${SETUP_MODE}" == restart ]] && echo "--restart" || echo "the wizard" ) under the rootless context..."
+    echo
+fi
 
 # Backfill ACE_INSTANCE_NAME if this .env doesn't have one yet. Every
 # host-wide unique resource this script creates (kind cluster name, and via
@@ -81,7 +466,7 @@ cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
 # existing .env missing this (e.g. from before this check existed) gets
 # fixed on the next run without the user having to do anything.
 if ! grep -q '^ACE_INSTANCE_NAME=.\+' "${ENV_FILE}" 2>/dev/null; then
-    _default_instance_name="$(id -un | tr '[:upper:].' '[:lower:]-')"
+    _default_instance_name="$(sanitize_instance_name "$(id -un)")"
     if grep -q '^ACE_INSTANCE_NAME=' "${ENV_FILE}" 2>/dev/null; then
         sed -i "s|^ACE_INSTANCE_NAME=.*|ACE_INSTANCE_NAME=${_default_instance_name}|" "${ENV_FILE}"
     else
@@ -89,6 +474,47 @@ if ! grep -q '^ACE_INSTANCE_NAME=.\+' "${ENV_FILE}" 2>/dev/null; then
     fi
     ok "Set ACE_INSTANCE_NAME=${_default_instance_name} in .env (keeps this checkout's shared-host resources unique)"
     unset _default_instance_name
+fi
+
+# Re-validate whatever ended up in .env (just-backfilled values are already
+# safe, but a pre-existing or hand-edited one might not be -- e.g. copied
+# from before this check existed, or typed in directly with an underscore).
+# Runs unconditionally so `kind create cluster` never fails on this instead
+# of a clear message here.
+_configured_instance_name="$(cur ACE_INSTANCE_NAME)"
+_sanitized_instance_name="$(sanitize_instance_name "${_configured_instance_name}")"
+if [[ -n "${_configured_instance_name}" && "${_configured_instance_name}" != "${_sanitized_instance_name}" ]]; then
+    sed -i "s|^ACE_INSTANCE_NAME=.*|ACE_INSTANCE_NAME=${_sanitized_instance_name}|" "${ENV_FILE}"
+    warn "ACE_INSTANCE_NAME='${_configured_instance_name}' isn't safe for kind/Kubernetes resource names (lowercase alphanumeric + hyphen only, ≤20 chars) -- corrected to '${_sanitized_instance_name}' in .env."
+fi
+unset _configured_instance_name _sanitized_instance_name
+
+# Backfill HOST_KUBE_DIR if this .env doesn't have one yet, pinned to THIS
+# interactive shell's real ~/.kube. docker-compose.yml's cluster-init service
+# mounts ${HOST_KUBE_DIR:-${HOME}/.kube} -- when unset, that default is
+# re-resolved from whatever $HOME is active at `docker compose up` time, not
+# necessarily this shell's. If those two ever differ (sudo, a service
+# account, a wrapper script), `kind create cluster` inside that container
+# happily writes a fully-merged, working kubeconfig into a DIFFERENT physical
+# file than the one this operator's own `kubectl` reads by default -- the
+# cluster is healthy, cluster-init reports success, and kubectl still can't
+# see it, with no error anywhere. Pinning an explicit absolute path here once
+# removes that ambiguity for every later `docker compose up` of this
+# checkout's stack, regardless of what environment triggers it. Runs
+# unconditionally (both --setup and --restart) so an existing .env missing
+# this gets fixed automatically. Only backfills when unset -- unlike
+# AGENT_CHARTS_ROOT/APP_CHARTS_ROOT below, this is a legitimate manual
+# override knob (e.g. a non-standard home layout), not something with one
+# unambiguous correct value to keep reconciling to.
+if ! grep -q '^HOST_KUBE_DIR=.\+' "${ENV_FILE}" 2>/dev/null; then
+    _default_kube_dir="${HOME}/.kube"
+    if grep -q '^HOST_KUBE_DIR=' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^HOST_KUBE_DIR=.*|HOST_KUBE_DIR=${_default_kube_dir}|" "${ENV_FILE}"
+    else
+        echo "HOST_KUBE_DIR=${_default_kube_dir}" >> "${ENV_FILE}"
+    fi
+    ok "Set HOST_KUBE_DIR=${_default_kube_dir} in .env (pins cluster-init's kubeconfig mount so it can't drift to a different \$HOME on a later 'docker compose up')"
+    unset _default_kube_dir
 fi
 
 # Backfill OLLAMA_PORT if missing/empty. Derived from UID so each user on
@@ -246,6 +672,14 @@ detect_k3s_gw() {
         | awk '/inet / {split($2,a,"/"); print a[1]; exit}'
 }
 
+# subscriber is baked into every infra-connect manifest at whatever tag
+# SUBSCRIBER_IMAGE names (see .env.example) — rebuild under that exact tag
+# rather than ":latest" so already-connected infra (which has that tag
+# hardcoded into its already-created Deployment) picks up the rebuild after a
+# rollout restart, with no manifest regeneration or reconnect required.
+_SUBSCRIBER_IMAGE_TAG="$(cur SUBSCRIBER_IMAGE)"
+_SUBSCRIBER_IMAGE_TAG="${_SUBSCRIBER_IMAGE_TAG:-agentcert/litmusportal-subscriber:3.0.0}"
+
 # Image build definitions — available to both --setup (interactive) and --restart --local-build
 declare -a ALL_BUILD_IMAGES=(
     "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile|direct"
@@ -257,6 +691,9 @@ declare -a ALL_BUILD_IMAGES=(
     "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
     "8|web|agentcert/agentcert-web|||compose:web"
     "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
+    "10|subscriber|${_SUBSCRIBER_IMAGE_TAG}|${REPO_ROOT}/AgentCert/chaoscenter/subscriber|Dockerfile|direct"
+    "11|sre-agent-comprehensive|agentcert/sre-agent-comprehensive|${REPO_ROOT}/agents/sre-agent-comprehensive|Dockerfile|direct"
+    "12|sre-agent-crewai|agentcert/sre-agent-crewai|${REPO_ROOT}/agents/sre-agent-crewai|Dockerfile|direct"
 )
 
 if [[ "$SETUP_MODE" == "restart" ]]; then
@@ -299,6 +736,41 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
             DO_LOCAL_BUILD=1
             SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
         fi
+
+        # --- Stale-image detection (closes the documented gotcha: CLAUDE.md
+        # §6 "`--restart` without `--local-build` silently skips Go rebuilds")
+        # -------------------------------------------------------------------
+        # If this run isn't rebuilding anything (persisted policy resolved to
+        # nothing, e.g. "skip", or push creds went missing above), compare
+        # each image's source dir against the fingerprint recorded the last
+        # time it was actually built (written near the end of the build
+        # section below, into .tmp/ace-build-fingerprints.env). Previously
+        # this case just redeployed whatever image was already running with
+        # zero signal that the source had moved on -- this only warns, it
+        # never blocks or rebuilds automatically.
+        if [[ "${DO_BUILD}" -eq 0 && "${DO_LOCAL_BUILD}" -eq 0 ]]; then
+            _fp_file="${REPO_ROOT}/.tmp/ace-build-fingerprints.env"
+            if [[ -f "${_fp_file}" ]]; then
+                declare -a _stale_images=()
+                for _entry in "${ALL_BUILD_IMAGES[@]}"; do
+                    IFS='|' read -r _fnum _flabel _fimg _fctx _fdf _fmethod <<< "$_entry"
+                    [[ -z "${_fctx}" || ! -d "${_fctx}" ]] && continue
+                    _frecorded="$(grep -m1 "^IMG_${_fnum}=" "${_fp_file}" 2>/dev/null | cut -d= -f2-)"
+                    [[ -z "${_frecorded}" ]] && continue
+                    _fsha="$(git -C "${_fctx}" rev-parse HEAD 2>/dev/null || echo unknown)"
+                    _fdirty="$(git -C "${_fctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')"
+                    [[ "${_fsha}:${_fdirty}" != "${_frecorded}" ]] && _stale_images+=("${_flabel}")
+                done
+                if [[ ${#_stale_images[@]} -gt 0 ]]; then
+                    warn "Source changed since the last local build for: ${_stale_images[*]} — the currently running image(s) are stale."
+                    warn "This --restart isn't rebuilding anything (image policy: ${PLATFORM_IMAGE_SOURCE}). To pick up the change:"
+                    warn "  ./scripts/setup.sh --restart --local-build"
+                fi
+                unset _stale_images
+            fi
+            unset _fp_file
+        fi
+        unset _entry _fnum _flabel _fimg _fctx _fdf _fmethod _frecorded _fsha _fdirty
 
         # CALLBACK_HOST (pod->host gateway IP) is normally (re)detected further
         # below, but that logic lives inside the interactive SETUP_MODE=setup
@@ -534,7 +1006,8 @@ else
         for _entry in "${ALL_BUILD_IMAGES[@]}"; do
             IFS='|' read -r _num _label _img _ _ _method <<< "$_entry"
             [[ "$_method" == compose:* ]] && _note="via compose" || _note="direct"
-            echo -e "     ${BOLD}${_num})${NC} ${_label}  ${DIM}(${_img}:latest, ${_note})${NC}"
+            [[ "${_img}" == *:* ]] && _disp_tag="${_img}" || _disp_tag="${_img}:latest"
+            echo -e "     ${BOLD}${_num})${NC} ${_label}  ${DIM}(${_disp_tag}, ${_note})${NC}"
         done
         read -rp "   Selection [all]: " _sel
         for _entry in "${ALL_BUILD_IMAGES[@]}"; do
@@ -885,10 +1358,26 @@ if app_src:
     if app_src == "jfrog":
         sets["INSTALL_APPLICATION_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-app:latest"
         sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Always"
+    elif app_src == "local":
+        # "local" means prepare-images.sh built and kind-loaded this image under
+        # this tag and nothing else should ever be pulled for it -- but the same
+        # tag also exists as a real published image on Docker Hub. IfNotPresent
+        # is not safe here: kubelet's own image GC can evict a kind-loaded image
+        # at any time (it doesn't know or care that it was locally loaded rather
+        # than pulled), and the next pod using this tag would then silently
+        # fall back to pulling the stale public Docker Hub image instead of
+        # failing -- which is exactly what happened mid-session (see
+        # OPEN_WEIGHT_CERTIFICATION_HANDOFF.md, ITBench 36-experiment entry):
+        # delete-agent started failing with "flag provided but not defined:
+        # -delete" hours after an explicit `kind load` had already fixed it,
+        # because the loaded image had been evicted and silently replaced.
+        # Never makes a missing/evicted local image fail loudly
+        # (ErrImageNeverPull) instead of quietly running stale logic.
+        sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
+        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Never"
     else:
-        # Both "local" and "dockerhub" use the same Docker Hub image name.
-        # For "local", prepare-images.sh builds and kind-loads it under that name.
-        # IfNotPresent means KinD uses the pre-loaded copy when available.
+        # "dockerhub": genuinely want the registry copy, so IfNotPresent (pull
+        # once, reuse thereafter) is correct and intentional here.
         sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
         sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "IfNotPresent"
 
@@ -897,6 +1386,12 @@ if agent_src:
     if agent_src == "jfrog":
         sets["INSTALL_AGENT_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-agent:latest"
         sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Always"
+    elif agent_src == "local":
+        # See the matching "local" branch above for install-app -- same
+        # kind-loaded-image-vs-Docker-Hub-tag-collision reasoning applies here,
+        # and this is in fact the exact image/flag this bit itself was found on.
+        sets["INSTALL_AGENT_IMAGE"]             = "agentcert/agentcert-install-agent:latest"
+        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Never"
     else:
         sets["INSTALL_AGENT_IMAGE"]             = "agentcert/agentcert-install-agent:latest"
         sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "IfNotPresent"
@@ -1364,6 +1859,64 @@ assert_kind_cluster_ownership() {
 mark_kind_cluster_owned()   { docker volume create --label "ace.kind.owner=${REPO_ROOT}" "$(kind_owner_marker "$1")" >/dev/null; }
 unmark_kind_cluster_owned() { docker volume rm "$(kind_owner_marker "$1")" >/dev/null 2>&1 || true; }
 
+# Force kubectl to point at this cluster, regardless of what its kubeconfig
+# entry currently looks like. `kind create cluster`'s automatic merge-on-create
+# is not reliable in every environment on this host -- observed case: a
+# rootless-Docker checkout whose $KUBECONFIG never gained a kind-<cluster>
+# entry at all, so a best-effort `kubectl config use-context ... || true`
+# silently no-op'd every time (the context didn't exist to switch to) and
+# kubectl fell back to the http://localhost:8080 default, with setup.sh still
+# reporting success. `kind export kubeconfig` re-derives the entry directly
+# from the running container and unconditionally sets current-context, so it
+# self-heals this on every run -- not just at cluster-creation time -- and we
+# fail loudly here instead of swallowing it like before.
+ensure_kubeconfig_context() {
+    local cluster_name="$1"
+    if ! kind export kubeconfig --name "${cluster_name}" >/dev/null 2>&1; then
+        warn "kind export kubeconfig failed for cluster '${cluster_name}' -- is it actually running? (kind get clusters)"
+        return 1
+    fi
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+        warn "kubectl still cannot reach cluster '${cluster_name}' after 'kind export kubeconfig'."
+        warn "Check KUBECONFIG (currently: ${KUBECONFIG:-\$HOME/.kube/config}) and 'kubectl config get-contexts'."
+        return 1
+    fi
+    return 0
+}
+
+# Warn (never abort) if the KinD node is at or near disk-pressure eviction.
+# kind-agentcert.yaml pins kubelet's eviction floors to absolute values
+# (nodefs.available<5Gi, imagefs.available<5Gi — see CLAUDE.md §4.5 "KinD
+# eviction thresholds") specifically because the shared host's Docker
+# data-root can read as nearly full by PERCENTAGE while tens of GB remain in
+# absolute terms, and kubelet's stock percentage-based thresholds fire on
+# that alone. Those absolute floors only help if there's actually more than
+# ~5Gi free when the cluster starts doing real work; this checks that instead
+# of silently reporting "cluster created" into a node that starts evicting
+# every pod moments later. Also checks the node's live conditions, which
+# catches eviction already in progress on a long-running cluster whose host
+# filled up after creation, not just a bad state at creation time.
+check_kind_disk_pressure() {
+    local cluster_name="$1" docker_root avail_kb avail_gi conditions
+    docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+    if [[ -n "${docker_root}" ]]; then
+        avail_kb="$(df -Pk "${docker_root}" 2>/dev/null | awk 'NR==2{print $4}')"
+        if [[ "${avail_kb}" =~ ^[0-9]+$ ]]; then
+            avail_gi=$(( avail_kb / 1024 / 1024 ))
+            if (( avail_gi < 8 )); then
+                warn "Docker data-root (${docker_root}) has only ~${avail_gi}Gi free — close to the 5Gi kubelet eviction floor (CLAUDE.md §4.5)."
+                warn "Pods on '${cluster_name}' may start getting evicted. Check: df -h ${docker_root}   (and verify it's really where you think it is — CLAUDE.md §6 'Docker data-root may not actually be on /Innovation')"
+            fi
+        fi
+    fi
+    conditions="$(kubectl get nodes "${cluster_name}-control-plane" \
+        -o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{" "}{end}' 2>/dev/null || true)"
+    if [[ "${conditions}" == *DiskPressure* || "${conditions}" == *MemoryPressure* ]]; then
+        warn "Node '${cluster_name}-control-plane' is reporting pressure conditions right now: ${conditions}"
+        warn "Pods are likely being evicted. Free up space on the Docker data-root or add more (CLAUDE.md §4.5/§6)."
+    fi
+}
+
 # Ensure the kind cluster exists and has the port mappings required for the
 # K8s deployment. Recreates the cluster if the config has changed.
 ensure_kind_cluster() {
@@ -1374,7 +1927,7 @@ ensure_kind_cluster() {
     # to (see the ownership check above for what happens if it collides).
     local ace_instance_name
     ace_instance_name="$(cur ACE_INSTANCE_NAME)"
-    ace_instance_name="${ace_instance_name:-$(id -un | tr '[:upper:].' '[:lower:]-')}"
+    ace_instance_name="${ace_instance_name:-$(sanitize_instance_name "$(id -un)")}"
 
     local cluster_name="${KIND_CLUSTER_NAME:-$(cur KIND_CLUSTER_NAME)}"
     cluster_name="${cluster_name:-agentcert-${ace_instance_name}}"
@@ -1480,7 +2033,8 @@ if updated:
         print(f'  {k}: {env.get(k, "(unset)")} -> {v}')
 PY
         unset _ACE_INSPECT_JSON
-        kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
+        ensure_kubeconfig_context "${cluster_name}" || return 1
+        check_kind_disk_pressure "${cluster_name}"
         return 0
     fi
 
@@ -1550,10 +2104,18 @@ PY
 
     echo -e "${DIM}Creating kind cluster '${cluster_name}' (this takes ~1-2 min)…${NC}"
     echo -e "${DIM}Using kind config: ${kind_cfg}${NC}"
-    kind create cluster --name "${cluster_name}" --config "${kind_cfg}"
+    if ! kind create cluster --name "${cluster_name}" --config "${kind_cfg}"; then
+        warn "kind create cluster failed for '${cluster_name}' (config: ${kind_cfg})."
+        warn "Common causes: one of the KIND_HOSTPORT_* ports picked above got taken by something else"
+        warn "between the pick and cluster creation; the containerd 2.3 shim bug on this host"
+        warn "(--rootless-docker only -- see CLAUDE.md §6, 'unsupported protocol:Yunix'); or the active"
+        warn "docker context ($(docker context show 2>/dev/null || echo unknown)) not reaching a working daemon."
+        return 1
+    fi
     mark_kind_cluster_owned "${cluster_name}"
-    kubectl config use-context "kind-${cluster_name}" >/dev/null 2>&1 || true
+    ensure_kubeconfig_context "${cluster_name}" || return 1
     ok "Kind cluster '${cluster_name}' created."
+    check_kind_disk_pressure "${cluster_name}"
 }
 
 # Inject the real litellm_config.yaml into the litellm ConfigMap manifest
@@ -1713,6 +2275,192 @@ restart_locally_built_deployments() {
     done
 }
 
+# restart_subscriber_deployments
+# Unlike graphql/auth/web/certifier (all fixed, single deployments in the
+# "ace" namespace), the subscriber runs once per connected chaos infra, each
+# in whatever namespace that infra was registered into — there is no single
+# namespace to target. Roll out every subscriber Deployment cluster-wide so
+# each already-connected infra picks up a freshly built local image; imagePullPolicy:
+# Always on that container (see AgentCert manifests/namespace/3b_agents_deployment.yaml)
+# means the restart alone is enough to re-pull, no reconnect/manifest regen needed.
+restart_subscriber_deployments() {
+    [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]] || return 0
+    local _built
+    for _built in "${LOCAL_BUILT_IMAGES[@]}"; do
+        [[ "${_built%%:*}" == "agentcert/litmusportal-subscriber" ]] && break
+        _built=""
+    done
+    [[ -z "${_built}" ]] && return 0
+
+    local _targets
+    _targets="$(kubectl get deployment -A -l app=subscriber -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    [[ -z "${_targets}" ]] && return 0
+
+    while read -r _sns _sdep; do
+        [[ -z "${_sns}" ]] && continue
+        kubectl rollout restart "deployment/${_sdep}" -n "${_sns}" >/dev/null 2>&1 \
+            && ok "  Restarted deployment/${_sdep} in ${_sns} to pick up freshly built subscriber image" \
+            || warn "  Failed to restart deployment/${_sdep} in ${_sns} — it may still be running the old image"
+    done <<< "${_targets}"
+}
+
+# Offers to restore one of shut_down.sh's automatic MongoDB backups (see that
+# script's header comment) into the MongoDB that was just deployed by
+# helm_deploy/k8s_deploy. Each teardown leaves its own independent, timestamped
+# archive rather than one shared file, so this lists all of them (newest
+# first) and lets the user pick a specific generation — not just "the last
+# one" — or start with a brand-new empty database instead. Only relevant right
+# after a fresh KinD cluster + fresh MongoDB StatefulSet come up:
+# dynamically-provisioned PVs get a brand-new, empty on-disk path every time a
+# cluster is recreated, so PVC/PV *configuration* surviving does not carry
+# data forward on its own — this is the actual restore side of that gap.
+# Gated at the call site to SETUP_MODE=setup (never --restart) and
+# EXPRESS_MODE=0 (interactive only, same visibility as the deploy_choice
+# k/h/n prompt) so it never surprises a scripted/express run by silently
+# overwriting a fresh database. Also records how the resulting database was
+# started ("scratch" or a specific backup's filename) to a small marker file
+# next to the backups, so the *next* backup shut_down.sh takes can say what
+# it was started from — each entry in the list below shows that lineage for
+# every existing backup, not just its timestamp/size.
+offer_mongodb_restore() {
+    local ns="ace"
+    local inst; inst="$(cur ACE_INSTANCE_NAME)"
+    local backup_dir="${REPO_ROOT}/.tmp/mongodb-backups/${inst}"
+    # Where this function records how the currently-running database was
+    # brought up ("scratch" or a backup filename) — shut_down.sh reads this
+    # when it next takes a backup, so that backup's own .meta sidecar can say
+    # what it was started from. Same file shut_down.sh's header comment
+    # documents as MONGO_LINEAGE_FILE.
+    local lineage_file="${backup_dir}/current-started-from"
+
+    if ! kubectl get pod mongodb-0 -n "${ns}" >/dev/null 2>&1; then
+        return 0   # nothing deployed (or deploy failed) — nothing to restore into, nothing to record
+    fi
+
+    local -a backups=()
+    while IFS= read -r _f; do
+        [[ -n "${_f}" ]] && backups+=("${_f}")
+    done < <(ls -1t "${backup_dir}"/mongodb-*.archive.gz 2>/dev/null || true)
+    if [[ ${#backups[@]} -eq 0 ]]; then
+        # Nothing to offer, but the database is still definitionally starting
+        # from scratch — record that so a later backup of it says so too.
+        mkdir -p "${backup_dir}"
+        echo "scratch" > "${lineage_file}"
+        return 0
+    fi
+
+    echo
+    echo -e "${CYAN}▸ Found ${#backups[@]} MongoDB backup(s) for this instance${NC}"
+    echo -e "  ${BOLD}0${NC}) Start with a brand-new, empty database ${DIM}(default)${NC}"
+    local _i _size _mtime _from
+    for _i in "${!backups[@]}"; do
+        _size="$(du -h "${backups[$_i]}" 2>/dev/null | cut -f1)"
+        _mtime="$(date -r "${backups[$_i]}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || true)"
+        _from="unknown"
+        [[ -f "${backups[$_i]}.meta" ]] && _from="$(grep -m1 '^started_from=' "${backups[$_i]}.meta" 2>/dev/null | cut -d= -f2-)"
+        [[ -z "${_from}" ]] && _from="unknown"
+        echo -e "  ${BOLD}$((_i + 1))${NC}) $(basename "${backups[$_i]}")  ${DIM}(${_size:-?}, saved ${_mtime:-unknown time}$( [[ $_i -eq 0 ]] && echo ", most recent" ); started from: ${_from})${NC}"
+    done
+    unset _i _size _mtime _from
+
+    local _choice _selected
+    read -rp "$(echo -e "Restore which one into the freshly deployed MongoDB? ${DIM}[0-${#backups[@]}, default 0]${NC}: ")" _choice
+    _choice="${_choice:-0}"
+    if [[ "${_choice}" == "0" ]]; then
+        say "${DIM}Skipped — the freshly deployed database stays empty.${NC}"
+        echo "scratch" > "${lineage_file}"
+        return 0
+    fi
+    if ! [[ "${_choice}" =~ ^[0-9]+$ ]] || [[ "${_choice}" -lt 1 || "${_choice}" -gt ${#backups[@]} ]]; then
+        warn "  Invalid choice '${_choice}' — skipping restore. The freshly deployed database stays empty."
+        echo "scratch" > "${lineage_file}"
+        return 0
+    fi
+    _selected="${backups[$((_choice - 1))]}"
+    # Recorded now, at the point of intent, not gated on mongorestore below
+    # actually succeeding — if it fails, the warning already printed makes
+    # that clear; this isn't a strict transactional guarantee, just provenance.
+    echo "$(basename "${_selected}")" > "${lineage_file}"
+
+    # k8s_deploy's rollout-status wait (and helm's post-install hook, for the
+    # helm path) only confirm the mongodb Pod/StatefulSet is Ready, not that
+    # mongodb-rs-init's replica-set initiation has actually finished — on the
+    # kubectl-apply path that Job runs async, independent of k8s_deploy's own
+    # wait. Poll directly instead of assuming either path's timing.
+    local _mongo_user _mongo_pass _tries=0
+    _mongo_user="$(cur MONGODB_USERNAME)"; _mongo_user="${_mongo_user:-admin}"
+    _mongo_pass="$(cur MONGODB_PASSWORD)"; _mongo_pass="${_mongo_pass:-1234}"
+    echo -e "${DIM}Waiting for MongoDB replica set to be ready…${NC}"
+    until kubectl exec -n "${ns}" mongodb-0 -- mongosh --quiet \
+            -u "${_mongo_user}" -p "${_mongo_pass}" --authenticationDatabase admin \
+            --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q 1; do
+        _tries=$((_tries + 1))
+        if [[ ${_tries} -ge 20 ]]; then
+            warn "  MongoDB never became ready — skipping restore. Restore manually once it is:"
+            warn "  kubectl exec -n ${ns} mongodb-0 -- mongorestore --archive --gzip --drop -u ${_mongo_user} -p '<password>' --authenticationDatabase admin < ${_selected}"
+            unset _mongo_user _mongo_pass _tries _choice _selected
+            return 1
+        fi
+        sleep 3
+    done
+
+    if kubectl exec -i -n "${ns}" mongodb-0 -- mongorestore --archive --gzip --drop \
+            -u "${_mongo_user}" -p "${_mongo_pass}" --authenticationDatabase admin \
+            < "${_selected}" >/dev/null 2>&1; then
+        ok "  MongoDB restored from $(basename "${_selected}")"
+    else
+        warn "  mongorestore failed — check: kubectl logs -n ${ns} mongodb-0"
+    fi
+    unset _mongo_user _mongo_pass _tries _choice _selected
+}
+
+# --- Overlap prepare-images.sh with the deploy's own long blocking wait -----
+# (helm's mongodb-rs-init hook, ~2-5 min; k8s_deploy's "wait for core
+# services" rollout, up to 5 min). prepare-images.sh only needs kubectl
+# reachable + the KinD cluster to exist (both already true by the time these
+# are called below) -- it does NOT need mongodb/graphql/anything the blocking
+# wait is actually waiting on, so there is no reason to make it wait in line
+# behind them. This only ever matters when INSTALL_APP_IMAGE_SOURCE/
+# INSTALL_AGENT_IMAGE_SOURCE/LITMUS_IMAGES_SOURCE is local or jfrog -- the
+# default (dockerhub for all three) makes this a no-op, same as before.
+# _PREPARE_IMAGES_LAUNCHED keeps this from running twice: once here in the
+# background, and once more via the old unconditional call further down in
+# the outer script (which still runs it -- synchronously, via the same two
+# functions -- for the deploy_choice=skip case, where there's nothing to
+# overlap with).
+_PREPARE_IMAGES_LAUNCHED=0
+_PREPARE_IMAGES_PID=""
+_PREPARE_IMAGES_LOG=""
+maybe_launch_prepare_images_bg() {
+    [[ "${_PREPARE_IMAGES_LAUNCHED}" -eq 1 ]] && return 0
+    _PREPARE_IMAGES_LAUNCHED=1
+    local app_src agent_src litmus_src
+    app_src="$(cur INSTALL_APP_IMAGE_SOURCE)"
+    agent_src="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
+    litmus_src="$(cur LITMUS_IMAGES_SOURCE)"
+    if [[ "${app_src}" == "local" || "${app_src}" == "jfrog" || \
+          "${agent_src}" == "local" || "${agent_src}" == "jfrog" || \
+          "${litmus_src}" == "local" ]]; then
+        mkdir -p "${REPO_ROOT}/.tmp"
+        _PREPARE_IMAGES_LOG="${REPO_ROOT}/.tmp/prepare-images.log"
+        echo -e "${DIM}Preparing experiment images in the background while the cluster comes up ...${NC}"
+        echo -e "${DIM}  Progress: tail -f ${_PREPARE_IMAGES_LOG}${NC}"
+        "${REPO_ROOT}/scripts/prepare-images.sh" >"${_PREPARE_IMAGES_LOG}" 2>&1 &
+        _PREPARE_IMAGES_PID=$!
+    fi
+}
+wait_for_prepare_images_bg() {
+    if [[ -n "${_PREPARE_IMAGES_PID}" ]]; then
+        echo -e "${DIM}Waiting for background experiment-image prep (PID ${_PREPARE_IMAGES_PID})...${NC}"
+        if wait "${_PREPARE_IMAGES_PID}"; then
+            ok "Experiment images prepared."
+        else
+            warn "Background experiment-image prep failed (see ${_PREPARE_IMAGES_LOG}) -- re-run scripts/prepare-images.sh manually."
+        fi
+        _PREPARE_IMAGES_PID=""
+    fi
+}
+
 # Deploy all K8s manifests into the cluster.
 k8s_deploy() {
     local K8S_DIR="${REPO_ROOT}/deploy/k8s"
@@ -1732,6 +2480,15 @@ k8s_deploy() {
     # 2) Ensure kind cluster (skip for cloud/local — they supply their own kubeconfig)
     if [[ "${CLUSTER_MODE}" == "local" || "${CLUSTER_MODE}" == "cloud" ]]; then
         ok "CLUSTER_MODE=${CLUSTER_MODE} — skipping kind cluster creation, using existing kubeconfig."
+    elif [[ -n "${_KIND_PREWARM_PID:-}" ]]; then
+        echo -e "${DIM}Waiting for background kind cluster pre-warm (PID ${_KIND_PREWARM_PID})…${NC}"
+        if wait "${_KIND_PREWARM_PID}"; then
+            ok "kind cluster pre-warmed while images were building."
+        else
+            warn "Background kind cluster pre-warm failed (see .tmp/kind-prewarm.log) — retrying in the foreground."
+            ensure_kind_cluster
+        fi
+        unset _KIND_PREWARM_PID
     else
         ensure_kind_cluster
     fi
@@ -1750,6 +2507,10 @@ k8s_deploy() {
         warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
         return 1
     fi
+
+    # 3b) Kick off experiment-image prep now so it overlaps with the long
+    # "wait for core services" rollout below instead of running after it.
+    maybe_launch_prepare_images_bg
 
     # 4) Inject real litellm_config into the ConfigMap manifest
     patch_litellm_configmap
@@ -1792,6 +2553,7 @@ k8s_deploy() {
     # on restart_locally_built_deployments — same tag + IfNotPresent means
     # `kubectl apply` alone leaves existing pods on the old image).
     restart_locally_built_deployments "${NS}"
+    restart_subscriber_deployments
 
     # 9) Wait for core services to become ready (best-effort; don't abort on timeout)
     echo
@@ -1804,6 +2566,9 @@ k8s_deploy() {
             -n "${NS}" --timeout=300s 2>/dev/null \
             && ok "${svc} ready" || warn "${svc} not yet ready — check: kubectl get pods -n ${NS}"
     done
+
+    # 9a) Reap the experiment-image prep kicked off in the background above.
+    wait_for_prepare_images_bg
 
     # 9b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -1903,6 +2668,15 @@ helm_deploy() {
     # 2) Ensure kind cluster (skip for cloud/local — they supply their own kubeconfig)
     if [[ "${CLUSTER_MODE}" == "local" || "${CLUSTER_MODE}" == "cloud" ]]; then
         ok "CLUSTER_MODE=${CLUSTER_MODE} — skipping kind cluster creation, using existing kubeconfig."
+    elif [[ -n "${_KIND_PREWARM_PID:-}" ]]; then
+        echo -e "${DIM}Waiting for background kind cluster pre-warm (PID ${_KIND_PREWARM_PID})…${NC}"
+        if wait "${_KIND_PREWARM_PID}"; then
+            ok "kind cluster pre-warmed while images were building."
+        else
+            warn "Background kind cluster pre-warm failed (see .tmp/kind-prewarm.log) — retrying in the foreground."
+            ensure_kind_cluster
+        fi
+        unset _KIND_PREWARM_PID
     else
         ensure_kind_cluster
     fi
@@ -1921,6 +2695,10 @@ helm_deploy() {
         warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
         return 1
     fi
+
+    # 3b) Kick off experiment-image prep now so it overlaps with the
+    # mongodb-rs-init helm hook wait below instead of running after it.
+    maybe_launch_prepare_images_bg
 
     # 4) Generate values-env.yaml (helm reads this to create the ace-env Secret)
     echo -e "${DIM}Generating values-env.yaml from .env…${NC}"
@@ -1981,11 +2759,15 @@ helm_deploy() {
         return 1
     fi
 
+    # 5a0) Reap the experiment-image prep kicked off in the background above.
+    wait_for_prepare_images_bg
+
     # 5a) --local-build against an already-running release: force a restart so
     # the freshly built/kind-loaded images are actually picked up (see comment
     # on restart_locally_built_deployments — same tag + IfNotPresent means a
     # no-diff `helm upgrade` leaves existing pods on the old image).
     restart_locally_built_deployments "${NS}"
+    restart_subscriber_deployments
 
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -2092,6 +2874,31 @@ OLLAMA_SVC_EOF
     echo -e "${GREEN}=======================================================${NC}"
 }
 
+# --- Pre-warm KinD cluster in background (express mode only) ----------------
+# ensure_kind_cluster's `kind create cluster` step (~1-2 min) has no
+# dependency on the Docker builds below — images are only kind-loaded AFTER
+# the cluster exists (see step 2b inside k8s_deploy/helm_deploy). Only
+# express mode has resolved both the deploy target (_DEPLOY_CHOICE) and
+# CLUSTER_MODE before builds start; guided mode still asks "deploy now?"
+# after the build loop finishes, so there's nothing to pre-warm against here
+# — it keeps calling ensure_kind_cluster in the foreground as before.
+# k8s_deploy/helm_deploy below pick this job up instead of re-running
+# ensure_kind_cluster from scratch. stdin is redirected from /dev/null so a
+# background hit of the "recreate cluster?" prompt inside ensure_kind_cluster
+# can't contend with the foreground shell for the terminal — it resolves to
+# the same safe non-destructive default (skip recreation) that an unattended
+# EOF would give it either way.
+_KIND_PREWARM_PID=""
+if [[ ${EXPRESS_MODE} -eq 1 && ( "${_DEPLOY_CHOICE,,}" == "h" || "${_DEPLOY_CHOICE,,}" == "k" ) \
+      && "${CLUSTER_MODE}" != "local" && "${CLUSTER_MODE}" != "cloud" ]]; then
+    mkdir -p "${REPO_ROOT}/.tmp"
+    _KIND_PREWARM_LOG="${REPO_ROOT}/.tmp/kind-prewarm.log"
+    echo -e "${DIM}Pre-warming kind cluster in the background while images build …${NC}"
+    echo -e "${DIM}  Progress: tail -f ${_KIND_PREWARM_LOG}${NC}"
+    ( ensure_kind_cluster ) </dev/null >"${_KIND_PREWARM_LOG}" 2>&1 &
+    _KIND_PREWARM_PID=$!
+fi
+
 # --- build (push to Docker Hub or local) ------------------------------------
 declare -a LOCAL_BUILT_IMAGES=()   # tracks successfully built images for kind load
 
@@ -2114,42 +2921,114 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     fi
     if [[ "${_build_ready}" -eq 1 ]]; then
         BUILD_FAILED=()
+        # Fingerprint file consumed by the --restart staleness check above
+        # (git SHA + dirty-file-count per image's source dir, keyed by the
+        # ALL_BUILD_IMAGES entry number). Reset on every real build attempt so
+        # it only ever reflects sources actually rebuilt just now.
+        _FP_FILE="${REPO_ROOT}/.tmp/ace-build-fingerprints.env"
+        mkdir -p "${REPO_ROOT}/.tmp"
+        : > "${_FP_FILE}"
+
+        # Images build (and push) in parallel, bounded, instead of one at a
+        # time -- each entry is an independent Dockerfile/context (or
+        # docker-compose service) with zero dependency on any other, so
+        # serializing them was pure wall-clock waste. Bounded rather than
+        # unbounded because this is frequently a shared host (CLAUDE.md §0)
+        # and unlimited concurrent `docker build`/`docker push` can thrash
+        # disk I/O for everyone else on it; override via ACE_BUILD_PARALLELISM
+        # if a given host can take more. Each build runs in its own
+        # background subshell -- variables it sets do NOT survive back to
+        # this shell -- so results are hand-off via small per-image files in
+        # a scratch dir, then reassembled into LOCAL_BUILT_IMAGES/
+        # BUILD_FAILED/the fingerprint file below, once every job is done.
+        _BUILD_PARALLELISM="${ACE_BUILD_PARALLELISM:-3}"
+        _BUILD_LOG_DIR="${REPO_ROOT}/.tmp/build-logs"
+        _BUILD_RESULTS_DIR="$(mktemp -d "${REPO_ROOT}/.tmp/build-results.XXXXXX")"
+        rm -rf "${_BUILD_LOG_DIR}"; mkdir -p "${_BUILD_LOG_DIR}"
+
+        _build_one_entry() {
+            # Runs in a background subshell (see caller) — every line of
+            # output goes to this image's own log file so N concurrent builds
+            # don't interleave garbage on the terminal.
+            local entry="$1" idx="$2"
+            local num label img ctx df method tag svc build_ok=0
+            IFS='|' read -r num label img ctx df method <<< "${entry}"
+            if [[ "${img}" == *:* ]]; then tag="${img}"; else tag="${img}:latest"; fi
+            {
+                echo "▸ ${tag}  (${label})"
+                if [[ "${method}" == compose:* ]]; then
+                    svc="${method#compose:}"
+                    ( cd "${REPO_ROOT}" && docker compose build "${svc}" ) && build_ok=1
+                elif [[ ! -f "${ctx}/${df}" ]]; then
+                    echo "Dockerfile not found: ${ctx}/${df}"
+                else
+                    docker build -t "${tag}" -f "${ctx}/${df}" "${ctx}" && build_ok=1
+                fi
+                if [[ "${build_ok}" -eq 1 ]]; then
+                    echo "${tag}" > "${_BUILD_RESULTS_DIR}/${idx}.built"
+                    # Fingerprint for the --restart staleness check (see
+                    # above) — ctx is empty for the compose:web entry (built
+                    # via docker-compose.yml, not a single source dir), so
+                    # there's nothing meaningful to fingerprint there.
+                    if [[ -n "${ctx}" && -d "${ctx}" ]]; then
+                        echo "IMG_${num}=$(git -C "${ctx}" rev-parse HEAD 2>/dev/null || echo unknown):$(git -C "${ctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')" \
+                            > "${_BUILD_RESULTS_DIR}/${idx}.fp"
+                    fi
+                    if [[ "${DO_BUILD}" -eq 1 ]]; then
+                        if docker push "${tag}"; then
+                            echo pushed > "${_BUILD_RESULTS_DIR}/${idx}.status"
+                        else
+                            echo "push-failed" > "${_BUILD_RESULTS_DIR}/${idx}.status"
+                            echo "${label} (push)" > "${_BUILD_RESULTS_DIR}/${idx}.reason"
+                        fi
+                    else
+                        echo built > "${_BUILD_RESULTS_DIR}/${idx}.status"
+                    fi
+                else
+                    echo "build-failed" > "${_BUILD_RESULTS_DIR}/${idx}.status"
+                    echo "${label} (build)" > "${_BUILD_RESULTS_DIR}/${idx}.reason"
+                fi
+            } >"${_BUILD_LOG_DIR}/${idx}.log" 2>&1
+        }
+
+        echo -e "${DIM}Building ${#SELECTED_BUILD_IMAGES[@]} image(s), up to ${_BUILD_PARALLELISM} at a time — per-image logs: ${_BUILD_LOG_DIR}/${NC}"
+        _idx=0
+        _running=0
         for _entry in "${SELECTED_BUILD_IMAGES[@]}"; do
-            IFS='|' read -r _num _label _img _ctx _df _method <<< "$_entry"
-            echo
-            echo -e "${CYAN}▸${NC} ${BOLD}${_img}:latest${NC}  ${DIM}(${_label})${NC}"
-            if [[ "$_method" == compose:* ]]; then
-                # inline dockerfile or compose-managed build — delegate to docker compose
-                _svc="${_method#compose:}"
-                if ( cd "${REPO_ROOT}" && docker compose build "${_svc}" ); then
-                    ok "  Built ${_img}:latest"
-                    LOCAL_BUILT_IMAGES+=("${_img}:latest")
-                else
-                    warn "  Build failed: ${_label}"
-                    BUILD_FAILED+=("${_label} (build)"); continue
-                fi
-            else
-                if [[ ! -f "${_ctx}/${_df}" ]]; then
-                    warn "  Dockerfile not found: ${_ctx}/${_df} — skipping"
-                    BUILD_FAILED+=("${_label} (no Dockerfile)"); continue
-                fi
-                if docker build -t "${_img}:latest" -f "${_ctx}/${_df}" "${_ctx}"; then
-                    ok "  Built ${_img}:latest"
-                    LOCAL_BUILT_IMAGES+=("${_img}:latest")
-                else
-                    warn "  Build failed: ${_label}"
-                    BUILD_FAILED+=("${_label} (build)"); continue
-                fi
-            fi
-            if [[ "${DO_BUILD}" -eq 1 ]]; then
-                if docker push "${_img}:latest"; then
-                    ok "  Pushed ${_img}:latest"
-                else
-                    warn "  Push failed: ${_label}"
-                    BUILD_FAILED+=("${_label} (push)")
-                fi
+            _build_one_entry "${_entry}" "${_idx}" &
+            _idx=$(( _idx + 1 ))
+            _running=$(( _running + 1 ))
+            if (( _running >= _BUILD_PARALLELISM )); then
+                wait -n
+                _running=$(( _running - 1 ))
             fi
         done
+        wait
+        echo
+
+        # Reassemble each job's outcome, in original selection order, into
+        # the same state the old sequential loop produced (LOCAL_BUILT_IMAGES,
+        # BUILD_FAILED, the fingerprint file), so everything downstream of
+        # this block — kind load, the --restart staleness check, the
+        # ACE_ALREADY_BUILT_IMAGES export — is unaffected by the parallelism.
+        for (( _i = 0; _i < _idx; _i++ )); do
+            IFS='|' read -r _num _label _img _ctx _df _method <<< "${SELECTED_BUILD_IMAGES[_i]}"
+            if [[ "${_img}" == *:* ]]; then _tag="${_img}"; else _tag="${_img}:latest"; fi
+            _status="$(cat "${_BUILD_RESULTS_DIR}/${_i}.status" 2>/dev/null || echo "")"
+            case "${_status}" in
+                built)  ok "  Built ${_tag}  (${_label})" ;;
+                pushed) ok "  Built + pushed ${_tag}  (${_label})" ;;
+                *)
+                    _reason="$(cat "${_BUILD_RESULTS_DIR}/${_i}.reason" 2>/dev/null || echo "${_label}")"
+                    warn "  Failed: ${_tag}  (${_label}) — log: ${_BUILD_LOG_DIR}/${_i}.log"
+                    BUILD_FAILED+=("${_reason}")
+                    ;;
+            esac
+            [[ -f "${_BUILD_RESULTS_DIR}/${_i}.built" ]] && LOCAL_BUILT_IMAGES+=("$(cat "${_BUILD_RESULTS_DIR}/${_i}.built")")
+            [[ -f "${_BUILD_RESULTS_DIR}/${_i}.fp" ]] && cat "${_BUILD_RESULTS_DIR}/${_i}.fp" >> "${_FP_FILE}"
+        done
+        rm -rf "${_BUILD_RESULTS_DIR}"
+        unset -f _build_one_entry
         echo
         if [[ ${#BUILD_FAILED[@]} -eq 0 ]]; then
             if [[ "${DO_BUILD}" -eq 1 ]]; then
@@ -2161,10 +3040,23 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
             warn "Completed with failures: ${BUILD_FAILED[*]}"
         fi
     fi
-    unset _build_ready
+    unset _build_ready _FP_FILE _fp_sha _fp_dirty _BUILD_PARALLELISM _BUILD_LOG_DIR _BUILD_RESULTS_DIR _idx _running _i _status _reason
     echo -e "${CYAN}=======================================================${NC}"
     echo
 fi
+
+# Tell prepare-images.sh (invoked below, for LITMUS_IMAGES_SOURCE=local or
+# JFrog secret setup) which images this run already built + kind-loaded, so
+# its own "local" branches for install-app/install-agent don't redundantly
+# rebuild + reload images the loop above just built. Confirmed redundancy:
+# choosing "a" (build ALL locally) sets INSTALL_APP_IMAGE_SOURCE=local and
+# INSTALL_AGENT_IMAGE_SOURCE=local *and* includes those same two images in
+# ALL_BUILD_IMAGES (entries 3/4) — without this, agentcert-install-app and
+# agentcert-install-agent were `docker build`+`kind load`ed once here and
+# then a second time, from scratch, inside prepare-images.sh, on every "build
+# ALL locally" run. Empty when nothing was built this run (e.g. plain
+# --restart), which leaves prepare-images.sh's standalone behavior unchanged.
+export ACE_ALREADY_BUILT_IMAGES="${LOCAL_BUILT_IMAGES[*]:-}"
 
 # --- charts world-readable (graphql runs as uid 65534) ----------------------
 # git clones on hosts with umask 0077 create directories as 700, which blocks
@@ -2194,19 +3086,26 @@ case "${deploy_choice,,}" in
     *) echo -e "${DIM}Skipped — run './scripts/setup.sh' again and choose k or h to deploy.${NC}" ;;
 esac
 
-# --- Prepare experiment images -----------------------------------------------
-# Runs whenever any image source is non-default (local or jfrog).
-# In --restart mode this reads the current .env values directly.
-_cur_app_src="$(cur INSTALL_APP_IMAGE_SOURCE)"
-_cur_agent_src="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
-_cur_litmus_src="$(cur LITMUS_IMAGES_SOURCE)"
-if [[ "${_cur_app_src}"   == "local" || "${_cur_app_src}"   == "jfrog" || \
-      "${_cur_agent_src}" == "local" || "${_cur_agent_src}" == "jfrog" || \
-      "${_cur_litmus_src}" == "local" ]]; then
-    echo
-    "${REPO_ROOT}/scripts/prepare-images.sh"
+# Offer to restore a shut_down.sh MongoDB backup — only in the interactive,
+# non---restart wizard (never surprise an express/scripted/--restart run),
+# and only when something was actually deployed this run.
+if [[ "${SETUP_MODE}" == "setup" && $EXPRESS_MODE -eq 0 \
+      && ( "${deploy_choice,,}" == "h" || "${deploy_choice,,}" == "k" ) ]]; then
+    offer_mongodb_restore
 fi
-unset _cur_app_src _cur_agent_src _cur_litmus_src
+
+# --- Prepare experiment images -----------------------------------------------
+# Runs whenever any image source is non-default (local or jfrog). If the
+# stack was actually deployed just now (choice k/h above), this already ran
+# in the background — overlapped with that deploy's own long blocking wait
+# (mongodb-rs-init hook for helm, "wait for core services" for kubectl) via
+# maybe_launch_prepare_images_bg/wait_for_prepare_images_bg inside
+# k8s_deploy/helm_deploy — so both calls below are then a no-op
+# (_PREPARE_IMAGES_LAUNCHED is already 1, _PREPARE_IMAGES_PID already reaped).
+# When deploy was skipped (choice n) neither ran yet, so this launches +
+# immediately waits, i.e. behaves exactly like the old synchronous call.
+maybe_launch_prepare_images_bg
+wait_for_prepare_images_bg
 
 # --- Wait for background Ollama model pull ----------------------------------
 if [[ -n "${_OLLAMA_PULL_PID}" ]]; then

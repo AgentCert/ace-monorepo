@@ -976,3 +976,13 @@ After the 36-scenario ITBench batch finished, we ran a second batch: one experim
 Node-level faults, disk-fill, exec variants, pod-autoscaler, and pod-dns-spoof were excluded — either they'd destroy the single-node KinD cluster, require distroless exec access, or need configuration (HPA objects, SPOOF_MAP) that doesn't exist in this environment.
 
 One surprise: the ACE admin password had been changed from `litmus` via the UI (the exact password is in the live MongoDB `auth.users` collection, not recorded here). The auth REST NodePort is on host port 3006, not 3000 — check `KIND_HOSTPORT_AUTH_REST` in `.env`. The correct login URL when bypassing nginx is `http://localhost:3006/login` (not `/auth/login` — that prefix is nginx's). Once resolved, all 17 experiments registered and ran sequentially with zero failures over ~2.5 hours.
+
+---
+
+## Session 36 — SRE agent images integrated into setup.sh; 20-experiment batch launched (2026-08-14)
+
+Two new agents (sre-agent-comprehensive and sre-agent-crewai) were onboarded into the standard setup flow. Their Docker images, previously built only manually during a one-off session, are now part of `ALL_BUILD_IMAGES` in `setup.sh` and handled by `prepare-images.sh` when `SRE_AGENTS_IMAGE_SOURCE=local`. A fresh checkout running `./scripts/setup.sh --local-build` will build both agent images and kind-load them automatically. `.env.example` was updated to document the new variable.
+
+A batch of 20 experiments (10 per agent: 5 ITBench scenarios + 5 standard LitmusChaos faults targeting otel-demo) was generated and launched sequentially. The manifest generator (`create_sre_manifests.py`) reuses the already-proven ITBench and std-fault source manifests, replacing the `install-agent` step's image arguments to point to the locally-loaded KinD images (`imagePullPolicy=Never`). The launcher (`launch_all_sre.py`) is a direct port of the successful std-fault launcher with a longer per-workflow timeout (4200s).
+
+**Status: in progress** as of this writing — experiment 01/20 running.

@@ -3039,3 +3039,54 @@ New image SHA: `sha256:3f7ab0e2edae94c9b7845ec88ff4d6a00da6dcab8fa9a947be0b53502
 **Result:** 17/17 Succeeded, zero failures. All workflows ran sequentially with namespace-termination guards between them. Runtime: ~2.5 hours total.
 
 **Durability check:** All scripts are in `.tmp/` (gitignored) — intentionally not committed, as these are one-shot batch-run artifacts. The manifest generation script is self-contained and can regenerate all manifests from chaos-charts at any time. No source files were modified.
+
+---
+
+## 36. SRE-agent-comprehensive + SRE-agent-crewai 20-experiment batch: images built, agents onboarded into setup.sh, batch launched (2026-08-14, in-progress)
+
+**Context:** Continuing the coverage audit. The user requested 10 experiments per agent (5 ITBench + 5 standard faults) for sre-agent-comprehensive and sre-agent-crewai, catching and fixing any bugs before relaunching. Also requested that image building be integrated into setup.sh so the process is reusable.
+
+### Source changes (durable)
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Added entries 11 (`sre-agent-comprehensive`) and 12 (`sre-agent-crewai`) to `ALL_BUILD_IMAGES` array — both agents are now buildable via `./scripts/setup.sh --local-build` or interactive setup |
+| `scripts/prepare-images.sh` | Added `SRE_AGENTS_IMAGE_SOURCE` env var support; added `build_and_load_sre_agent()` function; added `case "${SRE_AGENTS_SRC}"` block that builds and kind-loads both agent images when `SRE_AGENTS_IMAGE_SOURCE=local` |
+| `.env.example` | Added `SRE_AGENTS_IMAGE_SOURCE=local` default (both agents are built from source for KinD use; switch to `dockerhub` when pre-built images are on Docker Hub) |
+
+**Durability check:** All three source files are committed to `feature/itbench-scenarios`. A fresh checkout running `./scripts/setup.sh --local-build` will automatically build both sre-agent images. `./scripts/prepare-images.sh` can also be run standalone to rebuild + kind-load them.
+
+### Batch scripts (`.tmp/`, not committed)
+
+| File | Description |
+|------|-------------|
+| `.tmp/sre-agent-experiments/batch-scripts/create_sre_manifests.py` | Generates 20 Argo Workflow manifests (10 per agent) from ITBench + std source manifests; injects `imagePullPolicy=Never` and correct image repo overrides for KinD-loaded images |
+| `.tmp/sre-agent-experiments/batch-scripts/register_experiment.py` | Copied verbatim from `.tmp/itbench-flash-agent-experiments/batch-scripts/register_experiment.py` (proven working) |
+| `.tmp/sre-agent-experiments/batch-scripts/launch_all_sre.py` | Sequential launcher matching the std-fault launcher pattern; ensures images are fresh in KinD before each experiment; 4200s timeout per workflow |
+| `.tmp/sre-agent-experiments/catalog.json` | 20-entry catalog tracking per-experiment status |
+
+### Experiment selection
+
+**sre-agent-comprehensive — ITBench:**
+- scenario-58-scaled-to-zero, scenario-16-shipping-env-var, scenario-20-nonexistent-image, scenario-18-checkout-pod-failure, scenario-105-product-catalog-invalid-command
+
+**sre-agent-comprehensive — Standard faults:**
+- pod-delete, pod-network-loss, pod-cpu-hog, pod-memory-hog, pod-http-latency
+
+**sre-agent-crewai — same 10 experiments** (independent agent, same fault selection)
+
+### Images
+
+Both agent images were built with `docker build --network=host` and loaded into KinD cluster `agentcert-alfred`:
+- `agentcert/sre-agent-comprehensive:latest` — from `agents/sre-agent-comprehensive/`
+- `agentcert/sre-agent-crewai:latest` — from `agents/sre-agent-crewai/`
+
+Confirmed present in KinD:
+```
+docker.io/agentcert/sre-agent-comprehensive   latest   78ea7a00f8da5   275MB
+docker.io/agentcert/sre-agent-crewai          latest   20fe983c23a73   275MB
+```
+
+### Status: IN PROGRESS (batch launched, experiment 01/20 running as of this writing)
+
+Result will be updated in a follow-up entry once the batch completes.

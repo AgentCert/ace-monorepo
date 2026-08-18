@@ -3090,3 +3090,87 @@ docker.io/agentcert/sre-agent-crewai          latest   20fe983c23a73   275MB
 ### Status: IN PROGRESS (batch launched, experiment 01/20 running as of this writing)
 
 Result will be updated in a follow-up entry once the batch completes.
+
+---
+
+## 37. setup.sh: interactive "which agent to benchmark" question + `--agent=<name>` switch flag (2026-08-14, uncommitted)
+
+**Context:** User asked for `scripts/setup.sh` to (a) ask the user which agent they want to benchmark, offering a list built from the subfolders of `agents/`, and (b) provide a flag to switch the choice without re-running the whole interactive wizard.
+
+**Design decisions:**
+- The agent list is computed at runtime by listing `agents/*/` and excluding `agents/harness/` (the harness/adapter directory, not an agent implementation) — no hardcoded list to keep in sync. Currently resolves to: `ciso-agent`, `flash-agent`, `sre-agent`, `sre-agent-comprehensive`, `sre-agent-crewai`. All five also have a matching `agents/harness/<name>/` entry, so every choice is immediately usable with `scripts/ace-bench.py <name>`.
+- The choice is persisted as `BENCHMARK_AGENT` in `.env` (new var, not previously present).
+- Scope was deliberately kept to `setup.sh` + `.env.example` only. `scripts/ace-bench.py` was **not** modified to default its positional `agent` arg from `$BENCHMARK_AGENT`, because that script never sources the root `.env` itself — wiring an env-var default that silently does nothing unless the user's shell happens to have `.env` exported would be a half-finished, misleading integration. Instead, the setup.sh summary now prints the exact ready-to-run command (`python scripts/ace-bench.py <BENCHMARK_AGENT>`).
+
+### Source changes (durable)
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Added `discover_agents()`/`AVAILABLE_AGENTS`/`agent_is_available()` helpers (near top, after `sanitize_instance_name`). Added `--agent=<name>` flag parsing + immediate validation/write to `.env` (works standalone or combined with `--restart`, independent of the full wizard — mirrors the `--rootless-docker` "modifier, applied before --setup/--restart" pattern). Added an "Agent to benchmark" question to both the express-mode single-screen prompt and the guided mode's step-by-step flow (inserted as new guided "Section 3", renumbering the old "3) How should Kubernetes be sourced?" → 4 and "4) Corporate proxy CA certificate" → 5). Wired `BENCHMARK_AGENT` into the existing shared Python `.env`-writer heredoc (same pattern as `FLASH_AGENT_MODEL`). Added `BENCHMARK_AGENT` to the final setup summary plus a "Run the benchmark" / "Switch the benchmark agent" hint line. |
+| `.env.example` | Added `BENCHMARK_AGENT=flash-agent` with a comment, next to `FLASH_AGENT_MODEL`. |
+
+**Durability check:** Confirmed by reading the diff — both the interactive question and the `--agent=` flag write directly into the checked-in `scripts/setup.sh` and `.env.example`, so a fresh checkout running `./scripts/setup.sh` (either express or guided style) will be asked the question, and `./scripts/setup.sh --restart --agent=<name>` works on any checkout with no prior state. Validated standalone (outside the full wizard, since it needs interactive TTY input and prerequisite checks) by extracting the `discover_agents`/`agent_is_available`/flag-validation logic into isolated `bash -c` snippets against a scratch `.env` copy: confirmed the agent list resolves to the 5 expected folders, a valid `--agent=ciso-agent` writes/replaces `BENCHMARK_AGENT` idempotently, and an invalid `--agent=nonexistent-agent` exits 1 with the valid-choices list. Also ran `bash -n scripts/setup.sh` after every edit (syntax check only — no live `docker compose`/`kind`/interactive run was performed, per the shared-host caution in §0).
+
+**Status:** Uncommitted (working tree change on `feature/itbench-scenarios`) as of this entry.
+
+---
+
+## 38. flash-agent-comprehensive-30: fix durable install-chaos-experiments step + UI experiment registration (2026-08-18)
+
+### Context
+
+The flash-agent-comprehensive-30 benchmark (53 ChaosExperiment CRDs across 53 fault types, 30 runs each) was originally driven by a custom Python orchestrator (`scripts/ace-bench.py` extended with a batch mode). The orchestrator pre-applied all ChaosExperiment CRDs to the `itbench` namespace before each run, but this step was absent from the Argo Workflow itself. When the experiment was run from the AgentCert UI, the `install-chaos-experiments` step was a silent no-op (`exit 0`), which meant no ChaosExperiment CRDs existed in the cluster when the 53 fault steps tried to launch ChaosEngines — the engines initialised and immediately stalled. The orchestrator also had a 60-minute hard timeout that recorded runs as TIMEOUT in memory; when a workflow later succeeded (after >60 min), the orchestrator's state.json write reverted any manual disk patches, causing ongoing monitoring overhead to re-fix them each cycle.
+
+This session: stopped the orchestrator, fixed the root cause durably, and prepared the experiment to run directly from the UI.
+
+### Bug B: install-chaos-experiments was a silent no-op in the Argo Workflow
+
+**Root cause:** The original `install-chaos-experiments` step ran `exit 0` unconditionally. The ChaosExperiment CRDs required by all 53 fault steps were never installed during UI-triggered runs. ChaosEngines initialised without matching CRDs → all fault steps timed out or stalled.
+
+**Fix:** Replaced the no-op with a ConfigMap-based installation step. All 53 CE YAML definitions (7,267 lines, ~305 KB) are stored in a `flash-agent-comprehensive-ces` ConfigMap in the `itbench` namespace. The install step reads and applies them:
+
+```
+kubectl get configmap flash-agent-comprehensive-ces -n {{workflow.parameters.adminModeNamespace}} \
+  -o jsonpath='{.data.ces\.yaml}' | kubectl apply -f - -n {{workflow.parameters.adminModeNamespace}} \
+  && echo "ChaosExperiment CRDs ready: $(kubectl get chaosexperiments -n {{workflow.parameters.adminModeNamespace}} --no-headers | wc -l)"
+```
+
+**Why ConfigMap:** Embedding all 53 CE YAMLs inline in the Argo Workflow manifest would produce ~300 KB of YAML, which would exceed etcd's 1.5 MB ConfigMap limit and Argo's 128 KB manifest ceiling respectively. The ConfigMap approach keeps the workflow manifest small (<128 KB) while reliably delivering all CRDs at run time.
+
+**Why server-side apply:** `kubectl apply --server-side` is required for the ConfigMap because its `data.ces\.yaml` value (~325 KB) exceeds kubectl's 262,144-byte client-side limit for `last-applied-configuration` annotations. Server-side apply does not write that annotation.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agents/harness/flash-agent/ces_for_apply.yaml` | **New file (committed):** 7,267-line, 53-doc YAML source for all 46 unique ChaosExperiment CRDs. Previously only existed under `.tmp/` (gitignored). This is now the tracked source of truth. |
+| `agents/harness/flash-agent/flash-agent-comprehensive-30-manifest.json` | **New file (committed):** 102,136-byte Argo Workflow manifest template. Has the fixed `install-chaos-experiments` step (ConfigMap-based). All occurrences of the live `infra_id` UUID are replaced with the `__INFRA_ID__` placeholder so the manifest is cluster-agnostic; `seed_flash_agent_comprehensive()` substitutes the live value at registration time. |
+| `scripts/setup.sh` | **New function `seed_flash_agent_comprehensive()`:** idempotent; runs after `sync_subscriber_secret` on every `helm_deploy`/`k8s_deploy` call. (1) Reads `infra_id` from `litmus.chaosInfrastructures` and `project_id` from `auth.project` via `mongosh`. (2) Upserts the `flash-agent-comprehensive-ces` ConfigMap into `itbench` with `kubectl apply --server-side`. (3) Gets a JWT from the auth REST API, reads the manifest template, substitutes `__INFRA_ID__`, and calls `saveChaosExperiment` (type `"Experiment"`) against the GraphQL server. Silently skips with a warning if the chaos infrastructure is not yet registered. |
+
+### Live cluster state (before setup.sh automation)
+
+The following were applied manually to the running cluster to prepare the UI experiment:
+
+1. `flash-agent-comprehensive-ces` ConfigMap created in `itbench` via `kubectl apply --server-side`.
+2. ChaosCenter experiment `333bf972-dd5e-4d5a-96c2-92f10e668126` updated via `saveChaosExperiment` mutation (`type: "Experiment"`, correct `infraID`, fixed install step args).
+
+The experiment is now visible in the AgentCert UI as `flash-agent-comprehensive-30` and can be launched directly from there.
+
+### Durability check
+
+Both `ces_for_apply.yaml` and the manifest template are committed to `feature/itbench-scenarios` under `agents/harness/flash-agent/`. The `seed_flash_agent_comprehensive()` call in `setup.sh` fires on every `./scripts/setup.sh --restart` after infrastructure registration, so a fresh checkout will automatically:
+- re-create the ConfigMap in the `itbench` namespace
+- register/update the experiment in ChaosCenter
+
+If the chaos infrastructure has not been registered yet (new cluster), the function skips with a `warn` and instructs the operator to re-run `--restart` after UI registration — same pattern as `sync_subscriber_secret`.
+
+**Note:** `ADMIN_PASSWORD` (used for the JWT login inside `seed_flash_agent_comprehensive`) is not committed to any file; it is read from `.env`'s `ADMIN_PASSWORD` key at runtime.
+
+### Gotchas discovered
+
+- **`saveChaosExperiment` type field:** Valid values from the schema are `All`, `Experiment`, `CronExperiment`, `ChaosEngine`, `ChaosSchedule`. Using `"NON_CRON"` returns `"NON_CRON is not a valid ExperimentType"`.
+- **GraphQL endpoint:** The ChaosCenter GraphQL API is at `http://localhost:<KIND_HOSTPORT_GRAPHQL_REST>/query`, not `/api/query` (which returns 404).
+- **`listProjects` does not exist in the schema:** Project ID must be fetched from MongoDB (`auth.project` collection, `_id` field), not via GraphQL.
+- **MongoDB URI with special characters in password:** The `.env` `ADMIN_PASSWORD` is the UI/REST admin password; MongoDB credentials are `MONGODB_USERNAME`/`MONGODB_PASSWORD` (local dev: `admin`/`1234`). Mixing them breaks URI parsing.
+
+### Status: committed (pending push to `feature/itbench-scenarios`)

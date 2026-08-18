@@ -986,3 +986,35 @@ Two new agents (sre-agent-comprehensive and sre-agent-crewai) were onboarded int
 A batch of 20 experiments (10 per agent: 5 ITBench scenarios + 5 standard LitmusChaos faults targeting otel-demo) was generated and launched sequentially. The manifest generator (`create_sre_manifests.py`) reuses the already-proven ITBench and std-fault source manifests, replacing the `install-agent` step's image arguments to point to the locally-loaded KinD images (`imagePullPolicy=Never`). The launcher (`launch_all_sre.py`) is a direct port of the successful std-fault launcher with a longer per-workflow timeout (4200s).
 
 **Status: in progress** as of this writing — experiment 01/20 running.
+
+## Session 37 — setup.sh now asks which agent to benchmark, plus a quick-switch flag (2026-08-14, uncommitted)
+
+The setup wizard now asks the user which agent they want to benchmark, offering a list built automatically from the subfolders under `agents/` (currently five: the CISO compliance agent, the FLASH-style SRE agent, the plain SRE agent, and two CrewAI-based SRE variants). The choice is saved to `.env` as `BENCHMARK_AGENT` and printed at the end of setup together with the exact command to run it.
+
+For anyone who just wants to switch which agent they're pointed at without re-answering every setup question, a new `--agent=<name>` flag does that directly — it validates the name against the same folder list and fails fast with the valid choices if it doesn't match, and it works combined with `--restart` for a one-line switch (`./scripts/setup.sh --restart --agent=ciso-agent`).
+
+One thing deliberately left undone: the benchmarking dev-tool script (`ace-bench.py`) was not changed to automatically pick up this saved choice, because that script doesn't read the project's `.env` file itself — making it "silently" respect a setting it can't actually see would be more confusing than helpful. Instead, setup now tells the user the exact command to copy-paste.
+
+---
+
+## Session 38 — flash-agent-comprehensive-30 made launchable from the UI (2026-08-18)
+
+### What was broken
+
+The flash-agent-comprehensive-30 benchmark had a silent failure baked into its Argo Workflow from the start: the `install-chaos-experiments` step did nothing (`exit 0`). The 53 ChaosExperiment CRDs the fault steps depend on were never applied to the cluster during UI-triggered runs — they were only applied by the Python orchestrator script that was running the benchmark manually. As a result, every one of the 53 fault steps would start a ChaosEngine, discover its matching CRD was missing, and stall indefinitely.
+
+The Python orchestrator worked around this (by applying the CRDs itself before each run), but it had its own problem: a 60-minute hard timeout that permanently recorded runs in memory as TIMEOUT. When a workflow later finished successfully — many comprehensive-30 runs exceed 60 minutes — the orchestrator's state.json write reverted any manually-applied disk patches, creating an ongoing monitoring tax each cycle.
+
+### What was fixed
+
+The root cause in the Argo Workflow was fixed by storing all 53 ChaosExperiment YAML definitions in a Kubernetes ConfigMap (`flash-agent-comprehensive-ces` in the `itbench` namespace) and replacing the no-op install step with a real one that reads and applies from it. The workflow manifest itself stays small (under 128 KB); the ConfigMap holds the ~305 KB of CE data separately, applied with `--server-side` because the payload exceeds kubectl's client-side annotation limit.
+
+The experiment was then updated in ChaosCenter to use the fixed manifest. It's now visible in the UI as `flash-agent-comprehensive-30` and can be launched directly by clicking Run.
+
+### Why it's durable
+
+Both the ConfigMap source file and the manifest template are now committed to the repo (under `agents/harness/flash-agent/`). A new `seed_flash_agent_comprehensive()` function in `setup.sh` fires after every `--restart`, automatically recreating the ConfigMap and re-registering the experiment in ChaosCenter. The only prerequisite: a chaos infrastructure must already be registered. If it isn't, the function skips and tells the operator to re-run `--restart` after registering via the UI — the same pattern the existing `sync_subscriber_secret` function uses.
+
+### Key gotchas
+
+Three easy-to-hit traps found during the implementation: the GraphQL `type` field for `saveChaosExperiment` must be `"Experiment"` (not `"NON_CRON"` — that isn't a valid enum value); the ChaosCenter GraphQL endpoint is `/query` on the graphql port, not `/api/query`; and `listProjects` doesn't exist in the schema — the project ID has to be read directly from MongoDB (`auth.project` collection).

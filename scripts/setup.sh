@@ -28,6 +28,16 @@ set -euo pipefail
 # Plain `./scripts/setup.sh` (--setup, no flag) asks this as a y/N question
 # instead, right at the start, before anything else. `--restart` never asks —
 # it skips all prompts by design — so pass the flag explicitly there.
+#
+#   ./scripts/setup.sh --agent=<name>
+#   ./scripts/setup.sh --restart --agent=<name>
+#
+# Sets BENCHMARK_AGENT in .env — which agent (a subfolder of agents/, e.g.
+# flash-agent, ciso-agent, sre-agent, sre-agent-crewai) `scripts/ace-bench.py`
+# should target. Pre-answers the interactive "Agent to benchmark" question
+# asked during --setup; combine with --restart to switch it with no other
+# prompts. Invalid names (anything not a folder under agents/) fail fast with
+# the list of valid choices.
 # =============================================================================
 
 # `pwd -P` (not plain `pwd`) is required here: plain `pwd` returns whatever
@@ -105,22 +115,70 @@ sanitize_instance_name() {
     echo "${clean:-instance}"
 }
 
+# --- Available agents (subfolders of agents/, excluding the harness/ dir) ---
+# Single source of truth for "which agent can be benchmarked" — matches what
+# `python scripts/ace-bench.py <agent>` accepts (agents/harness/<agent>/bench.yaml
+# must also exist, but agents/<name>/ is the human-facing list). Recomputed
+# every run (cheap directory listing) so a newly added agent folder shows up
+# with no script change needed.
+discover_agents() {
+    local d b
+    for d in "${REPO_ROOT}"/agents/*/; do
+        b="$(basename "$d")"
+        [[ "$b" == "harness" ]] && continue
+        echo "$b"
+    done | sort
+}
+mapfile -t AVAILABLE_AGENTS < <(discover_agents)
+
+# agent_is_available NAME — 0 if NAME is one of AVAILABLE_AGENTS, else 1
+agent_is_available() {
+    local want="$1" a
+    for a in "${AVAILABLE_AGENTS[@]}"; do
+        [[ "$a" == "$want" ]] && return 0
+    done
+    return 1
+}
+
 # --- Invocation mode ----------------------------------------------------------
 #   --setup            (default) full first-time wizard: prompts, writes .env, deploys
 #   --restart          skip all prompts and .env edits; just re-apply the stack
 #   --rootless-docker   modifier, see header comment above; runs before --setup/--restart, does not exit
+#   --agent=<name>      pre-answers "which agent to benchmark" (BENCHMARK_AGENT in .env);
+#                       name must be a subfolder of agents/ (see AVAILABLE_AGENTS above).
+#                       Combine with --restart for a quick switch with no other prompts:
+#                         ./scripts/setup.sh --restart --agent=ciso-agent
 SETUP_MODE="setup"
 BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
 ROOTLESS_DOCKER_ACTION=0
+AGENT_FLAG=""
 for _arg in "$@"; do
     case "$_arg" in
         --restart)         SETUP_MODE="restart" ;;
         --setup)           SETUP_MODE="setup"   ;;
         --local-build)     BUILD_MODE="local"   ;;
         --rootless-docker) ROOTLESS_DOCKER_ACTION=1 ;;
+        --agent=*)         AGENT_FLAG="${_arg#--agent=}" ;;
     esac
 done
 unset _arg
+
+# --agent=<name> is applied immediately and unconditionally (before the
+# --setup/--restart branch below), so it works as a standalone quick-switch
+# even under a plain `--restart` that would otherwise skip every prompt.
+if [[ -n "${AGENT_FLAG}" ]]; then
+    if ! agent_is_available "${AGENT_FLAG}"; then
+        echo "ERROR: --agent=${AGENT_FLAG} is not a known agent." >&2
+        echo "Available agents (subfolders of agents/): ${AVAILABLE_AGENTS[*]}" >&2
+        exit 1
+    fi
+    if grep -q '^BENCHMARK_AGENT=' "${ENV_FILE}" 2>/dev/null; then
+        sed -i "s|^BENCHMARK_AGENT=.*|BENCHMARK_AGENT=${AGENT_FLAG}|" "${ENV_FILE}"
+    else
+        echo "BENCHMARK_AGENT=${AGENT_FLAG}" >> "${ENV_FILE}"
+    fi
+    ok "BENCHMARK_AGENT set to '${AGENT_FLAG}' (via --agent)"
+fi
 
 # --- Rootless Docker bootstrap (opt-in modifier — runs before --setup/--restart) --
 # Sets up a private, per-user Docker daemon via dockerd-rootless-setuptool.sh
@@ -959,6 +1017,25 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     FLASH_MODEL="$(echo "${FLASH_MODEL:-${_flash_def}}" | tr -d '[:space:]')"
     echo
 
+    # Agent to benchmark
+    _bench_def="$(cur BENCHMARK_AGENT)"
+    if [[ -z "${_bench_def}" ]] || ! agent_is_available "${_bench_def}"; then
+        agent_is_available "flash-agent" && _bench_def="flash-agent" || _bench_def="${AVAILABLE_AGENTS[0]:-flash-agent}"
+    fi
+    echo -e "${BOLD}▸ Agent to benchmark${NC}  ${DIM}(agents/<name> — used by scripts/ace-bench.py; available: ${AVAILABLE_AGENTS[*]})${NC}"
+    if [[ -n "${AGENT_FLAG}" ]]; then
+        BENCHMARK_AGENT="${AGENT_FLAG}"
+        ok "  Using --agent=${BENCHMARK_AGENT}"
+    else
+        read -rp "$(echo -e "  Agent ${DIM}[${_bench_def}]${NC}: ")" _bench_ans
+        BENCHMARK_AGENT="${_bench_ans:-${_bench_def}}"
+        if ! agent_is_available "${BENCHMARK_AGENT}"; then
+            warn "  '${BENCHMARK_AGENT}' is not under agents/ — keeping '${_bench_def}'."
+            BENCHMARK_AGENT="${_bench_def}"
+        fi
+    fi
+    echo
+
     # Cluster + CA cert
     echo -e "${BOLD}▸ Cluster mode${NC}  ${DIM}auto=reuse/create kind  local=existing  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
     CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE')"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
@@ -1178,15 +1255,35 @@ read -rp "$(echo -e "  ${BOLD}Flash-agent model alias${NC} ${DIM}[${DEFAULT_FLAS
 FLASH_MODEL="$(echo "${FLASH_MODEL:-${DEFAULT_FLASH}}" | tr -d '[:space:]')"
 echo
 
+# --- Section 3: Agent to benchmark ------------------------------------------
+_bench_def="$(cur BENCHMARK_AGENT)"
+if [[ -z "${_bench_def}" ]] || ! agent_is_available "${_bench_def}"; then
+    agent_is_available "flash-agent" && _bench_def="flash-agent" || _bench_def="${AVAILABLE_AGENTS[0]:-flash-agent}"
+fi
+echo -e "${BOLD}3) Agent to benchmark${NC} ${DIM}(agents/<name> — used by scripts/ace-bench.py)${NC}"
+echo -e "   ${DIM}Available: ${AVAILABLE_AGENTS[*]}${NC}"
+if [[ -n "${AGENT_FLAG}" ]]; then
+    BENCHMARK_AGENT="${AGENT_FLAG}"
+    ok "  Using --agent=${BENCHMARK_AGENT}"
+else
+    read -rp "$(echo -e "  Agent ${DIM}[${_bench_def}]${NC}: ")" _bench_ans
+    BENCHMARK_AGENT="${_bench_ans:-${_bench_def}}"
+    if ! agent_is_available "${BENCHMARK_AGENT}"; then
+        warn "  '${BENCHMARK_AGENT}' is not under agents/ — keeping '${_bench_def}'."
+        BENCHMARK_AGENT="${_bench_def}"
+    fi
+fi
+echo
+
 # --- OPTIONAL: cluster + infra modes ---------------------------------------
-echo -e "${BOLD}3) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
+echo -e "${BOLD}4) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
 echo -e "   ${DIM}auto=reuse/create kind  local=existing cluster  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
 CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/cloud/fresh)')"
 CLUSTER_MODE="${CLUSTER_MODE:-auto}"
 echo
 
 # --- Corporate proxy CA certificate ----------------------------------------
-echo -e "${BOLD}4) Corporate proxy CA certificate${NC} ${DIM}(needed for git clone inside containers on proxy networks)${NC}"
+echo -e "${BOLD}5) Corporate proxy CA certificate${NC} ${DIM}(needed for git clone inside containers on proxy networks)${NC}"
 echo -e "   ${DIM}Leave blank to use the host system bundle (/etc/ssl/certs/ca-certificates.crt).${NC}"
 CUSTOM_CA_CERT_PATH="$(ask CUSTOM_CA_CERT_PATH 'Path to root CA cert file (.pem/.crt, Enter to skip)')"
 CUSTOM_CA_CERT_PATH="$(echo "${CUSTOM_CA_CERT_PATH}" | tr -d '[:space:]')"
@@ -1229,6 +1326,7 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _OLLAMA_MODEL_TAG="${OLLAMA_MODEL_TAG:-}" _OLLAMA_ALIAS="${OLLAMA_ALIAS:-}" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
        _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
+       _BENCHMARK_AGENT="${BENCHMARK_AGENT:-}" \
        _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}" \
        _INSTALL_APP_SRC="${_INSTALL_APP_SRC:-}" _INSTALL_AGENT_SRC="${_INSTALL_AGENT_SRC:-}" \
        _LITMUS_SRC="${_LITMUS_SRC:-}" \
@@ -1288,6 +1386,11 @@ if openrouter_key:
 flash_model = os.environ.get("_FLASH_MODEL", "")
 if flash_model:
     sets["FLASH_AGENT_MODEL"] = flash_model
+
+# ── Agent to benchmark ────────────────────────────────────────────────────────
+benchmark_agent = os.environ.get("_BENCHMARK_AGENT", "")
+if benchmark_agent:
+    sets["BENCHMARK_AGENT"] = benchmark_agent
 
 # ── Ollama model ──────────────────────────────────────────────────────────────
 # OLLAMA_MODEL is the "live" tag: non-empty means setup.sh actively manages
@@ -1461,7 +1564,7 @@ for k, v in sets.items():
 open(path, "w").write("\n".join(lines) + "\n")
 PY
 
-ok "Wrote LiteLLM model config, flash-agent model, and CLUSTER_MODE=${CLUSTER_MODE} to .env"
+ok "Wrote LiteLLM model config, flash-agent model, BENCHMARK_AGENT=${BENCHMARK_AGENT}, and CLUSTER_MODE=${CLUSTER_MODE} to .env"
 
 # --- patch litellm_config.yaml with the chosen Ollama model -----------------
 if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
@@ -1513,12 +1616,15 @@ if [[ -z "$AZ_KEY" && -z "$GEMINI_KEY" && -z "$OPENROUTER_KEY" && -z "${OLLAMA_M
     warn "No LLM providers configured — agents won't be able to make LLM calls (re-run to add one)."
 fi
 echo -e "  Flash-agent model : ${BOLD}${FLASH_MODEL}${NC}"
+echo -e "  Benchmark agent   : ${BOLD}${BENCHMARK_AGENT}${NC}"
 echo -e "  Cluster mode      : ${BOLD}${CLUSTER_MODE}${NC}"
 echo -e "  Infra             : MongoDB + Langfuse + LiteLLM run locally ${DIM}(defaults; edit .env to change)${NC}"
 echo -e "${CYAN}-------------------------------------------------------${NC}"
 echo
 echo -e "Next:  ${BOLD}./scripts/setup.sh${NC} then answer Y to deploy, or run ${BOLD}kubectl get pods -n ace${NC}"
 echo -e "       Re-deploy without re-entering values: ${BOLD}./scripts/setup.sh --restart${NC}"
+echo -e "       Run the benchmark: ${BOLD}python scripts/ace-bench.py ${BENCHMARK_AGENT}${NC}"
+echo -e "       Switch the benchmark agent: ${BOLD}./scripts/setup.sh --restart --agent=<name>${NC}  ${DIM}(available: ${AVAILABLE_AGENTS[*]})${NC}"
 echo -e "Docs:  ${DIM}docs/setup/  ·  configuration & ports: docs/setup/configuration.md${NC}"
 echo
 
@@ -2221,6 +2327,149 @@ sync_subscriber_secret() {
     fi
 }
 
+# seed_flash_agent_comprehensive
+# Idempotent: creates/updates the flash-agent-comprehensive-30 experiment in ChaosCenter.
+# Steps: (1) pull infra_id + project_id from MongoDB, (2) upsert the flash-agent-comprehensive-ces
+# ConfigMap in itbench namespace, (3) register/update the experiment via saveChaosExperiment.
+# Silently skips (with a warning) if the chaos infrastructure is not yet registered — the
+# operator can re-run `./scripts/setup.sh --restart` after registering via the UI.
+seed_flash_agent_comprehensive() {
+    local ACE_NS="itbench"
+    local PLATFORM_NS="ace"
+    local manifest_template="${REPO_ROOT}/agents/harness/flash-agent/flash-agent-comprehensive-30-manifest.json"
+    local ces_file="${REPO_ROOT}/agents/harness/flash-agent/ces_for_apply.yaml"
+
+    if [[ ! -f "${manifest_template}" || ! -f "${ces_file}" ]]; then
+        warn "seed_flash_agent_comprehensive: source files missing from agents/harness/flash-agent/ — skipping"
+        return 0
+    fi
+
+    echo -e "${DIM}Seeding flash-agent-comprehensive-30 experiment…${NC}"
+
+    # --- Step 1: infra_id + project_id from MongoDB ---
+    local mongo_user mongo_pass mongo_uri infra_id project_id
+    mongo_user="$(cur MONGODB_USERNAME)"; mongo_user="${mongo_user:-admin}"
+    mongo_pass="$(cur MONGODB_PASSWORD)"; mongo_pass="${mongo_pass:-1234}"
+    mongo_uri="mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true"
+
+    infra_id="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
+        mongosh "${mongo_uri}" --quiet --eval \
+        'var doc = db.getSiblingDB("litmus").chaosInfrastructures.findOne({is_registered:true});
+         if(doc){ print(doc.infra_id); }' \
+        2>/dev/null)" || true
+
+    if [[ -z "${infra_id}" ]]; then
+        warn "seed_flash_agent_comprehensive: no registered chaos infrastructure found."
+        warn "  Register an infrastructure via the UI, then re-run: ./scripts/setup.sh --restart"
+        return 0
+    fi
+
+    project_id="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
+        mongosh "${mongo_uri}" --quiet --eval \
+        'var doc = db.getSiblingDB("auth").project.findOne();
+         if(doc){ print(doc._id.toString()); }' \
+        2>/dev/null)" || true
+
+    if [[ -z "${project_id}" ]]; then
+        warn "seed_flash_agent_comprehensive: could not determine project ID — skipping."
+        return 0
+    fi
+
+    # --- Step 2: upsert ConfigMap in itbench namespace ---
+    if kubectl get namespace "${ACE_NS}" >/dev/null 2>&1; then
+        kubectl create configmap flash-agent-comprehensive-ces \
+            --from-file=ces.yaml="${ces_file}" \
+            -n "${ACE_NS}" \
+            --dry-run=client -o yaml \
+        | kubectl apply --server-side -f - >/dev/null 2>&1 \
+        && ok "flash-agent-comprehensive-ces ConfigMap applied in namespace ${ACE_NS}" \
+        || warn "seed_flash_agent_comprehensive: failed to apply ConfigMap — continuing"
+    else
+        warn "seed_flash_agent_comprehensive: namespace ${ACE_NS} not found — ConfigMap skipped"
+    fi
+
+    # --- Step 3: get JWT ---
+    local auth_port admin_user admin_pass jwt
+    auth_port="$(cur KIND_HOSTPORT_AUTH_REST)"; auth_port="${auth_port:-3000}"
+    admin_user="$(cur ADMIN_USERNAME)"; admin_user="${admin_user:-admin}"
+    admin_pass="$(cur ADMIN_PASSWORD)"; admin_pass="${admin_pass:-litmus}"
+
+    jwt="$(curl -sf -X POST "http://localhost:${auth_port}/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"${admin_user}\",\"password\":\"${admin_pass}\"}" \
+        2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))")" || true
+
+    if [[ -z "${jwt}" ]]; then
+        warn "seed_flash_agent_comprehensive: auth service login failed — experiment not registered."
+        return 0
+    fi
+
+    # --- Step 4: saveChaosExperiment mutation ---
+    local gql_port result
+    gql_port="$(cur KIND_HOSTPORT_GRAPHQL_REST)"; gql_port="${gql_port:-8081}"
+
+    result="$(INFRA_ID="${infra_id}" PROJECT_ID="${project_id}" JWT="${jwt}" \
+        GQL_PORT="${gql_port}" MANIFEST_TEMPLATE="${manifest_template}" \
+        python3 - <<'PYEOF'
+import json, sys, os, urllib.request, urllib.error
+
+infra_id        = os.environ["INFRA_ID"]
+project_id      = os.environ["PROJECT_ID"]
+jwt             = os.environ["JWT"]
+gql_port        = os.environ["GQL_PORT"]
+manifest_tpl    = os.environ["MANIFEST_TEMPLATE"]
+
+with open(manifest_tpl) as f:
+    manifest = f.read().replace("__INFRA_ID__", infra_id)
+
+payload = json.dumps({
+    "query": (
+        "mutation saveChaosExperiment($request: SaveChaosExperimentRequest!, $projectID: ID!) {"
+        "  saveChaosExperiment(request: $request, projectID: $projectID)"
+        "}"
+    ),
+    "variables": {
+        "projectID": project_id,
+        "request": {
+            "id": "333bf972-dd5e-4d5a-96c2-92f10e668126",
+            "type": "Experiment",
+            "name": "flash-agent-comprehensive-30",
+            "description": "Flash-agent 53-fault benchmark (30 runs per fault)",
+            "manifest": manifest,
+            "infraID": infra_id,
+            "tags": []
+        }
+    }
+}).encode()
+
+req = urllib.request.Request(
+    f"http://localhost:{gql_port}/query",
+    data=payload,
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {jwt}",
+    }
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        d = json.loads(resp.read())
+        if "errors" in d:
+            print(f"ERROR: {d['errors'][0]['message']}", file=sys.stderr)
+            sys.exit(1)
+        print(d["data"]["saveChaosExperiment"])
+except urllib.error.HTTPError as e:
+    print(f"ERROR: HTTP {e.code} — {e.read().decode()[:200]}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    )" || { warn "seed_flash_agent_comprehensive: experiment registration failed (see above)."; return 0; }
+
+    ok "flash-agent-comprehensive-30 registered in ChaosCenter (infra=${infra_id}, project=${project_id})"
+}
+
 # load_images_into_kind CLUSTER_NAME
 # Loads every image in LOCAL_BUILT_IMAGES into the named KinD cluster so pods
 # use the locally built copy instead of pulling from Docker Hub.
@@ -2577,6 +2826,9 @@ k8s_deploy() {
 
     # 9c) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered)
     sync_subscriber_secret
+
+    # 9d) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
+    seed_flash_agent_comprehensive
 
     # 10) Print access URLs
     local admu admp luser lpass

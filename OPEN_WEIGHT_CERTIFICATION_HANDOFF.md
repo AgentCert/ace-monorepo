@@ -4554,3 +4554,94 @@ Halving rather than using full `nproc` keeps this checkout from oversubscribing 
 Confirmed: fix lands entirely in checked-in source (`scripts/setup.sh`); every future `setup.sh` invocation (any checkout, any host, fresh or existing) computes its own default from `nproc` at run time — no per-host manual configuration needed unless a host explicitly wants to override via `ACE_BUILD_PARALLELISM`.
 
 ### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet.
+
+---
+
+## 55. Committed and pushed all outstanding work across the main repo and 7 submodules on `feature/itbench-scenarios`; found two substantial fixes that had never been logged here (2026-08-19, committed + pushed)
+
+### Context
+
+Every fix from §21-54 above (and several submodule-side companions to them:
+`agent-charts`, `agent-sidecar`, `agentcert-stack`, `app-charts`, `certifier`,
+`chaos-charts`) had accumulated as uncommitted working-tree changes across the
+main repo and its submodules, by explicit prior-session design ("Not committed
+or pushed — user has not asked for that yet" on nearly every entry above). User
+asked this session to commit and push everything, and to bump the main repo's
+submodule pointers to match.
+
+### What was done
+
+- Fixed `agentcert-stack`'s detached-HEAD state (its local `feature/itbench-scenarios`
+  branch pointer was 1 commit stale relative to the checked-out commit — fast-forwarded
+  it with `git branch -f` rather than losing the working-tree diff to a checkout conflict).
+- Committed each of the 7 submodules on `feature/itbench-scenarios`, grouped by logical
+  theme rather than one commit per file (AgentCert alone: 6 commits covering auth gRPC
+  connection pooling, per-fault Argo-timestamp windows, least-privilege namespace RBAC +
+  manifest-download URL + finalizer-based namespace cleanup, fault-application-compatibility
+  UI, and a standalone project-role revalidation fix). Verified `go build ./...` clean in
+  both `AgentCert/chaoscenter/graphql/server` and `AgentCert/chaoscenter/subscriber` before
+  pushing, given the scale of the gRPC-pooling refactor's call-site churn.
+- Pushed all 7 submodules to their `AgentCert`-org remotes (verified `.gitmodules` and each
+  submodule's `git remote -v` agree and both point at the `AgentCert` org, per this file's
+  §1 rule, before pushing).
+- Bumped all 7 submodule pointers in the main repo (`litmus-go` was already in sync, no bump
+  needed) and committed the root-level changes (docs, `docker-compose.yml`/`compose/`/`deploy/`
+  infra, `scripts/setup.sh`/`shut_down.sh`/`ace-bench.py`, two new utility scripts) in 5 further
+  thematic commits, then pushed. 10 commits landed on the main repo's `feature/itbench-scenarios`
+  in total (6 new this session + 4 that were already committed locally but had never been pushed
+  either — confirmed via `git fetch` + `git log origin/...HEAD` before pushing, not assumed).
+
+### Two fixes found already sitting in the `AgentCert` working tree with no Handoff entry at all
+
+Neither of these was written this session — they were already-complete, uncommitted code
+found while surveying the diff to write commit messages. Recording them here since neither
+had ever been logged, and a future session grepping this file for e.g. `GetAuthGRPCSvcClient`
+or `GetKnownApplicationNamespaces` would otherwise have found nothing:
+
+1. **Auth gRPC connection pooling.** §47's "Other findings not acted on this session" flagged
+   `auth_grpc_client.go`'s `GetAuthGRPCSvcClient()` dialing a brand-new gRPC connection to
+   `auth` on every single `@authorized`-gated request, with no timeout and no pooling, as
+   "worth fixing in a future session." That fix was already fully implemented and working in
+   the tree: `InitAuthGRPCConn()` now dials once at startup (`server.go`) into a package-level
+   `*grpc.ClientConn` that every request-scoped call reuses via a no-arg
+   `GetAuthGRPCSvcClient()`, and `ValidatorGRPCRequest`/`GetProjectById`/`GetUserById` each
+   take the caller's own `ctx` bounded with a 5s timeout. Call sites (`validate.go`,
+   `project_handler.go`, `gitops/service.go`) were already updated to match. Committed as
+   `dadb04d` on the AgentCert submodule.
+2. **Least-privilege namespace RBAC for infra service accounts.** The infra service account
+   previously needed cluster-wide `list`/`watch` on `namespaces` just so the subscriber's
+   namespace picker could see target-application namespaces (sock-shop, book-info, otel-demo)
+   it doesn't own — Kubernetes RBAC can't scope `list`/`watch` to a `resourceNames` subset, so
+   that grant let it enumerate every namespace on the cluster, including unrelated ones
+   (`kube-system`, `ace`, `monitoring`). Already-implemented fix: `apphub.GetKnownApplicationNamespaces()`
+   reads the live app-charts catalog, `infra_utils.go`'s `ManifestParser` substitutes it into a
+   new `get`-only RBAC allowlist (`#{TARGET_NAMESPACE_RESOURCE_NAMES}`) and a `TARGET_APP_NAMESPACES`
+   ConfigMap env var, and the subscriber's `GetKubernetesNamespaces()` resolves each candidate
+   individually via `Get` instead of `List`. Committed as part of `6798e41` on the AgentCert
+   submodule (bundled with the manifest-download-URL fix and the finalizer-based namespace
+   cleanup, since all three share the same one or two files).
+
+Neither fix's authorship, review status, or live-verification state prior to this session is
+known — they were reconstructed from the diff alone. `go build` passing is the only
+verification performed this session for either; **neither has been exercised against a live
+cluster this session.**
+
+### Intentionally left uncommitted
+
+- `certifier/data/app.log`: pytest debug-log noise (error/info lines from local test runs),
+  not source. Excluded from the certifier commits; still shows modified in `git status`.
+- `.claude-diag-test.txt` (main repo root): a 4-byte scratch file (content: `test`), clearly
+  diagnostic cruft, not part of any deliverable. Left untracked, not added.
+
+Both are noted here rather than silently dropped, per this file's own standard.
+
+### Durability check
+
+N/A in the usual sense — this entry is a record of commit/push bookkeeping and of two
+previously-undocumented fixes, not new source code. Everything described above already
+landed in checked-in source before this session started (the two "found" fixes) or is the act
+of landing already-written source into the repos' permanent history (everything else) — a
+fresh checkout of `feature/itbench-scenarios` on any of the 8 repos now includes all of it by
+construction.
+
+### Status: committed and pushed. Main repo and all 7 submodules confirmed at `origin/feature/itbench-scenarios` (verified `git fetch` + `git status --short --branch` showed no ahead/behind on any of them after the final push), except the two intentionally-excluded files above.

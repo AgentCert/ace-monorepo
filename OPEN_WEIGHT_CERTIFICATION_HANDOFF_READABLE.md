@@ -1519,3 +1519,28 @@ Made the default genuinely depend on the machine: it now asks the machine how ma
 **Is this durable?** Yes — it's a change to the checked-in script itself, so every future run, on any machine, sizes itself automatically with no manual setup needed.
 
 **Status:** Not committed yet — working-tree change only, per the standing instruction to only commit when asked.
+
+---
+
+## 55. Committed and pushed everything that had been piling up uncommitted across the main repo and all 7 submodules — and along the way found two real fixes that had never made it into this log
+
+**What was going on:** Basically every entry above this one ends with some version of "not committed yet — nobody's asked for that." That request finally came: commit and push all of it, across the main repo and every submodule, on the shared `feature/itbench-scenarios` branch, and make sure the main repo points at the right new submodule commits afterward.
+
+**What happened:** Went through each of the 7 changed submodules (an 8th, `litmus-go`, had nothing pending) and committed their changes in logical groups rather than one giant dump — for example, the `AgentCert` submodule alone became 6 separate commits, one each for things like the new gRPC connection pooling, the new per-fault timing data, the namespace permissions tightening, and so on, because lumping unrelated fixes into one commit makes history harder to read later. Before pushing the biggest of those (a fairly invasive change to how the server talks to the auth service), ran a full Go build in both affected packages just to be safe given how much code it touched — both came back clean.
+
+One submodule (`agentcert-stack`) had gotten itself into a slightly awkward state — checked out at a commit that was one step ahead of what its own local branch pointer thought was true. Fixed that by moving the branch pointer forward to match, rather than risking losing the pending change trying to switch branches the normal way.
+
+Everything got pushed: 7 submodule repos, then the main repo's submodule-pointer bump, then the main repo's own remaining changes (documentation, deployment config, setup scripts) in 5 more logically-grouped commits. Along the way, checked with `git fetch` that nothing on any of these branches upstream had moved in a way that would conflict — it hadn't, on any of the 8 repos.
+
+**Two things worth calling out:** while reading through the `AgentCert` submodule's changes to write sensible commit messages, found two substantial, fully-working fixes just sitting there uncommitted that had never actually been written up in this log at all — meaning if this session hadn't happened to read the diff closely, a future session would have no way to know they existed:
+
+1. A fix for something flagged much earlier (§47) as "worth doing later" — the server used to open a brand new connection to the authentication service for every single permission check, with no timeout, which is wasteful and risks hanging forever if that service is slow. The actual fix (one shared long-lived connection, opened once at startup, with a 5-second timeout on every call) was already fully written and working — just never committed or logged.
+2. A real security tightening: the piece of the system that talks to Kubernetes on behalf of a connected chaos-testing agent used to need permission to see *every* namespace on the whole cluster, just so it could show a dropdown of "which app do you want to break." That's more access than it should ever need. The fix narrows it down to only the namespaces of apps ACE actually knows about (read from the same catalog the Apps Hub already uses), so the agent's Kubernetes account can no longer see anything it has no business seeing. Also already fully written, just never logged or committed.
+
+Neither of these was written this session — they were discovered already sitting there, complete. Both are now committed and pushed, and this entry is the only record of what they do and why, since nothing existed before.
+
+**Two files were deliberately left out** of everything committed: a log file inside the certifier submodule that was just accumulated pytest debug output (not real code), and a 4-byte scratch file in the main repo root that was obviously a leftover diagnostic test, not real work.
+
+**Is this durable?** Yes in the sense that matters here — everything described was already proper, checked-in-ready source code before this session began (the two "found" fixes) or is now permanently part of each repo's history (everything else committed and pushed this session). A fresh clone of any of the 8 repos' `feature/itbench-scenarios` branch now includes all of it automatically.
+
+**Status:** Committed and pushed everywhere. Double-checked afterward that the main repo and all 7 submodules show zero commits ahead or behind their upstream `origin/feature/itbench-scenarios` — aside from the two intentionally-excluded files noted above.

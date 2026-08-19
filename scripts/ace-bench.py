@@ -216,6 +216,69 @@ def render_pdf(python: Path, cert_json: Path, pdf_path: Path) -> None:
         log("PDF rendering failed (non-fatal).")
 
 
+ITBENCH_NAMESPACE = "itbench"
+
+
+def prompt_itbench_pod_cleanup(namespace: str = ITBENCH_NAMESPACE) -> None:
+    """Ask what to do with the fault-injection pods this run left behind.
+
+    Every ChaosEngine in chaos-charts/faults/itbench/ sets
+    jobCleanUpPolicy: retain (so a completed run's pod/logs stay inspectable
+    post-hoc — see OPEN_WEIGHT_CERTIFICATION_HANDOFF.md §27). Nothing else
+    reaps them, so left unprompted they accumulate namespace-wide across
+    every run. Scoped strictly to Completed (phase=Succeeded) pods in this
+    one namespace — never touches Error/Running pods or any other namespace.
+    """
+    try:
+        result = subprocess.run(
+            ["kubectl", "get", "pods", "-n", namespace,
+             "--field-selector=status.phase=Succeeded", "-o", "name"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return  # kubectl unavailable — nothing to prompt about
+
+    if result.returncode != 0:
+        return  # e.g. namespace doesn't exist / no cluster access — skip silently
+
+    pod_names = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    if not pod_names:
+        return
+
+    log(f"{len(pod_names)} Completed pod(s) left behind in namespace '{namespace}' "
+        f"(jobCleanUpPolicy: retain keeps them for post-hoc log inspection).")
+
+    if not sys.stdin.isatty():
+        log("Non-interactive session — leaving them. "
+            f"Run './scripts/shut_down.sh --clean-itbench-pods' to remove them later.")
+        return
+
+    print()
+    print(f"  What would you like to do with the {len(pod_names)} Completed pod(s) "
+          f"in '{namespace}'?")
+    print("    [1] Leave them (default — keeps logs available for inspection)")
+    print("    [2] Delete them now")
+    try:
+        choice = input("  Choice [1]: ").strip()
+    except EOFError:
+        choice = ""
+
+    if choice != "2":
+        log("Leaving Completed pods in place.")
+        return
+
+    log(f"Deleting {len(pod_names)} Completed pod(s) in namespace '{namespace}'…")
+    del_result = subprocess.run(
+        ["kubectl", "delete", "pods", "-n", namespace,
+         "--field-selector=status.phase=Succeeded"],
+        capture_output=True, text=True,
+    )
+    if del_result.returncode == 0:
+        log("Done.")
+    else:
+        log(f"WARN: pod cleanup failed: {del_result.stderr.strip()[-300:]}")
+
+
 def load_results(results_file: Path) -> list[dict]:
     if not results_file.exists():
         return []
@@ -636,6 +699,8 @@ Pipeline config is read from agents/harness/<agent>/bench.yaml.
         log("=" * 60)
     else:
         log(f"Benchmark complete (no cert JSON at expected path {cert_json}).")
+
+    prompt_itbench_pod_cleanup()
 
 
 if __name__ == "__main__":

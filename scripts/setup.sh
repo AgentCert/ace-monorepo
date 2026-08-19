@@ -277,8 +277,8 @@ if [[ "${ROOTLESS_DOCKER_ACTION}" -eq 1 ]]; then
     # indefinitely mid-pull. Detected fresh from the live default route on
     # every run so this stays correct if the checkout (or this script) moves
     # to a different host/network — never hardcode a specific MTU value here.
-    _rootless_iface="$(ip -o route get 8.8.8.8 2>/dev/null | grep -oP '(?<=dev )\S+' | head -1)"
-    _rootless_mtu="$(ip -o link show dev "${_rootless_iface}" 2>/dev/null | grep -oP '(?<=mtu )\d+' | head -1)"
+    _rootless_iface="$(ip -o route get 8.8.8.8 2>/dev/null | grep -oP '(?<=dev )\S+' | head -1 || true)"
+    _rootless_mtu="$(ip -o link show dev "${_rootless_iface}" 2>/dev/null | grep -oP '(?<=mtu )\d+' | head -1 || true)"
     _rootless_mtu="${_rootless_mtu:-1500}"
     _rootless_dropin_dir="${HOME}/.config/systemd/user/docker.service.d"
     _rootless_dropin="${_rootless_dropin_dir}/10-ace-mtu.conf"
@@ -365,7 +365,7 @@ Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_MTU=${_rootless_mtu}
     _civ_pin_version="2.2.6"
     _civ_arch="$(uname -m)"; case "${_civ_arch}" in x86_64) _civ_arch="amd64" ;; aarch64) _civ_arch="arm64" ;; esac
     _civ_pin_dir="${HOME}/.local/share/ace-rootless-docker/containerd-pin"
-    _civ_sys_ver="$(containerd --version 2>/dev/null | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    _civ_sys_ver="$(containerd --version 2>/dev/null | grep -oP 'v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     _civ_sys_major="${_civ_sys_ver%%.*}"
     _civ_sys_rest="${_civ_sys_ver#*.}"
     _civ_sys_minor="${_civ_sys_rest%%.*}"
@@ -679,13 +679,25 @@ _ollama_model_cur="$(cur OLLAMA_MODEL)"
 _ollama_alias_cur=""
 [[ -n "${_ollama_model_cur}" ]] && _ollama_alias_cur="$(echo "${_ollama_model_cur}" | tr ':' '-')"
 
-# Ollama is checked first and wins ties: it's the only provider whose
-# "health" this script can actually confirm end-to-end (a real, running,
-# ownership-guarded local container — see the Ollama-ensure-running block
-# below), whereas Azure/Gemini/OpenRouter health here is just "looks like a
-# real key/endpoint was typed in," not a verified live credential.
+# Ollama is checked first and wins ties when it IS actually up: it's the only
+# provider whose "health" this script can confirm end-to-end against a real,
+# running, ownership-guarded local container (ollama-${ACE_INSTANCE_NAME}),
+# whereas Azure/Gemini/OpenRouter health here is just "looks like a real
+# key/endpoint was typed in," not a verified live credential. Previously this
+# only checked that OLLAMA_MODEL was a non-empty string in .env -- true even
+# when the container is stopped or was never started this session -- so a
+# FLASH_AGENT_MODEL left pointing at Ollama from an earlier run was never
+# corrected back to a working Azure/Gemini/OpenRouter config that was added
+# later, and experiments failed with "could not access Ollama" despite valid
+# Azure credentials sitting right next to it in .env.
 declare -a _healthy_aliases=()
-[[ -n "${_ollama_alias_cur}" ]] && _healthy_aliases+=("${_ollama_alias_cur}")
+if [[ -n "${_ollama_alias_cur}" ]]; then
+    _ollama_container_name="ollama-$(cur ACE_INSTANCE_NAME)"
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${_ollama_container_name}" 2>/dev/null)" == "true" ]]; then
+        _healthy_aliases+=("${_ollama_alias_cur}")
+    fi
+    unset _ollama_container_name
+fi
 if [[ -n "${_az_key}" && -n "${_az_endpoint}" && "${_az_endpoint}" != *YOUR_RESOURCE* && "${_az_endpoint}" != *CHANGE_ME* ]]; then
     _healthy_aliases+=("${_az_alias:-gpt-4o}")
 fi
@@ -813,7 +825,7 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
                 for _entry in "${ALL_BUILD_IMAGES[@]}"; do
                     IFS='|' read -r _fnum _flabel _fimg _fctx _fdf _fmethod <<< "$_entry"
                     [[ -z "${_fctx}" || ! -d "${_fctx}" ]] && continue
-                    _frecorded="$(grep -m1 "^IMG_${_fnum}=" "${_fp_file}" 2>/dev/null | cut -d= -f2-)"
+                    _frecorded="$(grep -m1 "^IMG_${_fnum}=" "${_fp_file}" 2>/dev/null | cut -d= -f2- || true)"
                     [[ -z "${_frecorded}" ]] && continue
                     _fsha="$(git -C "${_fctx}" rev-parse HEAD 2>/dev/null || echo unknown)"
                     _fdirty="$(git -C "${_fctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')"
@@ -1047,7 +1059,7 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
 
     # Deploy choice (asked now so the rest runs unattended)
     echo -e "${BOLD}▸ Deploy to Kubernetes?${NC}  k=kubectl  h=helm  n=skip"
-    read -rp "  Choice [k/h/N]: " _DEPLOY_CHOICE
+    read -rp "  Choice [k/H/n]: " _DEPLOY_CHOICE
     echo
     echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
     ok "All answers collected — script will now run unattended."
@@ -1818,7 +1830,7 @@ post_cloud_setup() {
             lb_ip="$(kubectl get svc web -n "${ns}" \
                 -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
         fi
-        if [[ -z "${lb_ip}" ]]; then sleep 5; (( attempts++ )); fi
+        if [[ -z "${lb_ip}" ]]; then sleep 5; attempts=$(( attempts + 1 )); fi
     done
     if [[ -z "${lb_ip}" ]]; then
         warn "Web LoadBalancer IP/hostname not yet assigned. Add it to ALLOWED_ORIGINS in .env, then re-run:"
@@ -1965,6 +1977,114 @@ assert_kind_cluster_ownership() {
 mark_kind_cluster_owned()   { docker volume create --label "ace.kind.owner=${REPO_ROOT}" "$(kind_owner_marker "$1")" >/dev/null; }
 unmark_kind_cluster_owned() { docker volume rm "$(kind_owner_marker "$1")" >/dev/null 2>&1 || true; }
 
+# kind node images default the `iptables` alternative to the nft backend. On
+# this host's kernel/iptables toolchain, nft's netlink-based rule loading has
+# a hard per-message size ceiling that kube-proxy's normal Service ruleset
+# exceeds -- every periodic resync then fails with
+# "sendmsg() failed: Message too long" (kube-proxy retries every 30s, forever,
+# and never once succeeds again after the first sync that happened to fit).
+# The practical effect: Service routing silently freezes at whatever ruleset
+# loaded at the very first successful sync. Any Service whose backing pod
+# later restarts (gets a new IP) is blackholed from that point on -- new
+# connections to its ClusterIP get NATed to a now-dead pod IP and silently
+# dropped -- while every other Service keeps "working" purely by accident
+# (their stale rules still happen to be correct). This is exactly what broke
+# the ChaosCenter UI's GraphQL calls after a graphql pod restart; see
+# OPEN_WEIGHT_CERTIFICATION_HANDOFF.md for the live incident this was found in.
+#
+# iptables-legacy sidesteps the bug entirely -- it programs the kernel via a
+# setsockopt() ruleset replace, not one giant batched netlink message, so
+# there's no comparable size ceiling to hit.
+#
+# kube-proxy bundles its own copy of the iptables tools (it does not use the
+# node's /usr/sbin), so flipping the node's own `update-alternatives` default
+# has no effect on it. kube-proxy instead auto-detects nft vs legacy at its
+# own startup by counting which backend currently has MORE rules already
+# loaded in the kernel (ties favor legacy) -- so the only way to make it
+# actually choose legacy is to zero out nft's rule count *before* kube-proxy
+# starts (fresh cluster) or before it next restarts (existing cluster), so
+# legacy's smaller-or-equal count wins that tie-break. Everything here is
+# scoped to nftables tables inside this one kind node container's own network
+# namespace -- it never touches the shared host's kernel state or any other
+# checkout's containers.
+steer_kube_proxy_onto_iptables_legacy() {
+    local cluster_name="$1" node
+    for node in $(docker ps --format '{{.Names}}' | grep -E "^${cluster_name}-(control-plane|worker)" || true); do
+        docker exec "${node}" sh -c '
+            update-alternatives --set iptables /usr/sbin/iptables-legacy >/dev/null 2>&1 || true
+            update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >/dev/null 2>&1 || true
+            for t in "ip nat" "ip mangle" "ip filter" "ip6 nat" "ip6 mangle" "ip6 filter"; do
+                nft delete table ${t} >/dev/null 2>&1 || true
+            done
+        ' 2>/dev/null || warn "Could not steer ${node} onto iptables-legacy -- kube-proxy may hit the nft message-size bug (see innovation.md)."
+    done
+    # kube-proxy only auto-detects once, at its own startup -- bounce it now
+    # so it re-evaluates against the rule counts set up above.
+    if kubectl -n kube-system get daemonset kube-proxy >/dev/null 2>&1; then
+        kubectl -n kube-system delete pod -l k8s-app=kube-proxy >/dev/null 2>&1 || true
+        kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-proxy --timeout=60s >/dev/null 2>&1 \
+            || warn "kube-proxy did not report Ready within 60s after the iptables-backend fix -- check manually (kubectl -n kube-system logs -l k8s-app=kube-proxy)."
+    fi
+}
+
+# Cheap, read-only check so the "reuse an existing cluster" path only pays for
+# the (mildly disruptive -- it bounces kube-proxy) fix above when the cluster
+# is actually hitting the bug, e.g. one created before this fix existed.
+# Freshly created clusters always get the fix unconditionally, since they
+# always start out on the broken nft default.
+kube_proxy_iptables_broken() {
+    kubectl -n kube-system logs -l k8s-app=kube-proxy --tail=20 2>/dev/null | grep -q "Message too long"
+}
+
+# kind's node entrypoint rewrites each node's /etc/resolv.conf to point at
+# the node's own docker-network gateway IP (e.g. 172.18.0.1:53) whenever it
+# detects the host's own resolv.conf uses a loopback resolver -- true on this
+# fleet, since it uses systemd-resolved's 127.0.0.53 stub. Under the ROOTFUL
+# daemon that gateway IP is transparently proxied through to the host's real
+# resolver (iptables DNAT the rootful daemon sets up) and everything just
+# works. Under a PERSONAL ROOTLESS daemon (see CLAUDE.md §6 "Personal
+# rootless Docker") RootlessKit/slirp4netns does not replicate that DNAT, so
+# the gateway IP is simply unreachable on :53 and EVERY external DNS lookup
+# inside every node times out -- this includes containerd's own image pulls
+# (it reads the node container's /etc/resolv.conf directly) and CoreDNS's
+# upstream forwarding (its default Corefile is `forward . /etc/resolv.conf`,
+# inherited from the node via dnsPolicy: Default). The practical symptom:
+# any chaos-infrastructure connect (subscriber/chaos-exporter/chaos-operator)
+# -- or any other in-cluster image pull -- sits in ImagePullBackOff forever,
+# and the ChaosCenter UI shows the infra stuck "Pending" indefinitely with no
+# error surfaced anywhere in the UI itself. Fix: detect the broken gateway
+# resolver per-node and fall back to public resolvers, which rootless
+# networking (slirp4netns) CAN reach directly as ordinary outbound traffic.
+node_dns_broken() {
+    local node="$1"
+    ! docker exec "${node}" timeout 3 getent hosts registry-1.docker.io >/dev/null 2>&1
+}
+
+fix_node_dns() {
+    local node="$1"
+    if docker exec "${node}" sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'; then
+        ok "Rewrote ${node}'s /etc/resolv.conf to public resolvers (gateway-IP resolver unreachable under rootless Docker)."
+    else
+        warn "Could not patch ${node}'s /etc/resolv.conf -- image pulls and in-cluster DNS may keep failing."
+    fi
+}
+
+ensure_node_dns() {
+    local cluster_name="$1" node any_fixed=0
+    for node in $(docker ps --format '{{.Names}}' | grep -E "^${cluster_name}-(control-plane|worker)" || true); do
+        if node_dns_broken "${node}"; then
+            warn "${node} cannot resolve external DNS (gateway-IP resolver unreachable) -- patching ..."
+            fix_node_dns "${node}"
+            any_fixed=1
+        fi
+    done
+    if [[ "${any_fixed}" == "1" ]] && kubectl -n kube-system get deployment coredns >/dev/null 2>&1; then
+        kubectl -n kube-system delete pod -l k8s-app=kube-dns >/dev/null 2>&1 || true
+        kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-dns --timeout=60s >/dev/null 2>&1 \
+            || warn "CoreDNS did not report Ready within 60s after the DNS fix -- check manually (kubectl -n kube-system logs -l k8s-app=kube-dns)."
+    fi
+}
+
 # Force kubectl to point at this cluster, regardless of what its kubeconfig
 # entry currently looks like. `kind create cluster`'s automatic merge-on-create
 # is not reliable in every environment on this host -- observed case: a
@@ -2006,7 +2126,7 @@ check_kind_disk_pressure() {
     local cluster_name="$1" docker_root avail_kb avail_gi conditions
     docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
     if [[ -n "${docker_root}" ]]; then
-        avail_kb="$(df -Pk "${docker_root}" 2>/dev/null | awk 'NR==2{print $4}')"
+        avail_kb="$(df -Pk "${docker_root}" 2>/dev/null | awk 'NR==2{print $4}' || true)"
         if [[ "${avail_kb}" =~ ^[0-9]+$ ]]; then
             avail_gi=$(( avail_kb / 1024 / 1024 ))
             if (( avail_gi < 8 )); then
@@ -2141,6 +2261,11 @@ PY
         unset _ACE_INSPECT_JSON
         ensure_kubeconfig_context "${cluster_name}" || return 1
         check_kind_disk_pressure "${cluster_name}"
+        if kube_proxy_iptables_broken; then
+            warn "kube-proxy on '${cluster_name}' is hitting the iptables-nft message-size bug (Service routing silently stale) — fixing ..."
+            steer_kube_proxy_onto_iptables_legacy "${cluster_name}"
+        fi
+        ensure_node_dns "${cluster_name}"
         return 0
     fi
 
@@ -2220,6 +2345,16 @@ PY
     fi
     mark_kind_cluster_owned "${cluster_name}"
     ensure_kubeconfig_context "${cluster_name}" || return 1
+    # A brand-new cluster always starts on the broken nft default (see the
+    # comment on steer_kube_proxy_onto_iptables_legacy above) -- fix it now,
+    # before anything else depends on Service routing actually working.
+    echo -e "${DIM}Steering kube-proxy onto iptables-legacy to avoid the nft netlink message-size bug…${NC}"
+    steer_kube_proxy_onto_iptables_legacy "${cluster_name}"
+    # A brand-new node always starts with whatever resolv.conf kind's own
+    # entrypoint wrote -- check and patch it now, before anything (image
+    # pulls, CoreDNS) depends on external DNS actually working.
+    echo -e "${DIM}Checking node DNS reaches the outside world (rootless Docker can't proxy the gateway-IP resolver)…${NC}"
+    ensure_node_dns "${cluster_name}"
     ok "Kind cluster '${cluster_name}' created."
     check_kind_disk_pressure "${cluster_name}"
 }
@@ -2286,8 +2421,8 @@ sync_subscriber_secret() {
         return 0
     fi
 
-    infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2-)"
-    access_key="$(echo "$mongo_output" | grep '^access_key=' | cut -d= -f2-)"
+    infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2- || true)"
+    access_key="$(echo "$mongo_output" | grep '^access_key=' | cut -d= -f2- || true)"
 
     if [[ -z "$infra_id" || -z "$access_key" ]]; then
         warn "Could not parse infra_id or access_key from MongoDB output — skipping sync."
@@ -2327,24 +2462,25 @@ sync_subscriber_secret() {
     fi
 }
 
-# seed_flash_agent_comprehensive
-# Idempotent: creates/updates the flash-agent-comprehensive-30 experiment in ChaosCenter.
+# _seed_flash_agent_experiment NAME DESCRIPTION EXPERIMENT_ID MANIFEST_TEMPLATE [CES_FILE]
+# Idempotent: creates/updates a flash-agent ITBench experiment in ChaosCenter.
 # Steps: (1) pull infra_id + project_id from MongoDB, (2) upsert the flash-agent-comprehensive-ces
-# ConfigMap in itbench namespace, (3) register/update the experiment via saveChaosExperiment.
-# Silently skips (with a warning) if the chaos infrastructure is not yet registered — the
-# operator can re-run `./scripts/setup.sh --restart` after registering via the UI.
-seed_flash_agent_comprehensive() {
+# ConfigMap in itbench namespace (skipped if CES_FILE omitted — reuses whatever another seed call
+# already applied, since the ConfigMap holds all 46 known ChaosExperiment CRDs), (3) register/update
+# the experiment via saveChaosExperiment. Silently skips (with a warning) if the chaos
+# infrastructure is not yet registered — the operator can re-run `./scripts/setup.sh --restart`
+# after registering via the UI.
+_seed_flash_agent_experiment() {
+    local exp_name="$1" exp_description="$2" exp_id="$3" manifest_template="$4" ces_file="${5:-}"
     local ACE_NS="itbench"
     local PLATFORM_NS="ace"
-    local manifest_template="${REPO_ROOT}/agents/harness/flash-agent/flash-agent-comprehensive-30-manifest.json"
-    local ces_file="${REPO_ROOT}/agents/harness/flash-agent/ces_for_apply.yaml"
 
-    if [[ ! -f "${manifest_template}" || ! -f "${ces_file}" ]]; then
-        warn "seed_flash_agent_comprehensive: source files missing from agents/harness/flash-agent/ — skipping"
+    if [[ ! -f "${manifest_template}" ]] || { [[ -n "${ces_file}" ]] && [[ ! -f "${ces_file}" ]]; }; then
+        warn "_seed_flash_agent_experiment(${exp_name}): source files missing from agents/harness/flash-agent/ — skipping"
         return 0
     fi
 
-    echo -e "${DIM}Seeding flash-agent-comprehensive-30 experiment…${NC}"
+    echo -e "${DIM}Seeding ${exp_name} experiment…${NC}"
 
     # --- Step 1: infra_id + project_id from MongoDB ---
     local mongo_user mongo_pass mongo_uri infra_id project_id
@@ -2359,7 +2495,7 @@ seed_flash_agent_comprehensive() {
         2>/dev/null)" || true
 
     if [[ -z "${infra_id}" ]]; then
-        warn "seed_flash_agent_comprehensive: no registered chaos infrastructure found."
+        warn "_seed_flash_agent_experiment(${exp_name}): no registered chaos infrastructure found."
         warn "  Register an infrastructure via the UI, then re-run: ./scripts/setup.sh --restart"
         return 0
     fi
@@ -2371,21 +2507,23 @@ seed_flash_agent_comprehensive() {
         2>/dev/null)" || true
 
     if [[ -z "${project_id}" ]]; then
-        warn "seed_flash_agent_comprehensive: could not determine project ID — skipping."
+        warn "_seed_flash_agent_experiment(${exp_name}): could not determine project ID — skipping."
         return 0
     fi
 
     # --- Step 2: upsert ConfigMap in itbench namespace ---
-    if kubectl get namespace "${ACE_NS}" >/dev/null 2>&1; then
-        kubectl create configmap flash-agent-comprehensive-ces \
-            --from-file=ces.yaml="${ces_file}" \
-            -n "${ACE_NS}" \
-            --dry-run=client -o yaml \
-        | kubectl apply --server-side -f - >/dev/null 2>&1 \
-        && ok "flash-agent-comprehensive-ces ConfigMap applied in namespace ${ACE_NS}" \
-        || warn "seed_flash_agent_comprehensive: failed to apply ConfigMap — continuing"
-    else
-        warn "seed_flash_agent_comprehensive: namespace ${ACE_NS} not found — ConfigMap skipped"
+    if [[ -n "${ces_file}" ]]; then
+        if kubectl get namespace "${ACE_NS}" >/dev/null 2>&1; then
+            kubectl create configmap flash-agent-comprehensive-ces \
+                --from-file=ces.yaml="${ces_file}" \
+                -n "${ACE_NS}" \
+                --dry-run=client -o yaml \
+            | kubectl apply --server-side -f - >/dev/null 2>&1 \
+            && ok "flash-agent-comprehensive-ces ConfigMap applied in namespace ${ACE_NS}" \
+            || warn "_seed_flash_agent_experiment(${exp_name}): failed to apply ConfigMap — continuing"
+        else
+            warn "_seed_flash_agent_experiment(${exp_name}): namespace ${ACE_NS} not found — ConfigMap skipped"
+        fi
     fi
 
     # --- Step 3: get JWT ---
@@ -2401,7 +2539,7 @@ seed_flash_agent_comprehensive() {
         | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))")" || true
 
     if [[ -z "${jwt}" ]]; then
-        warn "seed_flash_agent_comprehensive: auth service login failed — experiment not registered."
+        warn "_seed_flash_agent_experiment(${exp_name}): auth service login failed — experiment not registered."
         return 0
     fi
 
@@ -2411,6 +2549,7 @@ seed_flash_agent_comprehensive() {
 
     result="$(INFRA_ID="${infra_id}" PROJECT_ID="${project_id}" JWT="${jwt}" \
         GQL_PORT="${gql_port}" MANIFEST_TEMPLATE="${manifest_template}" \
+        EXP_NAME="${exp_name}" EXP_DESCRIPTION="${exp_description}" EXP_ID="${exp_id}" \
         python3 - <<'PYEOF'
 import json, sys, os, urllib.request, urllib.error
 
@@ -2419,6 +2558,9 @@ project_id      = os.environ["PROJECT_ID"]
 jwt             = os.environ["JWT"]
 gql_port        = os.environ["GQL_PORT"]
 manifest_tpl    = os.environ["MANIFEST_TEMPLATE"]
+exp_name        = os.environ["EXP_NAME"]
+exp_description = os.environ["EXP_DESCRIPTION"]
+exp_id          = os.environ["EXP_ID"]
 
 with open(manifest_tpl) as f:
     manifest = f.read().replace("__INFRA_ID__", infra_id)
@@ -2432,10 +2574,10 @@ payload = json.dumps({
     "variables": {
         "projectID": project_id,
         "request": {
-            "id": "333bf972-dd5e-4d5a-96c2-92f10e668126",
+            "id": exp_id,
             "type": "Experiment",
-            "name": "flash-agent-comprehensive-30",
-            "description": "Flash-agent 53-fault benchmark (30 runs per fault)",
+            "name": exp_name,
+            "description": exp_description,
             "manifest": manifest,
             "infraID": infra_id,
             "tags": []
@@ -2465,9 +2607,37 @@ except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
-    )" || { warn "seed_flash_agent_comprehensive: experiment registration failed (see above)."; return 0; }
+    )" || { warn "_seed_flash_agent_experiment(${exp_name}): experiment registration failed (see above)."; return 0; }
 
-    ok "flash-agent-comprehensive-30 registered in ChaosCenter (infra=${infra_id}, project=${project_id})"
+    ok "${exp_name} registered in ChaosCenter (infra=${infra_id}, project=${project_id})"
+}
+
+# seed_flash_agent_comprehensive
+# Registers flash-agent-comprehensive-30 (53-fault benchmark, 46 unique ChaosExperiment CRDs).
+# Owns applying the flash-agent-comprehensive-ces ConfigMap — other seed_* callers that need a
+# subset of the same CRDs rely on this one having run first (order in the caller below matters).
+seed_flash_agent_comprehensive() {
+    _seed_flash_agent_experiment \
+        "flash-agent-comprehensive-30" \
+        "Flash-agent 53-fault benchmark (30 runs per fault)" \
+        "333bf972-dd5e-4d5a-96c2-92f10e668126" \
+        "${REPO_ROOT}/agents/harness/flash-agent/flash-agent-comprehensive-30-manifest.json" \
+        "${REPO_ROOT}/agents/harness/flash-agent/ces_for_apply.yaml"
+}
+
+# seed_flash_agent_5scenario
+# Registers flash-agent-5scenario (5-fault ITBench spot-check: scaled-to-zero, nonexistent
+# image, misconfigured readiness probe, modified target port, feature-flag flood). Unlike
+# comprehensive-30, its 5 ChaosExperiment CRDs are embedded directly as inline workflow
+# artifacts in the manifest itself (Chaos-Studio-editable shape — see install-chaos-experiments'
+# inputs.artifacts) rather than applied from the external flash-agent-comprehensive-ces
+# ConfigMap, so this has no dependency on seed_flash_agent_comprehensive having run first.
+seed_flash_agent_5scenario() {
+    _seed_flash_agent_experiment \
+        "flash-agent-5scenario" \
+        "Flash-agent 5-fault ITBench spot-check (scaled-to-zero, nonexistent image, readiness probe, target port, feature-flag flood)" \
+        "c533c74e-c7e9-4ba8-ab96-7c29f191d6a8" \
+        "${REPO_ROOT}/agents/harness/flash-agent/flash-agent-5scenario-manifest.json"
 }
 
 # load_images_into_kind CLUSTER_NAME
@@ -2606,7 +2776,7 @@ offer_mongodb_restore() {
         _size="$(du -h "${backups[$_i]}" 2>/dev/null | cut -f1)"
         _mtime="$(date -r "${backups[$_i]}" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || true)"
         _from="unknown"
-        [[ -f "${backups[$_i]}.meta" ]] && _from="$(grep -m1 '^started_from=' "${backups[$_i]}.meta" 2>/dev/null | cut -d= -f2-)"
+        [[ -f "${backups[$_i]}.meta" ]] && _from="$(grep -m1 '^started_from=' "${backups[$_i]}.meta" 2>/dev/null | cut -d= -f2- || true)"
         [[ -z "${_from}" ]] && _from="unknown"
         echo -e "  ${BOLD}$((_i + 1))${NC}) $(basename "${backups[$_i]}")  ${DIM}(${_size:-?}, saved ${_mtime:-unknown time}$( [[ $_i -eq 0 ]] && echo ", most recent" ); started from: ${_from})${NC}"
     done
@@ -2830,6 +3000,9 @@ k8s_deploy() {
     # 9d) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
     seed_flash_agent_comprehensive
 
+    # 9e) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
+    seed_flash_agent_5scenario
+
     # 10) Print access URLs
     local admu admp luser lpass
     admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
@@ -2979,6 +3152,14 @@ helm_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         helm_cmd+=(--set web.serviceType=LoadBalancer)
     fi
+    # The certifier's cert-report-export hostPath volume only makes sense against a
+    # KinD cluster this repo's own render-kind-config.sh created (its extraMounts
+    # bridge the node path to a real host directory) — an existing/external
+    # kubeconfig (cloud or a pre-existing local cluster) has no such bridge, so
+    # disable it there rather than mounting an unbridged, node-ephemeral path.
+    if [[ "${CLUSTER_MODE}" == "cloud" || "${CLUSTER_MODE}" == "local" ]]; then
+        helm_cmd+=(--set certHostExport.enabled=false)
+    fi
     # On KinD (auto/fresh), always use IfNotPresent so locally built images take effect
     # without being overwritten by a Docker Hub pull.  Always is only appropriate for
     # remote registries (cloud clusters) where images are never kind-loaded.
@@ -3089,7 +3270,22 @@ subsets:
         name: ollama
         protocol: TCP
 OLLAMA_SVC_EOF
-        ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434 → host:${ollama_port}"
+        # Verify both objects actually landed rather than trusting a silent
+        # success. This step has previously gone missing from a live cluster
+        # with no error anywhere (e.g. after a raw `helm upgrade` bypassing
+        # setup.sh, or a namespace recreate) -- the Ollama-routed model alias
+        # then fails in-cluster with a DNS lookup failure that looks nothing
+        # like "the wiring step never ran," costing real debugging time. Fail
+        # loudly here instead so a broken/missing wiring is caught at deploy
+        # time, not discovered later via a failed experiment run.
+        if ! kubectl get endpoints litellm -n "${NS}" >/dev/null 2>&1; then
+            warn "litellm.${NS}.svc.cluster.local Endpoints missing after apply — host LiteLLM will be unreachable in-cluster."
+        fi
+        if ! kubectl get svc ollama -n "${NS}" >/dev/null 2>&1 || ! kubectl get endpoints ollama -n "${NS}" >/dev/null 2>&1; then
+            warn "ollama.${NS}.svc.cluster.local Service/Endpoints missing after apply — any FLASH_AGENT_MODEL/MODEL_ALIAS routed to the Ollama alias will fail in-cluster with a DNS lookup failure, even if AZURE/GEMINI credentials are also configured. Re-run ./scripts/setup.sh --restart, or apply this section manually."
+        else
+            ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434 → host:${ollama_port}"
+        fi
     fi
 
     # 6) Print access URLs
@@ -3187,13 +3383,22 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         # serializing them was pure wall-clock waste. Bounded rather than
         # unbounded because this is frequently a shared host (CLAUDE.md §0)
         # and unlimited concurrent `docker build`/`docker push` can thrash
-        # disk I/O for everyone else on it; override via ACE_BUILD_PARALLELISM
-        # if a given host can take more. Each build runs in its own
-        # background subshell -- variables it sets do NOT survive back to
-        # this shell -- so results are hand-off via small per-image files in
-        # a scratch dir, then reassembled into LOCAL_BUILT_IMAGES/
-        # BUILD_FAILED/the fingerprint file below, once every job is done.
-        _BUILD_PARALLELISM="${ACE_BUILD_PARALLELISM:-3}"
+        # disk I/O for everyone else on it. The default is derived from this
+        # host's own CPU count (CLAUDE.md §0.1: detect host-specific
+        # variability rather than hardcoding an observed value) -- half of
+        # nproc, floored at 1 and capped at 6, so a small VM doesn't get
+        # oversubscribed and a big shared box doesn't get hammered by one
+        # checkout's build. Override via ACE_BUILD_PARALLELISM if a given
+        # host needs something else. Each build runs in its own background
+        # subshell -- variables it sets do NOT survive back to this shell --
+        # so results are hand-off via small per-image files in a scratch
+        # dir, then reassembled into LOCAL_BUILT_IMAGES/BUILD_FAILED/the
+        # fingerprint file below, once every job is done.
+        _BUILD_CPU_COUNT="$(nproc 2>/dev/null || echo 4)"
+        _BUILD_PARALLELISM_DEFAULT=$(( _BUILD_CPU_COUNT / 2 ))
+        (( _BUILD_PARALLELISM_DEFAULT < 1 )) && _BUILD_PARALLELISM_DEFAULT=1
+        (( _BUILD_PARALLELISM_DEFAULT > 6 )) && _BUILD_PARALLELISM_DEFAULT=6
+        _BUILD_PARALLELISM="${ACE_BUILD_PARALLELISM:-${_BUILD_PARALLELISM_DEFAULT}}"
         _BUILD_LOG_DIR="${REPO_ROOT}/.tmp/build-logs"
         _BUILD_RESULTS_DIR="$(mktemp -d "${REPO_ROOT}/.tmp/build-results.XXXXXX")"
         rm -rf "${_BUILD_LOG_DIR}"; mkdir -p "${_BUILD_LOG_DIR}"
@@ -3245,14 +3450,32 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
 
         echo -e "${DIM}Building ${#SELECTED_BUILD_IMAGES[@]} image(s), up to ${_BUILD_PARALLELISM} at a time — per-image logs: ${_BUILD_LOG_DIR}/${NC}"
         _idx=0
-        _running=0
+        # Bare `wait -n` (no PID/jobspec args) waits for ANY background job of
+        # this shell -- not just the build jobs launched in this loop. Other
+        # long-lived untracked background jobs (_KIND_PREWARM_PID, launched
+        # above; _OLLAMA_PULL_PID, launched much earlier during the interactive
+        # prompts) are frequently still in flight here and aren't reaped until
+        # long after this loop returns. If one of THOSE finishes first with a
+        # non-zero exit (e.g. the kind-prewarm ownership guard refusing an
+        # unmarked cluster), `wait -n` returns that unrelated failure, and
+        # under `set -euo pipefail` with no ERR trap this loop -- and the
+        # entire script -- dies silently mid-build with no message at all,
+        # having built only whichever images happened to be in the first
+        # batch. Track this loop's own job PIDs explicitly and pass them to
+        # `wait -n` so it can only ever observe jobs this loop actually
+        # launched.
+        _build_pids=()
         for _entry in "${SELECTED_BUILD_IMAGES[@]}"; do
             _build_one_entry "${_entry}" "${_idx}" &
+            _build_pids+=("$!")
             _idx=$(( _idx + 1 ))
-            _running=$(( _running + 1 ))
-            if (( _running >= _BUILD_PARALLELISM )); then
-                wait -n
-                _running=$(( _running - 1 ))
+            if (( ${#_build_pids[@]} >= _BUILD_PARALLELISM )); then
+                wait -n "${_build_pids[@]}" || true
+                _still_running=()
+                for _pid in "${_build_pids[@]}"; do
+                    kill -0 "${_pid}" 2>/dev/null && _still_running+=("${_pid}")
+                done
+                _build_pids=("${_still_running[@]}")
             fi
         done
         wait
@@ -3292,7 +3515,7 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
             warn "Completed with failures: ${BUILD_FAILED[*]}"
         fi
     fi
-    unset _build_ready _FP_FILE _fp_sha _fp_dirty _BUILD_PARALLELISM _BUILD_LOG_DIR _BUILD_RESULTS_DIR _idx _running _i _status _reason
+    unset _build_ready _FP_FILE _fp_sha _fp_dirty _BUILD_PARALLELISM _BUILD_LOG_DIR _BUILD_RESULTS_DIR _idx _i _status _reason _build_pids _still_running _pid
     echo -e "${CYAN}=======================================================${NC}"
     echo
 fi
@@ -3329,9 +3552,9 @@ if [[ $EXPRESS_MODE -eq 0 ]]; then
     echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
     echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
     echo -e "   ${BOLD}n${NC}  skip for now"
-    read -rp "$(echo -e "Choice ${DIM}[k/h/N]${NC}: ")" deploy_choice
+    read -rp "$(echo -e "Choice ${DIM}[k/H/n]${NC}: ")" deploy_choice
 fi
-deploy_choice="${deploy_choice:-${_DEPLOY_CHOICE:-n}}"
+deploy_choice="${deploy_choice:-${_DEPLOY_CHOICE:-h}}"
 case "${deploy_choice,,}" in
     k) k8s_deploy ;;
     h) helm_deploy ;;

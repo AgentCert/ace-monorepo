@@ -9,12 +9,59 @@ set -euo pipefail
 # ACE_INSTANCE_NAME.  Never touches resources that belong to another user or
 # checkout on this shared host.
 #
-#   ./scripts/shut_down.sh                       # interactive confirmation
-#   ./scripts/shut_down.sh --yes                 # non-interactive (CI / scripted use)
+#   ./scripts/shut_down.sh                       # interactive confirmation; if neither
+#                                                  # --keep-ollama-model nor --delete-ollama-model
+#                                                  # is given, asks whether to keep the pulled
+#                                                  # ollama-models-<instance> volume (default: keep)
+#   ./scripts/shut_down.sh --yes                  # non-interactive (CI / scripted use);
+#                                                  # defaults to keeping the ollama model volume
+#                                                  # unless --delete-ollama-model is also given
 #   ./scripts/shut_down.sh --keep-ollama-model    # preserve the ollama-models-<instance>
 #                                                  # volume so pulled models survive teardown
 #                                                  # and don't need to be re-downloaded by
-#                                                  # the next setup.sh run
+#                                                  # the next setup.sh run (this is the default
+#                                                  # outcome even without the flag — see above)
+#   ./scripts/shut_down.sh --delete-ollama-model  # explicitly delete the ollama-models-<instance>
+#                                                  # volume without being asked
+#   ./scripts/shut_down.sh --no-mongo-backup       # skip the automatic MongoDB dump (see below)
+#   ./scripts/shut_down.sh --clean-itbench-pods    # standalone: delete only Completed pods in
+#                                                    # whichever namespace(s) currently have a
+#                                                    # connected chaos infrastructure (subscriber
+#                                                    # Deployment) on THIS checkout's own KinD
+#                                                    # cluster. Prompts if more than one such
+#                                                    # namespace is found. Does not touch Docker
+#                                                    # containers/volumes or the cluster itself,
+#                                                    # and exits without running the rest of the
+#                                                    # teardown below. See §"Clean itbench pods".
+#   ./scripts/shut_down.sh --clean-itbench-pods \
+#       --namespace=sock-shop                       # same, but skips discovery/prompt and
+#                                                    # targets the given namespace directly —
+#                                                    # for scripted/CI use alongside --yes.
+#
+# MongoDB backup: by default, if a Kubernetes-deployed MongoDB (mongodb-0 pod,
+# `ace` namespace) is reachable on this checkout's KinD cluster, it is
+# mongodump'd BEFORE the cluster is deleted below -- kind delete cluster
+# destroys local-path-provisioner's PV data unconditionally, and a fresh
+# `setup.sh` run reprovisions an empty volume (dynamically-provisioned PVs get
+# a fresh random on-disk path each time, so simply keeping the PVC/PV config
+# around does not preserve data across a cluster recreation).
+#
+# Each run gets its OWN timestamped, independent archive --
+# .tmp/mongodb-backups/<instance>/mongodb-<UTC timestamp>.archive.gz -- never
+# overwriting a previous one, so a bad/partial teardown never destroys a good
+# backup from an earlier session, and older generations stay available if a
+# more recent one turns out to be the wrong pick. Pruned to the newest
+# MONGO_BACKUP_RETAIN (default 10) after each successful dump so this doesn't
+# grow unbounded. Each archive also gets a small sidecar
+# (mongodb-<timestamp>.archive.gz.meta) recording what the database it was
+# dumped from was itself started from — "scratch" or the filename of an
+# earlier backup — so the lineage between backups is visible, not just their
+# timestamps. setup.sh's interactive (non---restart) wizard lists all of them
+# (newest first, with that lineage) and lets the user pick one to restore, or
+# start with a brand-new empty database. This does NOT cover the separate
+# docker-compose.yml root-stack MongoDB (its mongodb_data volume already
+# survives `docker compose down` without -v; only `down -v` removes it,
+# independent of this script).
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,17 +78,44 @@ say()  { echo -e "$*"; }
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 YES=0
-KEEP_OLLAMA_MODEL=0
+KEEP_OLLAMA_MODEL=1   # default: keep the pulled model volume unless told otherwise
+OLLAMA_MODEL_FLAG_SET=0
+SKIP_MONGO_BACKUP=0   # default: back up MongoDB (K8s path) before deleting the KinD cluster
+CLEAN_ITBENCH_PODS=0  # standalone mode: only clean Completed pods in the in-use namespace(s), see below
+CLEAN_NAMESPACE=""    # optional explicit target for --clean-itbench-pods; skips discovery/prompt
 for _arg in "$@"; do
     case "${_arg}" in
         -y|--yes) YES=1 ;;
-        -k|--keep-ollama-model) KEEP_OLLAMA_MODEL=1 ;;
+        -k|--keep-ollama-model) KEEP_OLLAMA_MODEL=1; OLLAMA_MODEL_FLAG_SET=1 ;;
+        --delete-ollama-model) KEEP_OLLAMA_MODEL=0; OLLAMA_MODEL_FLAG_SET=1 ;;
+        --no-mongo-backup) SKIP_MONGO_BACKUP=1 ;;
+        --clean-itbench-pods) CLEAN_ITBENCH_PODS=1 ;;
+        --namespace=*) CLEAN_NAMESPACE="${_arg#--namespace=}" ;;
         -h|--help)
-            say "Usage: $0 [--yes|-y] [--keep-ollama-model|-k]"
+            say "Usage: $0 [--yes|-y] [--keep-ollama-model|-k] [--delete-ollama-model] [--no-mongo-backup] [--clean-itbench-pods [--namespace=NS]]"
             say "  Tears down all ACE infrastructure for the ACE_INSTANCE_NAME in .env."
-            say "  --yes / -y               skip the confirmation prompt"
-            say "  --keep-ollama-model / -k don't delete the ollama-models-<instance> volume"
-            say "                           (preserves already-pulled models for next setup)"
+            say "  --yes / -y                skip the confirmation prompt"
+            say "  --keep-ollama-model / -k  don't delete the ollama-models-<instance> volume"
+            say "                            (preserves already-pulled models for next setup)"
+            say "                            — this is the default even without the flag"
+            say "  --delete-ollama-model     delete the ollama-models-<instance> volume"
+            say "  If neither ollama-model flag is given: interactive runs are asked; --yes"
+            say "  runs (no prompt possible) default to keeping the volume."
+            say "  --no-mongo-backup         skip the automatic MongoDB dump normally taken"
+            say "                            before the KinD cluster is deleted (see header"
+            say "                            comment above) — this is done by default."
+            say "  --clean-itbench-pods      standalone: delete only Completed pods in whichever"
+            say "                            namespace(s) currently have a connected chaos"
+            say "                            infrastructure (subscriber Deployment) on this"
+            say "                            checkout's own KinD cluster (verified via the same"
+            say "                            ownership marker used before deleting the cluster"
+            say "                            itself). If more than one such namespace is found,"
+            say "                            you are asked which one to clean. Does NOT touch"
+            say "                            Docker containers/volumes or the cluster, and does"
+            say "                            not run the rest of teardown."
+            say "  --namespace=NS            with --clean-itbench-pods: target NS directly,"
+            say "                            skipping discovery and the multi-namespace prompt"
+            say "                            (for scripted/CI use, typically alongside --yes)."
             exit 0 ;;
         *) err "Unknown argument: ${_arg}"; exit 1 ;;
     esac
@@ -149,6 +223,176 @@ same_dir() {
     [[ -n "${a}" && "${a}" == "${b}" ]]
 }
 
+# ── Clean itbench pods (standalone; exits before touching anything else) ──────
+# Every ChaosEngine under chaos-charts/faults/itbench/ sets
+# jobCleanUpPolicy: retain, so LitmusChaos never deletes the runner Job/pod
+# for a fault run — they're kept around so logs stay inspectable post-hoc.
+# Nothing else reaps them, so at N=30-runs-per-fault scale they accumulate
+# without bound. This does the minimum needed to clean that up: only
+# Completed (phase=Succeeded) pods, only in the namespace(s) that currently
+# have a connected chaos infrastructure, only on THIS checkout's own KinD
+# cluster — no Docker containers/volumes, no unrelated namespace, and the
+# cluster itself is never touched.
+#
+# "Currently in use" is not a fixed namespace — a chaos infra (the LitmusChaos
+# subscriber agent connecting a target namespace to this ChaosCenter) can be
+# registered against sock-shop, book-info, otel-demo, itbench, or any other
+# app namespace, and more than one can be connected at once. Every connected
+# infra runs its own `subscriber` Deployment labelled app=subscriber in the
+# namespace it targets (see setup.sh's restart_subscriber_deployments, which
+# discovers them the same way via `kubectl get deployment -A -l app=subscriber`)
+# — that label is the authoritative, dynamic signal for "which namespace(s) are
+# in use" used below, rather than a hardcoded namespace name.
+#
+# Daemon-agnostic by construction: this whole block only ever calls `docker`
+# and `kind`/`kubectl` (the kubeconfig kind exports below), never a hardcoded
+# socket path. Both transparently follow whichever `docker context` is active
+# for this shell (rootless or the shared root daemon — see CLAUDE.md §6
+# "Personal rootless Docker") — so under rootless, `kind get clusters` simply
+# won't list a cluster that lives on the shared daemon (and vice versa), which
+# is exactly the isolation this needs with no extra handling required here.
+if [[ "${CLEAN_ITBENCH_PODS}" -eq 1 ]]; then
+    say "${CYAN}══════════════════════════════════════════════════════${NC}"
+    say "${CYAN}  Clean Completed pods — active chaos infrastructure${NC}"
+    say "${CYAN}══════════════════════════════════════════════════════${NC}"
+    say "${DIM}  This does NOT touch Docker containers, volumes, or the KinD cluster itself —${NC}"
+    say "${DIM}  only Completed (phase=Succeeded) pods in the namespace(s) with a connected${NC}"
+    say "${DIM}  chaos infrastructure (subscriber Deployment).${NC}"
+    say "${DIM}  Error/Running/Pending pods and Job/ChaosEngine objects are left untouched.${NC}"
+    echo
+
+    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
+        err "CLUSTER_MODE=cloud — the target cluster may be shared with other users, and"
+        err "individual pod ownership can't be verified the way the KinD-cluster marker"
+        err "below verifies whole-cluster ownership. Refusing to auto-delete pods here —"
+        err "clean up manually with kubectl once you've confirmed which pods are yours."
+        exit 1
+    fi
+
+    if ! command -v kind >/dev/null 2>&1 || ! command -v kubectl >/dev/null 2>&1; then
+        err "kind/kubectl not on PATH — cannot verify cluster ownership or clean pods."
+        exit 1
+    fi
+
+    if ! kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"; then
+        err "KinD cluster '${KIND_CLUSTER_NAME}' not found — nothing to clean."
+        exit 1
+    fi
+
+    _owner_marker="ace-kind-owner-${KIND_CLUSTER_NAME}"
+    _cluster_owner="$(docker volume inspect "${_owner_marker}" \
+        --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null || true)"
+    if ! same_dir "${_cluster_owner}" "${REPO_ROOT}"; then
+        err "KinD cluster '${KIND_CLUSTER_NAME}' is not owned by this checkout"
+        err "(owner marker: ${_cluster_owner:-none}). Refusing to touch its pods."
+        exit 1
+    fi
+    ok "Verified '${KIND_CLUSTER_NAME}' is owned by this checkout (${REPO_ROOT})."
+    unset _owner_marker _cluster_owner
+
+    if ! kind export kubeconfig --name "${KIND_CLUSTER_NAME}" >/dev/null 2>&1; then
+        err "Could not export kubeconfig for cluster '${KIND_CLUSTER_NAME}'."
+        exit 1
+    fi
+
+    # ── Resolve the target namespace(s) ───────────────────────────────────────
+    _target_ns=""
+    if [[ -n "${CLEAN_NAMESPACE}" ]]; then
+        if ! kubectl get ns "${CLEAN_NAMESPACE}" >/dev/null 2>&1; then
+            err "Namespace '${CLEAN_NAMESPACE}' (from --namespace) does not exist on this cluster."
+            exit 1
+        fi
+        _target_ns="${CLEAN_NAMESPACE}"
+        say "${DIM}Using explicit --namespace=${_target_ns} (skipping discovery).${NC}"
+    else
+        mapfile -t _infra_namespaces < <(kubectl get deployment -A -l app=subscriber \
+            -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null \
+            | sort -u || true)
+
+        if [[ ${#_infra_namespaces[@]} -eq 0 ]]; then
+            say "${DIM}No connected chaos infrastructure (subscriber Deployment) found on this cluster.${NC}"
+            say "${DIM}Nothing to clean.${NC}"
+            exit 0
+        elif [[ ${#_infra_namespaces[@]} -eq 1 ]]; then
+            _target_ns="${_infra_namespaces[0]}"
+            ok "Found one active chaos infrastructure — namespace: ${_target_ns}"
+        else
+            echo
+            say "${BOLD}Found ${#_infra_namespaces[@]} namespaces with an active chaos infrastructure:${NC}"
+            for _i in "${!_infra_namespaces[@]}"; do
+                say "    $(( _i + 1 ))) ${_infra_namespaces[${_i}]}"
+            done
+            unset _i
+            echo
+            if [[ "${YES}" -eq 1 ]]; then
+                err "Multiple chaos infrastructure namespaces found and --yes was given with no"
+                err "--namespace= to disambiguate. Re-run with --namespace=<one of the above>."
+                exit 1
+            fi
+            read -rp "$(echo -e "Which namespace should be cleaned? [1-${#_infra_namespaces[@]}]: ")" _ns_choice
+            if ! [[ "${_ns_choice}" =~ ^[0-9]+$ ]] || (( _ns_choice < 1 || _ns_choice > ${#_infra_namespaces[@]} )); then
+                say "${DIM}Invalid selection — aborted, nothing was changed.${NC}"
+                exit 0
+            fi
+            _target_ns="${_infra_namespaces[$(( _ns_choice - 1 ))]}"
+            unset _ns_choice
+            echo
+        fi
+        unset _infra_namespaces
+    fi
+
+    mapfile -t _completed_pods < <(kubectl get pods -n "${_target_ns}" \
+        --field-selector=status.phase=Succeeded -o name 2>/dev/null || true)
+
+    if [[ ${#_completed_pods[@]} -eq 0 ]]; then
+        say "${DIM}No Completed pods found in '${_target_ns}'. Nothing to clean.${NC}"
+        exit 0
+    fi
+
+    echo
+    say "${BOLD}Found ${#_completed_pods[@]} Completed pod(s) in '${_target_ns}':${NC}"
+    for _p in "${_completed_pods[@]}"; do say "    • ${_p#pod/}"; done
+    unset _p
+    echo
+
+    if [[ "${YES}" -eq 0 ]]; then
+        read -rp "$(echo -e "Delete these ${#_completed_pods[@]} Completed pod(s)? Type ${BOLD}yes${NC} to proceed: ")" _confirm
+        echo
+        if [[ "${_confirm}" != "yes" ]]; then
+            say "${DIM}Aborted — nothing was changed.${NC}"
+            exit 0
+        fi
+        unset _confirm
+    fi
+
+    if kubectl delete pods -n "${_target_ns}" --field-selector=status.phase=Succeeded; then
+        ok "Deleted ${#_completed_pods[@]} Completed pod(s) from '${_target_ns}'."
+    else
+        err "kubectl delete failed — see output above."
+        exit 1
+    fi
+    exit 0
+fi
+
+# ── Ask about the ollama model volume if the caller didn't say ────────────────
+# Only bother asking if the volume actually exists — nothing to decide otherwise.
+_OLLAMA_MODELS_VOL="ollama-models-${INST}"
+if [[ "${OLLAMA_MODEL_FLAG_SET}" -eq 0 ]] && docker volume inspect "${_OLLAMA_MODELS_VOL}" >/dev/null 2>&1; then
+    if [[ "${YES}" -eq 1 ]]; then
+        say "${DIM}No --keep-ollama-model/--delete-ollama-model given with --yes; defaulting to keep '${_OLLAMA_MODELS_VOL}'.${NC}"
+    else
+        echo
+        read -rp "$(echo -e "Keep the pulled Ollama model volume '${BOLD}${_OLLAMA_MODELS_VOL}${NC}'? [${BOLD}Y${NC}/n]: ")" _keep_model
+        if [[ "${_keep_model}" =~ ^[Nn] ]]; then
+            KEEP_OLLAMA_MODEL=0
+        else
+            KEEP_OLLAMA_MODEL=1
+        fi
+        unset _keep_model
+    fi
+    echo
+fi
+
 # ── Safeguard: verify at least some infra exists on this host ─────────────────
 say "${BOLD}Scanning for ACE infrastructure (instance: ${BOLD}${INST}${NC}${BOLD})…${NC}"
 echo
@@ -184,7 +428,6 @@ done < <(docker ps -a \
     --format '{{.Names}}' 2>/dev/null || true)
 
 # -- Named volumes whose names encode ACE_INSTANCE_NAME -----------------------
-_OLLAMA_MODELS_VOL="ollama-models-${INST}"
 while IFS= read -r vname; do
     [[ -z "${vname}" ]] && continue
     if [[ "${vname}" == "${_OLLAMA_MODELS_VOL}" && "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
@@ -267,6 +510,84 @@ if [[ "${YES}" -eq 0 ]]; then
         exit 0
     fi
     unset _confirm
+fi
+
+# ── 0. MongoDB backup (before anything below is destroyed) ────────────────────
+# Only the Kubernetes-deployed MongoDB (StatefulSet/PVC on the KinD cluster) is
+# at risk here -- kind delete cluster (step 6) wipes local-path-provisioner's
+# PV data unconditionally, and re-provisioning on the next `setup.sh` run gets
+# a fresh, empty volume (dynamic PVs get a new random on-disk path each time,
+# so nothing about the PVC/PV *configuration* surviving helps). The
+# docker-compose.yml root-stack MongoDB is a separate instance with its own
+# durable, instance-scoped named volume (mongodb_data-<instance>) that this
+# script's `down -v` below does remove -- not covered here, since a Compose
+# volume dump/restore is unnecessary complexity, not something threatened by
+# the same "dynamic path re-provisioning" problem the K8s path has.
+MONGO_BACKUP_DIR="${REPO_ROOT}/.tmp/mongodb-backups/${INST}"
+MONGO_BACKUP_RETAIN=10   # keep the newest N independent backups per instance; prune older ones
+# Written by setup.sh's offer_mongodb_restore() right after it decides how the
+# currently-running database was brought up (fresh, or restored from a named
+# backup) -- read here so each new backup records its own lineage. Missing
+# (e.g. a database that predates this feature, or was never deployed through
+# setup.sh's interactive wizard) just means "unknown", not an error.
+MONGO_LINEAGE_FILE="${MONGO_BACKUP_DIR}/current-started-from"
+if [[ "${SKIP_MONGO_BACKUP}" -eq 1 ]]; then
+    say "${DIM}Skipping MongoDB backup (--no-mongo-backup).${NC}"
+elif [[ -z "${FOUND_KIND}" ]]; then
+    : # no KinD cluster owned by this checkout — nothing to back up from
+else
+    echo
+    say "${CYAN}▸ MongoDB backup (before deleting the KinD cluster)${NC}"
+    if ! command -v kind >/dev/null 2>&1 || ! command -v kubectl >/dev/null 2>&1; then
+        warn "  kind/kubectl not on PATH — skipping backup."
+    elif ! kind export kubeconfig --name "${FOUND_KIND}" >/dev/null 2>&1; then
+        warn "  Could not get a kubeconfig for cluster '${FOUND_KIND}' — skipping backup."
+    elif ! kubectl get pod mongodb-0 -n ace >/dev/null 2>&1; then
+        say "  ${DIM}No mongodb-0 pod in namespace 'ace' on this cluster — nothing to back up.${NC}"
+    else
+        _mongo_user="$(cur MONGODB_USERNAME)"; _mongo_user="${_mongo_user:-admin}"
+        _mongo_pass="$(cur MONGODB_PASSWORD)"; _mongo_pass="${_mongo_pass:-1234}"
+        mkdir -p "${MONGO_BACKUP_DIR}"
+        # Each run gets its own file -- never overwritten, so a failed dump
+        # here can never clobber a good backup from an earlier session, and
+        # older generations stay pickable in setup.sh even after newer ones
+        # are taken. UTC + colon-free so the filename sorts chronologically
+        # and is safe on every filesystem.
+        _backup_file="${MONGO_BACKUP_DIR}/mongodb-$(date -u '+%Y%m%dT%H%M%SZ').archive.gz"
+        _tmp_backup="${_backup_file}.tmp"
+        if kubectl exec -n ace mongodb-0 -- mongodump --archive --gzip \
+                -u "${_mongo_user}" -p "${_mongo_pass}" --authenticationDatabase admin \
+                > "${_tmp_backup}" 2>/dev/null \
+           && [[ -s "${_tmp_backup}" ]]; then
+            mv "${_tmp_backup}" "${_backup_file}"
+            # Record what this database was started from (scratch, or a named
+            # backup) alongside the archive itself — a plain sidecar file, not
+            # baked into the archive, so it's readable without a mongorestore
+            # round-trip. "unknown" if setup.sh never left a marker (older
+            # database, or one that never went through the interactive wizard).
+            _started_from="unknown"
+            [[ -f "${MONGO_LINEAGE_FILE}" ]] && _started_from="$(cat "${MONGO_LINEAGE_FILE}")"
+            echo "started_from=${_started_from}" > "${_backup_file}.meta"
+            ok "  Backed up MongoDB to ${_backup_file} ($(du -h "${_backup_file}" 2>/dev/null | cut -f1), started from: ${_started_from})"
+            say "  ${DIM}setup.sh (interactive, no --restart) will list this alongside any older backups next time.${NC}"
+            # Prune to the newest MONGO_BACKUP_RETAIN — ls -1t sorts newest
+            # first (mtime, but these filenames also sort identically since
+            # they're UTC timestamps), so anything past the head is old.
+            _old_backups="$(ls -1t "${MONGO_BACKUP_DIR}"/mongodb-*.archive.gz 2>/dev/null | tail -n "+$((MONGO_BACKUP_RETAIN + 1))" || true)"
+            if [[ -n "${_old_backups}" ]]; then
+                while IFS= read -r _old; do
+                    [[ -z "${_old}" ]] && continue
+                    rm -f "${_old}" "${_old}.meta" && say "  ${DIM}Pruned older backup: $(basename "${_old}") (keeping newest ${MONGO_BACKUP_RETAIN})${NC}"
+                done <<< "${_old_backups}"
+            fi
+            unset _old_backups _old _started_from
+        else
+            rm -f "${_tmp_backup}"
+            warn "  mongodump failed or produced an empty archive — skipping this backup."
+            warn "  Any previously saved backups in ${MONGO_BACKUP_DIR} were left untouched."
+        fi
+        unset _backup_file _tmp_backup _mongo_user _mongo_pass
+    fi
 fi
 
 # ── Teardown helper ───────────────────────────────────────────────────────────

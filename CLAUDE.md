@@ -19,6 +19,53 @@ The dev/build host(s) this repo runs on are shared among multiple engineers, eac
 
 ---
 
+## 0.1 CRITICAL: Infra bug fixes must be durable by default
+
+When fixing a bug in this repo's infrastructure — `docker-compose.yml`, `compose/`, `deploy/` (Helm/KinD/k8s), `scripts/*.sh`, `Dockerfile`s, chart values, CI/CD config, or any other setup/bring-up tooling — the fix must, as much as possible, prevent the problem from recurring the next time that infra is stood up from scratch on a brand-new environment (fresh checkout, fresh host, fresh cluster, fresh volumes). This is the default behavior; it only changes if the user explicitly says otherwise for that task (e.g. "just patch it locally for now," "quick hotfix only").
+
+**What this means in practice:**
+
+- Prefer fixing the root cause in checked-in source (script logic, chart template, compose service definition, Dockerfile) over a one-off manual command run against the currently-live environment. A manual `kubectl patch`, `docker exec`, or hand-edited running container fixes today's instance and nothing else — it will not be there next time someone runs `setup.sh` or `kind create cluster` on a different host or after a teardown/rebuild.
+- If a manual/live intervention is genuinely necessary to unblock the current session (e.g. to verify a diagnosis, or because the user asked for something immediate), still land the durable fix in the source afterward — the live patch is a bridge, not the deliverable.
+- Don't silently work around a bug (retry loops, `--force`, skipping a broken step) without also fixing what made the workaround necessary, unless the user asked specifically for a workaround.
+- When a fix depends on host-specific state (a particular port being free, a particular path existing, a particular tool version), encode the *detection and handling* of that variability into the script/config rather than hardcoding today's observed value — see the `ACE_INSTANCE_NAME` / `pick_kind_hostport()` / rootless-Docker CDI-spec patterns elsewhere in this file for the house style.
+- Call out explicitly, in your summary to the user, whether the fix you made is durable (lands in source, survives a from-scratch setup) or is a live/manual patch that still needs a durable follow-up — don't let that distinction go unstated. Report that a durability check was actually done, not just the verdict — e.g. "durability check: confirmed this lands in `scripts/setup.sh`, so a fresh checkout picks it up" — so the user can tell the check happened rather than being inferred or skipped.
+
+---
+
+## 0.2 CRITICAL: Every codebase-modifying session must update the Handoff docs
+
+Any Claude Code session that changes code, config, infra, or scripts anywhere in this repo
+or its submodules — not only sessions explicitly working on "the open-weight certification
+effort" — must, before ending, append an entry to **both**:
+
+- `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` — the authoritative, detailed record
+- `OPEN_WEIGHT_CERTIFICATION_HANDOFF_READABLE.md` — a readability-focused rewrite of the same
+  content, kept in sync with it
+
+These are the living record of every bug found across every repo/fork touched by this
+project, why each fix was necessary, and what's verified-working vs. still in progress. They
+have already saved significant time by letting later sessions avoid re-discovering
+previously-found bugs and re-litigating already-made decisions — keep that true.
+
+**How to do this well:**
+- Append new dated/numbered sections at the end of each file, following the existing style
+  (chronological numbering continuing from the last section, files-changed tables with
+  commit SHAs where applicable, a "why" not just a "what" for every fix). Do not delete,
+  renumber, or rewrite prior sections — this is a change log, not a snapshot.
+- Write the technical entry first (exact commands, file paths, commit SHAs, root causes,
+  verification performed); the readable entry is a prose rewrite of the same facts for
+  someone skimming, not new content.
+- If a change is genuinely trivial/cosmetic with no debugging story or infra implication
+  worth recording (a typo fix, a comment), it's fine to skip the Handoff update — but say so
+  explicitly in your summary to the user rather than skipping silently.
+- If you only made local/uncommitted changes (or the work is still in progress), still
+  record it — mark the entry's status as uncommitted/in-progress rather than waiting for a
+  commit that may not happen in the same session. See the most recent entries in both files
+  for the expected format of an in-progress entry.
+
+---
+
 ## 1. Project Overview
 
 **ACE (Agent Certification Engine)** is a git-submodule monorepo that aggregates every component required to evaluate, fault-inject, and certify autonomous AI agents under controlled Kubernetes chaos conditions.
@@ -275,6 +322,21 @@ workspace/                            # WORKSPACE_DIR env var (default: workspac
 workspace/cert/                       # CERT_WORKSPACE_DIR env var (default: workspace/cert)
 ```
 
+**Host-bridged report export (optional, Compose/KinD only):** if `CERT_HOST_EXPORT_DIR`
+is set, `cert_task_runner.py` additionally copies each finished report to
+`{CERT_HOST_EXPORT_DIR}/{agent_id}/{experiment_id}/{doc_id}.{html,pdf}` right after Phase 4
+completes — a best-effort, non-fatal step separate from the primary workspace above, meant
+purely for host-side discoverability. On the host this resolves to
+`.tmp/certification-reports-${ACE_INSTANCE_NAME}/` in both deploy modes: Docker Compose
+bind-mounts it directly; KinD bridges it via a dedicated `extraMounts` entry in
+`deploy/kind/kind-agentcert.yaml` (independent of the local-path-provisioner entry next to
+it) into a hostPath volume on the certifier pod, gated by the Helm chart's
+`certHostExport.enabled` value. `scripts/setup.sh` sets `certHostExport.enabled=false` for
+`CLUSTER_MODE=cloud`/`local` (no such host bridge exists there), and
+`deploy/k8s/certifier.yaml` (the flat kubectl-apply alternative) does not support this
+feature at all — use the Helm chart if you need it. Unset/disabled = pure no-op; the
+primary `workspace/.../certification/` output above is unaffected either way.
+
 #### Fault Categories (`configs/fault_categories.json`)
 
 Nine top-level fault categories (each maps to sub-fault names):
@@ -496,7 +558,7 @@ kind create cluster --config .tmp/kind-agentcert.rendered.yaml
 # Single control-plane node with explicit NodePort-to-host mappings for all services
 ```
 
-**KinD eviction thresholds (this host):** The host's Docker data-root (`/Innovation/docker`) sits on a large volume that appears nearly full by percentage (~2.6% free) even though tens of GB remain in absolute terms. Kubelet's default thresholds (`nodefs.available<10%`, `imagefs.available<15%`) fire on percentage alone and immediately evict pods. The checked-in `kind-agentcert.yaml` (and `compose/kind/kind-fresh.yaml`) override these with **absolute floors** (`nodefs.available<5Gi,imagefs.available<5Gi`) so pods are not spuriously evicted. Do not remove these overrides on this host.
+**KinD eviction thresholds (this host):** The host's Docker data-root sits on a volume that can appear nearly full by percentage even though tens of GB (or more) remain in absolute terms — this was originally observed with the data-root on the large `/Innovation` volume, but **verify where the data-root actually is before trusting this** (`docker info | grep "Docker Root Dir"`); it can silently reset to the host's root filesystem after a Docker reinstall — see §6 "The shared host's Docker data-root may not actually be on /Innovation". Kubelet's default thresholds (`nodefs.available<10%`, `imagefs.available<15%`) fire on percentage alone and immediately evict pods regardless of which filesystem is actually low. The checked-in `kind-agentcert.yaml` (and `compose/kind/kind-fresh.yaml`) override these with **absolute floors** (`nodefs.available<5Gi,imagefs.available<5Gi`) so pods are not spuriously evicted. Do not remove these overrides on this host.
 
 **KinD cluster ownership:** `cluster-init/entrypoint.sh` marks every cluster it creates with a Docker volume (`ace-kind-owner-<name>`) labelled with this checkout's host path. Before reusing or deleting a cluster it checks this marker — clusters owned by other checkouts are refused. To manually claim a cluster you know is yours:
 ```bash
@@ -548,6 +610,10 @@ mongodb 5Gi, certifier-workspace 2Gi, litellm 1Gi, langfuse-postgres 5Gi, langfu
 ```bash
 kubectl apply -f deploy/k8s/
 ```
+Note: `deploy/k8s/certifier.yaml` does not support the Helm chart's `certHostExport`
+host-bridged report-export feature (§4.1 "Workspace Layout") — it's inherently
+`CLUSTER_MODE`-conditional and these flat manifests have no templating mechanism for
+that. Use the Helm path if you need it.
 
 **Agent workloads (separate from platform chart):**
 ```bash
@@ -570,7 +636,7 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 
 | Script | Usage |
 |--------|-------|
-| `setup.sh` | `./scripts/setup.sh [--setup\|--restart] [--local-build]` — interactive wizard first time; `--restart` skips prompts; `--local-build` forces all images to build locally (no Docker Hub). Auto-backfills `ACE_INSTANCE_NAME`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT`, `APP_CHARTS_ROOT` in `.env`. Prompts for Ollama model (default: `qwen2.5:32b-instruct`) and image source (dockerhub/jfrog/local) per service. |
+| `setup.sh` | `./scripts/setup.sh [--setup\|--restart] [--local-build] [--rootless-docker]` — interactive wizard first time; `--restart` skips prompts; `--local-build` forces all images to build locally (no Docker Hub). Auto-backfills `ACE_INSTANCE_NAME`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT`, `APP_CHARTS_ROOT` in `.env`. Prompts for Ollama model (default: `qwen2.5:32b-instruct`) and image source (dockerhub/jfrog/local) per service. `--rootless-docker` is a modifier, not a separate mode: it bootstraps a personal rootless Docker daemon and switches the CLI context to it (sudo-free, isolated from other users on a shared host), then falls straight through into whichever of `--setup`/`--restart` you combined it with. Passing the flag skips straight to the bootstrap with no prompt; running plain `--setup` (no flag) asks it as a y/N question at the very start instead; `--restart` never asks — pass the flag explicitly there. See §6 "Personal rootless Docker". |
 | `start-local-services.sh` | `./scripts/start-local-services.sh [--skip-mongo] [--skip-langfuse] [--skip-ollama] [--skip-litellm] [--skip-certifier] [--only-mongo] [--only-langfuse] [--only-ollama] [--only-litellm] [--only-certifier] [--restart] [--pull-certifier]` |
 | `compose-up-guard.sh` | `./scripts/compose-up-guard.sh up -d` — drop-in wrapper for `docker compose`; refuses to proceed if any container in the stack already exists under a different checkout's working directory |
 | `prepare-images.sh` | `./scripts/prepare-images.sh` — builds, loads, or configures registry credentials for experiment workflow images based on `*_IMAGE_SOURCE` settings in `.env` (dockerhub/jfrog/local). Called automatically by `setup.sh`; safe to run standalone to rebuild/reload. |
@@ -793,6 +859,41 @@ Experiment configuration files that embed live secrets (e.g. `itbench-litmus-cha
 **Very new Ubuntu releases may not have `python3.12` in apt at all.**
 Ubuntu ships whatever CPython is current as the `python3` default at release time, and that version climbs every release. On a release newer than whatever this repo's contributors had when they last checked (e.g. 26.04 defaults to Python 3.14), apt's `python3.12` package may not exist yet, and the usual deadsnakes-PPA fallback may not have published builds for that codename yet either. `scripts/check-prerequisites.sh` (run standalone or automatically via `setup.sh`) detects this and offers to bootstrap Python 3.12 through `uv` instead — a sudo-free tool that ships prebuilt CPython binaries independent of the OS package manager, so it isn't blocked on the distro catching up. This only matters for certifier local dev outside Docker (§6 "Certifier Development"); the Compose and Kubernetes deploy paths run certifier from the prebuilt image and never need it.
 
+**The shared host's Docker `data-root` may not actually be on `/Innovation`, despite §4.5's KinD-eviction note implying it is.**
+Verify before trusting it: `docker info | grep "Docker Root Dir"`, and confirm there's no separate mount at that path (`findmnt /var/lib/docker`) and no override in `/etc/docker/daemon.json` or a `docker.service` systemd drop-in (`systemctl cat docker.service`). On at least one host in this fleet, a Docker reinstall (`docker.io` → `docker-ce`) silently reset the daemon to its default `data-root` (`/var/lib/docker`, on the host's root filesystem) with no override configured anywhere — so every container/image/volume/KinD-node on that host, from every user sharing the daemon, accumulates on root fs instead of the large `/Innovation` volume, unnoticed until root fs nears capacity (`df -h /`). This is a single shared daemon serving every user's checkout; relocating its `data-root` means stopping `docker.service` for the whole host, which stops every other user's running containers too — do not do this without host-admin coordination and explicit confirmation from whoever's containers are currently up (`docker ps -a` first).
+
+**Personal rootless Docker (avoiding the shared host's `data-root` without touching other users).**
+If root fs is tight and a full `data-root` migration isn't warranted (or isn't your call to make on a shared host), rootless Docker is available two ways: pass `--rootless-docker` explicitly (combine with `--setup`, the default, or `--restart` — e.g. `./scripts/setup.sh --rootless-docker` or `./scripts/setup.sh --restart --rootless-docker`) to skip straight to the bootstrap with no prompt, or just run plain `./scripts/setup.sh` (`--setup`, no flag) and answer "y" to the "Personal rootless Docker?" question asked at the very start of the wizard. `--restart` without the flag never asks — it skips all prompts by design. Either path bootstraps a private, per-OS-user Docker daemon via `dockerd-rootless-setuptool.sh` (already installed via the `docker-ce-rootless-extras` package on hosts set up for this) and switches the CLI's default context to it — no sudo, and zero effect on the shared daemon or any other user's containers — then falls straight through into the wizard (or `--restart`) under that new context in the same invocation. Its default `data-root` is `$HOME/.local/share/docker`; on hosts where `$HOME` is itself a path under `/Innovation` (check `df -h "$HOME"`), this lands off root fs automatically with no extra config. `docker context use` persists in `~/.docker/config.json`, so every later `docker`/`kind`/`docker compose` invocation — from any shell, not just this script — transparently targets the rootless daemon afterward. Existing containers on the shared daemon (e.g. an existing KinD cluster) are untouched and keep running there; they're simply invisible to `docker ps`/`kind get clusters` until you `docker context use default` again.
+
+*Two things a bare context switch does not cover, both handled by `--rootless-docker` itself:*
+- **The `docker.sock` bind-mount.** `docker-compose.yml`'s `cluster-init` service mounts the Docker socket into the container so `kind create` can run there. A bind-mount source is a literal host filesystem path, not context-aware — `docker context use rootless` does not redirect it. `--rootless-docker` detects the rootless daemon's actual socket path and writes it to `.env` as `DOCKER_HOST_SOCK`, which `docker-compose.yml` reads (`${DOCKER_HOST_SOCK:-/var/run/docker.sock}`) instead of a hardcoded path. Without this, `kind create` would silently keep hitting the shared root daemon even after switching contexts.
+- **GPU passthrough for Ollama.** `docker-compose.yml`'s `ollama` service requests `devices: ["nvidia.com/gpu=all"]` (CDI syntax) rather than the legacy `driver: nvidia` reservation. The shared root daemon already resolves this via a system-wide CDI spec at `/etc/cdi`. For the rootless daemon, `--rootless-docker` generates a **personal** CDI spec under `$HOME/.config/cdi` (via `nvidia-ctk cdi generate`) and points a per-user `~/.config/docker/daemon.json` at it — this never touches `/etc/cdi` or `/etc/nvidia-container-runtime/config.toml`, which are shared and affect every other user's containers on the host. (Do not "fix" GPU-under-rootless by flipping `no-cgroups=true` in that shared file — it works, but weakens device-cgroup isolation for everyone else's root-daemon containers too.)
+
+**`network_mode: host` services under rootless — fixed.** `auth`, `graphql`, and `web` now run on bridge networking + explicit `ports:` (same pattern as `mongo`/`app`/`ollama`) instead of `network_mode: host`, so they're reachable under a personal rootless daemon — rootless "host" networking is RootlessKit's own private netns, not the real host's, so explicit `ports:` is the one publishing form that's actually forwarded out. `cluster-init` alone deliberately stays `network_mode: host`: it needs the real `docker.sock` + `~/.kube` either way, and since KinD's node containers are created by that same daemon, their host-published ports land in whatever netns cluster-init itself occupies (RootlessKit's, under rootless) regardless of which daemon is active — no fix needed there. What changed to make this work:
+- **Service-to-service reachability**: the old `extra_hosts: X: 127.0.0.1` / hardcoded bridge-IP wiring (which only worked when every container shared the real host loopback) is replaced by Docker Compose service-name DNS on the default network — `auth`/`graphql` reach `mongo` as `mongo:27017` (`DB_SERVER` overridden per-service), `graphql` reaches `auth`'s gRPC as `auth` (`LITMUS_AUTH_GRPC_ENDPOINT`), `web`'s nginx (`compose/web-nginx.conf`) proxies `/auth/` and `/api/` to `auth:3000`/`graphql:8081` by service name, and `graphql` reaches the certifier `app` service via a `certifier` network alias (`CERTIFIER_BASE_URL`/`CERTIFICATE_PDF_BASE_URL`, overridable via `*_COMPOSE` env vars in `.env.example`).
+- **`graphql`'s Kubernetes access**: see "The KinD fix" below — this was the hard part, since `graphql` also needs to reach the KinD API server, which it can no longer do via a shared host loopback once it's bridge-networked.
+- **Cloud-mode caveat**: `CLUSTER_MODE=cloud`'s `pin_api_server_host()` privatelink-DNS mechanism still only patches `/etc/hosts` for `cluster-init` itself (still host-networked); `graphql` no longer shares that file. This is a known, not-yet-fixed gap specific to `CLUSTER_MODE=cloud` — see `innovation.md` §3.19. It does not affect the local-KinD path rootless Docker is meant for.
+- Also still true generally: rootless networking runs through `rootlesskit`/`slirp4netns`, which may not support every LitmusChaos fault type that needs privileged host access — verify before relying on it for experiments that need those.
+
+**The KinD fix — how `graphql` reaches the Kubernetes API server without host networking.**
+`cluster-init` calls `kind create cluster`, which by default writes an *external* kubeconfig (`server: https://127.0.0.1:<host-port>`) — only reachable by containers sharing the real (or, under rootless, RootlessKit's) host loopback, same as `cluster-init` itself. Once `graphql` moved to bridge networking, `127.0.0.1:<port>` inside it stopped resolving to anything. Fix, entirely additive (no change to `cluster-init`'s own networking):
+1. A new top-level Compose network, `kind: name: kind-${ACE_INSTANCE_NAME:-unconfigured}` — checkout-scoped so two checkouts' KinD clusters never share a Docker network on this shared host. Compose creates it before any container starts (regardless of `depends_on` order), because `graphql` references it in its own `networks:` list.
+2. `cluster-init` gets a new env var, `KIND_EXPERIMENTAL_DOCKER_NETWORK: kind-${ACE_INSTANCE_NAME:-unconfigured}` — read directly by the `kind` CLI's own process environment, telling `kind create cluster` to attach its new node containers to that pre-existing network instead of creating/reusing the Docker-wide default `"kind"` network every checkout would otherwise share. No `entrypoint.sh` change needed for this part — `cluster-init` doesn't need to be *on* that network itself; it creates the node containers via the bind-mounted `docker.sock`, not via its own network membership.
+3. `entrypoint.sh` additionally runs `kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}"` after cluster provisioning and writes it to `KUBECONFIG_INTERNAL_OUT` (`/shared/config-internal`, in the same `kubeconfig` named volume `graphql` already mounts) — a real, first-class `kind` feature that resolves the API server as `https://<cluster>-control-plane:6443`, a Docker-network container DNS name rather than a host-loopback address.
+4. `graphql` joins the `kind` network (alongside `default`, for reaching `mongo`/`auth`/`certifier`) and reads `KUBECONFIG=/kube/config-internal` instead of the external kubeconfig.
+Net effect: daemon-agnostic by construction — `cluster-init`'s `kind create cluster` targets whatever `${DOCKER_HOST_SOCK:-/var/run/docker.sock}` resolves to, and every container Compose creates (`graphql` included) targets the same daemon via the active `docker context`, so `graphql`, `cluster-init`, and the KinD nodes always land on the same daemon together. Verified via `docker compose config` (parse/render only, not a live bring-up) — the rendered YAML confirms `network_mode: None` on `auth`/`graphql`/`web`/`app`, `graphql` attached to both `default` and `kind`, correct service-DNS values, and `cluster-init` unchanged on `network_mode: host`. **A real `docker compose up` end-to-end test has not been run** — do that before relying on this for anything beyond local iteration.
+
+**Remaining rootless-Docker notes specific to the `setup.sh`-driven Kubernetes/Helm path** (§6 "First-Time Setup (Kubernetes)"), which is architecturally separate from `docker-compose.yml` — `auth`/`graphql`/`web`/`mongo`/etc. run there as Kubernetes Deployments + Services over K8s Service DNS, with pods getting in-cluster API access automatically via their ServiceAccount, so the host-networking workaround above simply doesn't apply to that path at all:
+- **Docker-socket-bind-mount-not-context-aware** (the `DOCKER_HOST_SOCK` fix described above) — this is also why `setup.sh`'s Kubernetes/Helm path never had this problem: it calls `kind create cluster` directly as a host-side script (`scripts/setup.sh`, search `kind create cluster --name`), inheriting whatever `docker context` is active via normal CLI context resolution — no bind-mount is involved, so there's no path for it to silently target the wrong daemon.
+- **Multi-checkout port collisions** for web/auth/graphql/litellm/langfuse/mongo/minio — already solved, independently of the above, by `pick_kind_hostport()` (`scripts/setup.sh`), which resolves all 16 KinD `extraPortMappings` (`KIND_HOSTPORT_*`) with a live free-port walk plus intra-batch collision tracking, feeding `deploy/kind/render-kind-config.sh`. This is a distinct, older, already-correct mechanism from `docker-compose.yml`'s separate (and largely unimplemented) `*_PORT` vars — don't conflate the two when reasoning about port collisions in this repo.
+- **GPU passthrough for Ollama** — applies, but not via `docker-compose.yml`. `setup.sh` brings up Ollama by shelling out to `start-local-services.sh --only-ollama` (`scripts/setup.sh` ~L1268), which does a **raw `docker run`**, not Compose. That invocation used the legacy `--gpus all` flag — routed through the nvidia-container-runtime OCI hook, which is registered per-daemon and doesn't carry over to the rootless daemon's separate `~/.config/docker/daemon.json` — now fixed to `--device nvidia.com/gpu=all` (CDI) in `scripts/start-local-services.sh`'s `start_ollama()`, matching `docker-compose.yml`'s already-CDI `ollama` service and resolving correctly under both daemons via the same CDI-spec setup `--rootless-docker` already performs above.
+- **Missing `uidmap` prerequisite check** — applied unconditionally; this is daemon-setup-level, independent of which deployment path is used afterward. `setup.sh --rootless-docker` now checks for `newuidmap`/`newgidmap` (the `uidmap` package) alongside its existing `docker-ce-rootless-extras` and subuid/subgid checks, before attempting install. Previously this failed deep inside `dockerd-rootless-setuptool.sh install` with a raw, non-ACE-styled error instead of the script's own clean early-exit pattern.
+- **Linger as a soft, best-effort warning** — hardened, also unconditionally. Previously: attempted once during first install, warned and continued silently on failure. Now: checked and enforced on **every** run (not just first install) — `setup.sh --rootless-docker` exits with an explicit `sudo loginctl enable-linger` instruction if linger isn't actually enabled after the attempt, rather than reporting overall success while the rootless daemon (and everything under it — the KinD cluster, Ollama, an in-progress N=30 certification run) is still one logout away from dying silently.
+
+**MongoDB replica set stuck in `ReplicaSetNoPrimary`/`RSGhost` forever on the Kubernetes/Helm path — `auth`/`graphql`/`certifier` crash-loop with `context deadline exceeded` reaching Mongo.** Root cause: the `mongodb-rs-init` post-install Job called `rs.initiate({..., members:[{_id:0, host:"mongodb:27017"}]})` using the **ClusterIP Service name** as the replica-set member host. A ClusterIP is a virtual address rewritten by kube-proxy iptables/ipvs NAT — it is never bound to an interface inside the `mongodb-0` pod's own network namespace, so mongod's `isSelf()` check can never match it. The pod is left believing it is not a member of its own replica set, so it never holds an election and stays primary-less indefinitely even though `mongodb-0` itself stays `Running`/`Ready` the whole time — `rs.status()` fails with `"Our replica set config is invalid or we are not a member of it"`. Every dependent service that talks to Mongo with `replicaSet=rs0` in its connection string then fails replica-set topology discovery and crash-loops (`auth` was observed at 159 restarts / 17h before diagnosis). Fixed in both `deploy/helm/ace/templates/mongodb.yaml` and `deploy/k8s/mongodb.yaml`: the member host is now the StatefulSet pod's stable per-pod DNS name via the headless service, `mongodb-0.mongodb-headless.<namespace>.svc.cluster.local:27017` — a real, resolvable, pod-bound address `isSelf()` can match — instead of the ClusterIP name. This is the standard, correct pattern for a Mongo replica set member on Kubernetes; the Docker Compose path (`docker-compose.yml`, `scripts/start-local-services.sh`) never had this bug because it already used `localhost:27017` (correct for a single-container topology). If you hit this on an already-deployed cluster before picking up the fix, `rs.reconfig()` the live member host and restart the crash-looping pods — see `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` for the exact commands used.
+
+**The "kubectl apply -f `<url>`" manifest-download link on step 3 of "Connect Chaos Infrastructure" broke whenever the browser reached the ChaosCenter UI through a different port than the one `kubectl` can actually use — SSH tunnels, VS Code port-forwarding, and similar remote-dev setups routinely present the UI on a client-local port that is meaningless on the host where `kubectl` actually runs.** Root cause: the link was built entirely client-side from `window.location.origin` (`AgentCert/chaoscenter/web/src/config/index.ts`) — correct only when the browser and the shell running `kubectl` are reachable via the same address, which is not guaranteed on a shared dev host. Fixed by moving the URL to be server-computed: a new `CHAOS_CENTER_PUBLIC_ENDPOINT` Go config (`AgentCert/chaoscenter/graphql/server/utils/variables.go`) — distinct from the existing `CHAOS_CENTER_UI_ENDPOINT`, which is for in-cluster subscriber-pod callbacks, a different address space entirely — is preferred when set, falling back to the previous Referer/Host-derived behavior otherwise. A new `manifestDownloadURL` field on the `registerInfra` GraphQL mutation (`RegisterInfraResponse` in `chaos_infrastructure.graphqls`) carries the computed value; the frontend (`KubernetesChaosInfrastructureGreenfield.tsx`) now consumes it directly instead of reconstructing the URL itself. `CHAOS_CENTER_PUBLIC_ENDPOINT` is auto-derived per deployment path so no manual configuration is needed by default: `deploy/helm/ace/templates/graphql.yaml` computes it from `KIND_HOSTPORT_WEB` (the same instance-scoped, collision-avoided port `setup.sh` already prints as the UI URL), and `docker-compose.yml` computes it from `WEB_PORT` — both can still be overridden by setting `CHAOS_CENTER_PUBLIC_ENDPOINT` directly in `.env` if neither default is reachable from wherever `kubectl` runs (see `.env.example`). **Non-obvious gotcha inside the fix itself:** the computed URL must include the `/api` path segment — nginx (`compose/web-nginx.conf`, and the ConfigMap-embedded nginx.conf in both `deploy/k8s/web.yaml` and the Helm chart) only proxies `/api/` to the graphql server (stripping the prefix before forwarding, since graphql's own route is registered as bare `/file/:key`); a URL built without `/api` doesn't error, it silently returns the SPA's `index.html` shell with a `200` status, which would make `kubectl apply -f` fail on a YAML-parse error instead of a clean connection error. See `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` for the full incident writeup, including the pre-existing unrelated `agent_registry.resolvers.go` build breakage found and fixed along the way.
+
 ---
 
 ## 7. Entry Points
@@ -902,6 +1003,8 @@ These are backfilled into `.env` automatically on every `setup.sh` run (both `--
 | `LITELLM_PORT` | `14000` | Host port for LiteLLM proxy; override if :14000 is taken. |
 | `AGENT_CHARTS_ROOT` | `<repo-root>/agent-charts` | Absolute path to agent Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
 | `APP_CHARTS_ROOT` | `<repo-root>/app-charts` | Absolute path to app Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
+| `DOCKER_HOST_SOCK` | `/var/run/docker.sock` (shared root daemon) | Host path `docker-compose.yml`'s `cluster-init` service bind-mounts for `kind create`. Auto-set by `setup.sh --rootless-docker` to the personal rootless daemon's socket — see §6 "Personal rootless Docker". |
+| `CERT_REPORTS_HOST_DIR` | `<repo-root>/.tmp/certification-reports-${ACE_INSTANCE_NAME}` | Host directory both Compose entry points bind-mount into the certifier container as `CERT_HOST_EXPORT_DIR` for finished-report export — see §4.1 "Workspace Layout". KinD uses the analogous `KIND_CERT_EXPORT_DIR` (read by `deploy/kind/render-kind-config.sh`), same default path. |
 
 ### Critical — Certifier
 
@@ -921,6 +1024,7 @@ These are backfilled into `.env` automatically on every `setup.sh` run (both `--
 | `AZURE_EMBEDDING_MODEL` | — | Embedding deployment name |
 | `WORKSPACE_DIR` | `workspace` | Phase 0+1 output root |
 | `CERT_WORKSPACE_DIR` | `workspace/cert` | Phase 2+3+4 output root |
+| `CERT_HOST_EXPORT_DIR` | unset (feature disabled) | In-container path finished reports are additionally copied to for host-side discoverability. Set in Compose/KinD deploy configs only — see §4.1 "Workspace Layout". Unset in local non-Docker dev and `CLUSTER_MODE=cloud`/`local`; treated as a pure no-op, never an error. |
 | `API_MAX_CONCURRENT_TASKS` | `4` | Phase 0+1 concurrency cap |
 | `API_MAX_CONCURRENT_CERT_TASKS` | `2` | Phase 2+3 concurrency cap |
 | `API_HOST` | `0.0.0.0` | Uvicorn bind host |
@@ -1190,10 +1294,10 @@ These paths are generated, vendored, binary, or otherwise not worth reading:
 - `litmus-go/` — LitmusChaos Go fault injector implementations; only needed for fault implementation work
 - `agents/sre-agent/ITBench-Evaluations/` — LLM-as-a-Judge evaluator submodule; upstream, rarely modified
 
-**Historical documents (informational only):**
-- `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` — historical handoff document
-- `OPEN_WEIGHT_CERTIFICATION_HANDOFF_READABLE.md` — same content, formatted
-- `ITBENCH_WORK_IN_PROGRESS.md` — in-progress notes
+**Historical documents (read only if you need deep bug/decision history; do not skip writing to them — see §0.2):**
+- `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` — the authoritative, detailed change log for this project. You are not required to read it in full before routine tasks, but every session that modifies code/config/infra must append to it — see §0.2.
+- `OPEN_WEIGHT_CERTIFICATION_HANDOFF_READABLE.md` — a readability-focused rewrite of the same content, kept in sync with it — see §0.2.
+- `ITBENCH_WORK_IN_PROGRESS.md` — in-progress notes, superseded by the two Handoff docs above for status purposes
 
 **File types to skip unless actively editing them:**
 - `*.pb.go` — protobuf generated

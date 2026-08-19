@@ -72,6 +72,32 @@ Currently `FLASH_AGENT_MODEL` is a global `.env` setting. Enabling per-experimen
 - `CertificationStatusPanel.tsx` (frontend) adds an explicit `AGGREGATION_FAILED` case rendering the "Generating Certificate" stage as failed rather than falling through to the misleading default.
 - Follow-up (not yet done): surface the actual `error.reason` string (e.g. the underlying Python traceback) through a new `errorMessage` field on `CertificationExperimentSummary`, which requires a GraphQL schema change + gqlgen regen.
 
+### 1.13 Fault-Injection Timestamp Sourced from Argo Workflow State, Not a Trace-Native Event
+**Status: Proposed**
+
+TTD/TTR (`certifier/metrics_extractor/scripts/span_aggregator.py:408-434`) compute `time_to_detect`/`time_to_mitigate` as `|agent_event_time − fault_injection_time|`. Detection/mitigation timestamps are genuinely trace-native (LLM/tool-call span `startTime`/`endTime`). The injection anchor is not: `span_aggregator.py:69-70` reads `bucket_metadata["injection_timestamp"]`, set in `fault_bucketing.py:699` from the `"fault: <name>"` span's `startTime` — a span emitted by `EmitFaultSpanAtInjection` (`AgentCert/chaoscenter/graphql/server/pkg/observability/langfuse_tracer.go:493-697`), which sets both the span's `StartTime` and the `fault.injection_timestamp` attribute from `ParseArgoTime(details.StartedAt)` (line 524). `details.StartedAt` is `workflowObj.Status.Nodes[i].StartedAt` (`AgentCert/chaoscenter/subscriber/pkg/events/workflow.go:128,148`) — the Argo Workflow node's own K8s status field, read by an async subscriber poll of the ChaosEngine step, not a signal from the actual `stress-ng`/`tc`/`dd` invocation inside the litmus helper pod.
+
+Net effect: the TTD/TTR baseline reflects when Argo marked the chaos step "started," not when the fault mechanism actually began altering the target — a gap driven by helper-pod scheduling/image-pull/cgroup-attach latency. That gap exists but is unmeasured today (one experiment at a time); it would grow under node contention (e.g. concurrent experiments, §3.20) in a way indistinguishable from genuine agent slowness, systematically biasing the primary certification metric. Surfaced while evaluating whether concurrent experiment execution would compromise certificate statistical validity.
+
+Fix direction: emit the injection marker from inside the litmus helper pod at the actual `dd`/`tc`/`stress-ng` call site (litmus-go already owns this code path) rather than reconstructing it from polled Argo node state.
+
+### 1.14 No Model/Provider Identity Control, Validation, or Reporting for Agents Under Test
+**Status: Proposed**
+
+Certification is meant to compare agents' own reasoning/resilience quality, but nothing in the platform pins, validates, or records which LLM backend an agent under test actually used:
+- `MODEL_ALIAS` defaults to `gpt-4o` per agent chart (`agent-charts/charts/flash-agent/values.yaml:26`, similarly `ciso-agent/values.yaml:22,36`), but `RegisterAgent`'s `ValuesYAML` (`AgentCert/chaoscenter/graphql/server/graph/agent_registry.resolvers.go:83,137` → `agent_registry/helm.go:194-209`) is a free-form, unvalidated Helm values override. `agent_registry/validator.go` checks only name format, semver, capability taxonomy, and container-image format — no model/provider check exists, and the `Agent` DB schema (`model.go:4-19`) has no model/provider field to validate against in the first place.
+- The alias itself isn't a stable identity: LiteLLM resolves `gpt-4o` via `os.environ/AZURE_OPENAI_DEPLOYMENT` at proxy-container-start (`agentcert-stack/litellm-setup/litellm_config.yaml:56-65`), from one global, unversioned ConfigMap (`deploy/helm/ace/templates/litellm.yaml:1-8,21-70`, replicas:1, shared `ace` namespace). Re-pointing that env var silently and retroactively redefines what every past "gpt-4o" certificate actually measured.
+- `certifier/cert_builder`'s report schema (`schema/certification_schema.py:173-192` `Meta`, and `scripts/computation/table_builder.py:540-558` token-usage builder) captures no model/provider field anywhere — a certificate can't be audited after the fact for which backend served it, even though Langfuse generation spans typically carry a `model` field that's simply never extracted.
+- `agents/ciso-agent/src/ciso_agent/llm.py:42-105` has explicit WatsonX/Azure direct-SDK branches (`is_watsonx_api`, `is_azure_api`) keyed off env vars — ciso-agent can bypass the shared LiteLLM proxy entirely, so "went through the traced, alias-controlled choke point" isn't structurally guaranteed for every agent.
+- Agent pod compute: all six agent charts set `resources.limits` (uniform: 500m/1.5Gi) but no `resources.requests` anywhere (confirmed via grep across all `values.yaml`) — Burstable QoS, no actual compute guarantee, and overridable per-install through the same unvalidated `ValuesYAML` path.
+
+Surfaced during a discussion of concurrent experiment execution (§3.20): fixing resource *contention* between concurrent runs has limited value if resource *identity* isn't pinned or auditable for a single run in the first place. Fix direction: add a validated `model`/`provider` field at registration (mirroring the existing capability-taxonomy validation pattern in `validator.go`), extract the actual `model` field from Langfuse generation spans into the certifier pipeline and surface it in the report's `Meta` section, snapshot the resolved LiteLLM routing table into each certification run's metadata, and set `resources.requests == limits` (Guaranteed QoS) as the chart default.
+
+### 1.15 LiteLLM Router Rate-Limit Controls Unconfigured
+**Status: Proposed**
+
+`agentcert-stack/litellm-setup/litellm_config.yaml` sets a retry policy (`num_retries: 3`, `retry_after: 2`, `request_timeout: 600`) but no `rpm`/`tpm`/`max_parallel_requests` on any model entry, and no `fallbacks`. Under concurrent load (§3.20) this means provider rate-limit contention surfaces as blind retry-and-wait latency rather than predictable throttling — variance attributable to infrastructure, not agent behavior, contaminating timing metrics the same way as §1.13. LiteLLM natively supports per-model `rpm`/`tpm`/`max_parallel_requests` and multi-deployment load-spreading under one alias (already used incidentally here for two `qwen2.5-32b-instruct` VRAM variants, `litellm_config.yaml:80-94,103-110`) — neither is applied to any cloud provider entry today. Fix direction: set `rpm`/`tpm` to each provider's real account quota, provision a second key/deployment for the primary cloud model to double the effective budget, and size the concurrency threshold in §3.20 (Argo semaphore) against the configured `rpm`/`tpm` rather than an arbitrary N.
+
 ---
 
 ## 2. Agent Implementations
@@ -197,6 +223,65 @@ Enabling HTTPS would require:
 - `ALLOWED_ORIGINS` (auth service + GraphQL server CORS/WebSocket allowlist, see §4 in CLAUDE.md) extended to accept the `https://` origin, since it's currently only validated against `http://`-style entries.
 - Frontend `OPENAI_BASE_URL`-style absolute-URL assumptions (if any) and Apollo/WebSocket client config in `AgentCert/chaoscenter/web/src` double-checked for hardcoded `ws://`/`http://` schemes that would need to become `wss://`/`https://` behind TLS.
 
+### 3.19 Cloud-Mode `pin_api_server_host()` Privatelink DNS Depends on graphql's `network_mode: host`
+**Status: Proposed**
+
+Surfaced while designing the fix for `network_mode: host` breaking `auth`/`graphql`/`web` reachability under a personal rootless Docker daemon (`./scripts/setup.sh --rootless-docker`, §6 "Personal rootless Docker" in CLAUDE.md). Rootless Docker's "host" network is RootlessKit's own private netns, not the real host's, so those three services — currently on `network_mode: host` to bind directly to real host ports 3000/3030/8081/8082/2001 — become unreachable from the browser/each other the moment the active `docker context` is `rootless`. The proposed durable fix converts them to standard bridge networking with explicit `ports:` (the same pattern `mongo` already uses at `docker-compose.yml` ~L127-132), plus real Compose service-name DNS in place of the current `extra_hosts: X: 127.0.0.1` hacks.
+
+That conversion has a side effect specific to `CLUSTER_MODE=cloud` (AKS/EKS/GKE), independent of the rootless motivation: `compose/cluster-init/entrypoint.sh` calls `pin_api_server_host()` for cloud clusters, which resolves the cluster's private-link API-server hostname and writes a `hostname → IP` line into the bind-mounted host `/etc/hosts` (`docker-compose.yml` ~L103-106 documents this explicitly: *"Mount the host /etc/hosts so pin_api_server_host() writes the private cluster DNS→IP entry onto the host. graphql uses network_mode:host and therefore reads the same file — this is what makes the RBAC preflight resolve the privatelink hostname after cluster-init exits."*). This only works today because `graphql` also runs `network_mode: host` and therefore shares that exact same `/etc/hosts` with `cluster-init` and the real host.
+
+Once `graphql` moves to bridge networking, it gets its own container-private `/etc/hosts`, disconnected from whatever `cluster-init` writes to the host's copy. `graphql`'s RBAC preflight — the thing that resolves the privatelink hostname — would silently stop working, but only for `CLUSTER_MODE=cloud`; the local-KinD path (`CLUSTER_MODE=auto|fresh|kind`, the default and the primary case rootless Docker targets) is unaffected, since it doesn't go through `pin_api_server_host()` at all.
+
+Fix: replace the shared-`/etc/hosts` mechanism with an explicit `extra_hosts:` entry on `graphql`'s own Compose service definition, populated with the same resolved IP `pin_api_server_host()` already computes — e.g. have `cluster-init` write the resolved `hostname=IP` pair to `.env` (mirroring how `setup.sh --rootless-docker` already auto-populates `DOCKER_HOST_SOCK`), and have `graphql`'s `extra_hosts:` read it from there — rather than depending on both containers coincidentally sharing a network namespace.
+
+Not yet implemented — flagged during design of the `network_mode: host` fix above, not itself part of that fix's scope.
+
+### 3.20 Concurrent Experiment Execution — Same Agent or Application
+**Status: Proposed**
+
+Currently only one experiment can safely run at a time per agent/app pairing. Root cause across every layer: install-time identifiers (namespace, Helm release name, K8s resource names, ChaosEngine CR names) default to the agent/app's plain name rather than being derived per-run:
+- `app-charts/install-app/main.go:99-101` defaults `ReleaseName` to `FolderName`; `chaos-charts/experiments/sock-shop/experiment.yaml:73-94` hardcodes `-folder=sock-shop -namespace=sock-shop` with no per-run templating. App-chart templates additionally key real resource placement off `.Values.namespaces.sockShop` (a literal, not `.Release.Namespace`) — see `_helpers.tpl:54-56`.
+- `agent-charts/charts/flash-agent/templates/deployment.yaml:4` names the Deployment `{{ .Values.agent.name }}` (default `"flash-agent"`) — two concurrent installs collide on Deployment/ConfigMap name in the same namespace regardless of Helm release name.
+- ChaosEngine CR names in `chaos-charts/experiments/sock-shop/experiment.yaml` (e.g. `:807 pod-cpu-hog-chaos`) and their `appinfo.appns`/`applabel` are hardcoded literals — concurrent runs both collide on CR name and target the exact same pods.
+- Prometheus MCP / K8s MCP NodePorts (31083 sock-shop, 31084 bookinfo) and — more significantly — the shared Prometheus/Grafana NodePorts (31090/31687) and `monitoring` namespace are reused identically across sock-shop, bookinfo, and otel-demo `values.yaml`, a cluster-wide singleton collision even across different app types.
+- `pkg/agent_registry/` (state machine REGISTERED→VALIDATING→ACTIVE/INACTIVE→DELETED) models agent health/lifecycle only — no reservation/locking concept exists anywhere in the package, so nothing prevents two experiments from independently deploying to the same fixed release/namespace concurrently.
+- `agent-sidecar/proxy.py:31-110` reads trace-correlation context (`NOTIFY_ID`/`EXPERIMENT_ID`/`WORKFLOW_NAME`) from a ConfigMap volume mount written once per Helm install, not per-request — safe only because concurrency doesn't exist yet; if two experiments shared one agent pod, trace correlation would silently misattribute.
+
+By contrast, `pkg/certification/service.go:22-24,107,505-524` (keyed on `projectId|agentId|experimentId|runId`) and the certifier's Mongo task dedup (`certifier/main/services/session_service.py:131-146,258-272`, keyed on `agent_id+experiment_id[+run_id]`) are already concurrency-safe today and can serve as the template for the fix.
+
+Proposed fix, phased:
+1. **Per-run identifiers** — thread a short id derived from `experiment_run_id` through namespace, Helm release names, Deployment/ConfigMap names, ChaosEngine CR names, and `appinfo.appns`; make the cleanup step delete-by-namespace instead of a hardcoded name list (which today risks deleting a concurrent, unrelated run's still-active fault).
+2. **Drop NodePort for the in-cluster experiment path** — agent→MCP and graphql→certifier traffic moves to ClusterIP + per-run-namespace service DNS (matching the existing in-cluster pattern in CLAUDE.md §4.2); keep Prometheus/Grafana centralized (not sandboxed per run) and disambiguate by namespace label instead of duplicating the whole monitoring stack per run.
+3. **AgentInstance model** — split the registry into a template (`AgentRegistry` entry: image/config/Langfuse project, unchanged) and an ephemeral `AgentInstance` per `(agent_id, experiment_run_id)`, created at `install-agent` time in the per-run namespace and torn down at cleanup — the natural place to track how many live instances of a given `agentId` exist concurrently.
+4. **Concurrency threshold** — use Argo's native ConfigMap-backed `Synchronization`/semaphore to cap N concurrent instances of the experiment workflow template (the "manual threshold" mechanism), plus a lightweight node-headroom preflight check (allocatable vs. sum of running+pending requests via metrics-server) given this host's already-documented tight resource margins (CLAUDE.md §6, KinD eviction thresholds).
+
+Before relying on concurrent runs of the *same* fault/agent/app combination for one certification's N=30 sample, also see §3.21 (fault blast-radius gap), §1.13 (timing source contamination), and §1.15 (rate-limit contention) — running concurrently is safe for correctness once phases 1–4 land, but preserving the *statistical validity* of a pooled N=30 batch additionally requires pinning the concurrency degree constant across the whole batch (not letting it vary run-to-run) and documenting it in the report's Methodology section, since the H01–H09 framework (§1.2) assumes i.i.d. samples from one distribution.
+
+### 3.21 Fault Blast-Radius Audit: `disk-fill` Escapes Container Scope
+**Status: Proposed**
+
+Audited every fault type in `chaos-charts/experiments/sock-shop/experiment.yaml` against its litmus-go injector mechanism to confirm concurrent experiments sharing a node can't interfere with each other. `pod-cpu-hog`/`pod-memory-hog` (`experiment.yaml:859-868,934-943`) are enforced via the target container's own cgroup (`litmus-go/chaoslib/litmus/stress-chaos/lib/stress-chaos.go`, helper's `addProcessToCgroup`), and `pod-network-loss` (`:1089-1096`) applies `tc` inside the target pod's own netns (`litmus-go/chaoslib/litmus/network-chaos/helper/netem.go:189-311`) — both genuinely pod-scoped and safe. `disk-fill` (`:1164-1169`) is the outlier: `litmus-go/chaoslib/litmus/disk-fill/helper/disk-fill.go:183-250` derives its fill size from the target container's `ephemeral-storage` resource *limit* when one is set — but `app-charts/charts/sock-shop/templates/sock-shop/catalogue-db-deployment.yaml` sets no `resources` block at all, and the experiment spec sets no `EPHEMERAL_STORAGE_MEBIBYTES` override either, so sizing falls through and the fill lands on the node's real, shared disk with no bound.
+
+Fix direction: set `resources.limits.ephemeral-storage` on every app-chart Deployment that's a valid `disk-fill` target (starting with `catalogue-db`), and set `EPHEMERAL_STORAGE_MEBIBYTES` explicitly in the ChaosEngine spec as a belt-and-suspenders override rather than relying on inferred limits — audit `bookinfo` and any future app chart the same way before enabling concurrent `disk-fill` there. Until fixed, exclude `disk-fill` from the set of faults considered safe to run concurrently with other namespaces sharing a node (§3.20).
+
+### 3.22 MongoDB Backup/Restore/Lineage Flow Needs a Real End-to-End Checkup
+**Status: Partially Tested**
+
+`scripts/shut_down.sh` and `scripts/setup.sh` were extended (see `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` §29–§31 for the full design/reasoning) so that:
+- `shut_down.sh` automatically `mongodump`s the Kubernetes-deployed MongoDB (`mongodb-0` pod, `ace` namespace) before deleting the KinD cluster — each run producing its own independent, timestamped archive (`mongodb-<UTC timestamp>.archive.gz`) rather than one shared file, pruned to the newest 10 per instance, each with a `.meta` sidecar recording whether the database it came from was started from scratch or restored from an earlier named backup.
+- `setup.sh`'s interactive (non-`--restart`, non-express) wizard lists every backup found for the instance — newest first, with size/date/lineage shown — and offers to `mongorestore` a chosen one (or start fresh) into the freshly deployed database, polling the replica set's own readiness rather than trusting either deploy path's (`helm upgrade --install` vs `kubectl apply`) built-in wait to mean the same thing.
+
+**Why this needed writing down here specifically:** the session that built this could not run any of it against the real cluster — a different, unrelated experiment was actively running on this shared host at the time (see CLAUDE.md §0), and touching the live KinD cluster/MongoDB pod was explicitly off-limits for the duration. Everything was instead verified as far as it could be without live infrastructure: `bash -n` syntax-checks on both scripts, and several isolated pure-bash simulations against fake stand-in files in a scratch directory — confirmed the retention-pruning math (`ls -1t | tail -n +11` correctly selects the oldest of 13 fake files), the numbered-menu-to-file selection logic (all of choices `0`–`4` plus non-numeric input mapped to the correct outcome), and a full two-generation lineage chain (fresh → backup 1 "from scratch" → simulated restore → backup 2 correctly stamped "from backup 1" → both listed with correct lineage → pruning removes an archive and its `.meta` sidecar together). None of that touched `mongodump`, `mongorestore`, `kubectl exec`, or a real `mongodb-0` pod.
+
+**What the actual checkup needs to cover, once the host is free:**
+1. A real `shut_down.sh` run against a live `mongodb-0` — confirm the archive it produces is a valid, non-empty gzip (`gzip -t`) and that `kubectl exec`'s stdout-to-file piping didn't truncate or corrupt it.
+2. Several such cycles in a row — confirm timestamped filenames really do accumulate independently (not overwrite each other) and that pruning actually kicks in and removes both the archive and its `.meta` past the 10th.
+3. A real `setup.sh` run (interactive, choosing both `h` and `k` deploy paths at least once each, since they take different code paths to reach `mongodb-0` readiness) — confirm the menu displays real backups correctly, confirm picking a specific (not just the most recent) backup restores the right data, and confirm the `mongosh` readiness poll actually bridges the gap between "Pod Ready" and "replica set actually accepting writes" on the `kubectl apply` path, where `k8s_deploy()`'s own wait (`kubectl rollout status`) does not cover the async `mongodb-rs-init` Job at all.
+4. Confirm the lineage chain holds up in a real, not simulated, multi-generation sequence — restore backup N, take a new backup, confirm its `.meta` correctly names backup N rather than defaulting to `unknown`.
+5. Confirm `--no-mongo-backup` on `shut_down.sh` actually skips the dump with no side effects, and that a teardown with no `mongodb-0` present (KinD cluster used only for chaos-target apps, no ACE control plane deployed to it) skips cleanly rather than erroring.
+
+Until this is done, treat the backup/restore/lineage flow as unverified-in-the-field: syntactically correct and logically tested in isolation, but never yet exercised against the real `mongo:5` container the way it will actually be used.
+
 ---
 
 ## 4. LLM & Model Configuration
@@ -240,6 +325,10 @@ A function similar to `ApplyInstallApplicationTemplateOverrides` strips a config
 ### 5.3 `--local` Flag for `build-and-push.sh`
 **Status: Proposed**
 A `--local` flag that skips Docker Hub login/push and instead runs `kind load` into the local KinD cluster. Makes the build script dual-purpose for publishing and local dev.
+
+### 5.4 Auto-Retrigger JFrog Pull-Secret Setup on Namespace Creation
+**Status: Proposed**
+`prepare-images.sh`'s `ensure_jfrog_pull_secret()` only creates the `jfrog-pull-secret` and patches the `argo-chaos` ServiceAccount in experiment namespaces (`itbench`, `sock-shop`, `book-info`, `otel-demo`) that already exist at the moment `setup.sh`/`prepare-images.sh` runs. On a fresh setup none of them exist yet — they're created later by the first Argo Workflow run, not by `setup.sh` — so the script just warns "re-run this script after the namespace is created" and stops. Nothing re-triggers that re-run automatically. Net effect: a user can complete setup cleanly with `INSTALL_APP_IMAGE_SOURCE=jfrog`/`INSTALL_AGENT_IMAGE_SOURCE=jfrog` and still hit `ImagePullBackOff` on their very first real experiment, compounding the already-documented JFrog 401 trap (§6.5) with a second, silent failure mode that has no automated remediation path. Fix: have the GraphQL install-app/install-agent Argo Workflow step (or the namespace-creation path in `apps_registry`) call back into `prepare-images.sh` (or a narrower equivalent scoped to one namespace) the moment a new experiment namespace is created, so the pull secret and service-account patch land before the first image pull is attempted instead of after it 401s.
 
 ---
 
@@ -353,6 +442,9 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 1.10 | ChaosResult CR verdict patching | Evaluation | Implemented |
 | 1.11 | Per-experiment model selection from UI | Control Plane | Proposed |
 | 1.12 | Aggregation-failure status propagation to UI | Certifier | Implemented |
+| 1.13 | Fault-injection timestamp sourced from Argo state, not trace-native | Certifier | Proposed |
+| 1.14 | No model/provider identity control, validation, or reporting | Control Plane | Proposed |
+| 1.15 | LiteLLM rate-limit controls unconfigured | LLM Config | Proposed |
 | 2.1 | sre-agent-crewai (ACE-built CrewAI SRE agent) | Agents | Implemented |
 | 2.2 | A2A JSON-RPC 2.0 bridge | Agents | Implemented |
 | 2.3 | Open-weight model certification (Qwen2.5 7B local GPU) | Agents | Implemented |
@@ -379,6 +471,10 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 3.16 | Prompt JWT/MongoDB credentials at setup | Security | Proposed |
 | 3.17 | Azure Content Safety prompted at setup | Security | Proposed |
 | 3.18 | HTTPS for ChaosCenter web UI | Infrastructure | Proposed |
+| 3.19 | Cloud-mode `pin_api_server_host()` breaks if graphql leaves `network_mode: host` | Infrastructure | Proposed |
+| 3.20 | Concurrent experiment execution — same agent or application | Infrastructure | Proposed |
+| 3.21 | Fault blast-radius audit: `disk-fill` escapes container scope | Infrastructure | Proposed |
+| 3.22 | MongoDB backup/restore/lineage flow needs a real end-to-end checkup | Infrastructure | Partially Tested |
 | 4.1 | `num_ctx: 16384` for Ollama models | LLM Config | Implemented |
 | 4.2 | LiteLLM router timeout 600s | LLM Config | Implemented |
 | 4.3 | Disable `enable_pre_call_checks` in LiteLLM | LLM Config | Implemented |

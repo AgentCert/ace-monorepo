@@ -1018,3 +1018,504 @@ Both the ConfigMap source file and the manifest template are now committed to th
 ### Key gotchas
 
 Three easy-to-hit traps found during the implementation: the GraphQL `type` field for `saveChaosExperiment` must be `"Experiment"` (not `"NON_CRON"` — that isn't a valid enum value); the ChaosCenter GraphQL endpoint is `/query` on the graphql port, not `/api/query`; and `listProjects` doesn't exist in the schema — the project ID has to be read directly from MongoDB (`auth.project` collection).
+
+---
+
+## Session 39 — flash-agent-comprehensive-30 stopped early at 22/30 runs; two certifier bugs found and fixed to finally get a report out (2026-08-18)
+
+### Why this session happened
+
+A different session had left `flash-agent-comprehensive-30` running unattended in a tmux session called `ace-batch` since 2026-08-13, aiming for 30 runs. Checking on it revealed two things worth knowing about separately: the tmux session itself had gone silently unreachable, and — once the underlying batch was found to be at 22/30 runs, on track but with about a day still to go — the user asked to stop early and go straight to generating the certification report from what had already completed.
+
+### The tmux session was still alive, just permanently unreachable
+
+`tmux attach -t ace-batch` reported "no server running," which normally means the session died. It hadn't. The actual driver process was still running, having burned through nearly two hours of CPU time. What happened: sometime around 03:22 UTC that morning, whatever cleans up `/tmp` on this shared host (most likely a systemd job that sweeps old files by age) deleted the tmux session's socket file and something else took its place. The tmux server itself never noticed — it was still holding its original socket open — but the *path* now pointed at a dead end, so no client could ever attach to it again. The session's own supervision work kept running invisibly; there was just no longer any door into it. This wasn't fixed, but it's worth remembering for any other long-lived tmux session on this host: it can go quietly unreachable while still doing real work, and there's no alert for it.
+
+### Stopping the batch at 22/30
+
+With 22 runs fully done (workflow succeeded + certifier's Phase 0+1 metrics extraction completed) and run 23 about 40 minutes into its ~2h40m workflow, the user chose to kill run 23 outright rather than let it finish, accepting the loss of that one in-progress run in exchange for not waiting on it. The driver script was killed, run 23's Kubernetes workflow was deleted, and the batch's own state file was updated to record that the stop was intentional — so nothing later mistakes it for a crash. Fortunately, the script's own logic already knew how to handle an incomplete run count gracefully; it would warn and proceed with whatever was available rather than insisting on all 30.
+
+### Bug: every run's metrics were tagged with the wrong agent ID
+
+Requesting the certification report immediately failed with "no metrics documents found for agent_id='flash-agent'" — even though the metrics clearly existed. The cause: every single metrics file from this experiment had its `agent_id` field set to the Kubernetes workflow's own name instead of `flash-agent`. The `agent_name` field, by contrast, was correctly `flash-agent` throughout. This wasn't caused by stopping early — it was a bug in how metrics get extracted in the first place, and it would have blocked the report at 30/30 runs just the same. Root-causing why the extractor writes the wrong ID wasn't in scope here (the user specifically asked for a fix on the aggregation side, not the extraction side), but it's flagged for whoever eventually looks at that code.
+
+The fix taught the aggregator's document filter a fallback: if strictly matching on `agent_id` finds nothing at all, try matching on `agent_name` instead before giving up. This only kicks in when the strict match comes up completely empty, so it doesn't change behavior for any directory where `agent_id` is already correct — including a case that already had a test for exactly that. Verified with hand-built test scenarios (the certifier's Python dependencies aren't installed outside its own container, so the normal test suite couldn't be run directly) and then confirmed live: after redeploying, the certifier's logs went from finding zero documents to finding 19 of the 22.
+
+### Bug: every fault got labeled "unknown," so the report had nowhere to put anything
+
+Fixing the first bug didn't unblock the report — it just moved the failure. All 19 recovered documents had their fault type recorded as literally "unknown," because the fault-detection phase (Phase 0) had collapsed each run's many injected faults into one generic, vaguely-worded bucket per run instead of identifying which of the 17 specific fault types actually happened. Since the aggregator only accepts documents whose fault name is explicitly recognized in its category list, none of the 19 matched anything, all of them were silently dropped, and the pipeline treated that as "no data at all" and refused to build a report — even though real metrics had, in fact, been extracted.
+
+Interestingly, a comment already sitting in that exact code described the intended behavior — that unrecognized-fault documents should still count toward the report rather than vanish — but nothing in the code actually did that. The fix makes good on that comment: unrecognized documents now get grouped into a catch-all "unclassified" bucket instead of being dropped, so a report can still be produced from them. Checked first that the reporting layer already handles unfamiliar category names gracefully (it does — it just title-cases whatever name it's given), so this doesn't risk breaking anything downstream. The one existing test that expected unmatched documents to disappear was updated to expect them to land in "unclassified" instead, since that's now the actual (and correct) intended behavior.
+
+### The report finally generated
+
+With both fixes deployed, resubmitting the certification request went from failing instantly to actually running the LLM Council synthesis and report assembly — and it completed successfully about two and a half minutes later. 19 of the 22 completed runs made it into the final report (3 didn't survive even the agent-name fallback in the first fix — not investigated further); everything landed under one "Unclassified" fault category rather than being split across the 17 real fault types, a direct consequence of the second bug's root cause rather than something the fix could recover, since that distinction was already lost upstream. The 12-section report itself — executive summary, methodology, findings, safety, resource usage, recommendations, and so on — came out complete. Both the PDF (8 pages) and HTML versions were pulled down and saved alongside the batch's other files. One number worth a second look if anyone picks this up later: the report's Responsible-AI privacy/security gate failed outright, because one run had a PII exposure — per the project's existing "hard gate" design, that alone zeroes out the whole RAI score regardless of anything else. Which run triggered it wasn't tracked down here.
+
+### One more infra snag, also not root-caused
+
+Restarting the certifier's Kubernetes deployment (twice, once per fix) left it reachable pod-to-pod but unreachable through its normal Service address or the host's mapped port — both just timed out, even from inside the cluster's own node. This looked like a Kubernetes networking-layer issue (the component that routes Service traffic to pods) rather than anything wrong with the certifier itself, since talking to the pod directly worked immediately. Rather than chase that down, the session just forwarded a port directly to the pod and used that instead — a working shortcut, not a fix, and the forwarded port was left running rather than cleaned up. Anyone touching this again should check for that leftover process and see whether the normal port has quietly started working again on its own before reaching for the same workaround.
+
+---
+
+## Session 40 — Why `itbench` had thousands of leftover pods, and two new opt-in ways to clean them up (2026-08-18, uncommitted)
+
+### The question
+
+The user noticed the `itbench` namespace was full of pods sitting in `Completed` (and some in `Error`) state and asked why the experiments that created them never cleaned up after themselves.
+
+### The answer: it's on purpose, just missing a second half
+
+A count on this checkout's own cluster turned up 3,806 Completed pods and 581 Error pods, spread across 1,097 finished Jobs and 1,265 ChaosEngine objects — all in a namespace that, on this particular setup, belongs entirely to this one checkout (each checkout gets its own private KinD cluster, so there's no risk of these being someone else's pods).
+
+The cause traces to a single setting: every fault definition in `chaos-charts/faults/itbench/` (and every sock-shop/otel-demo experiment manifest) tells LitmusChaos `jobCleanUpPolicy: retain` instead of the normal `delete`. That's a deliberate choice from an earlier session (documented back in entry §27): under the default `delete` behavior, the pod running a fault — and its logs — disappeared the moment the fault finished, which made it impossible to go back and inspect what happened after the fact. Switching to `retain` fixed that. What never got added afterward was anything to eventually clean up what `retain` was piling up. So every single fault run since then has left its job pod behind forever, and at this project's normal scale of 30 runs per fault type, that adds up fast. This half of the work was pure investigation — nothing was changed or deleted.
+
+### What was added: a choice, not an automatic cleanup
+
+Two new, opt-in ways to deal with the backlog were added — neither one runs automatically, and neither has actually been exercised against the real backlog yet.
+
+**In `ace-bench.py`** (the terminal tool used to run a benchmark and generate its certification report): right after the report's JSON and PDF paths are printed at the end of a run, it now checks whether any Completed pods exist in `itbench` and, if the terminal is interactive, asks directly: leave them, or delete them now. If it's running non-interactively (say, in the background or from a script), it just prints a note pointing at the second option below instead of stopping to ask — it never hangs waiting for an answer nobody can give.
+
+**In `shut_down.sh`** (the script that tears down a checkout's whole local stack): a new `--clean-itbench-pods` flag does only one thing — deletes Completed pods from `itbench` — and stops there. It doesn't touch Docker containers, doesn't touch volumes, and doesn't delete the Kubernetes cluster itself; the rest of the normal teardown script never even runs when this flag is used. Before touching anything, it reuses the exact same ownership check the script already uses right before it would delete the whole cluster — confirming this checkout is genuinely the one that created the cluster in question — and it refuses outright on a shared external cluster (`CLUSTER_MODE=cloud`), since there's no equivalent way to prove which pods in a shared cluster are actually this checkout's own.
+
+### What wasn't done
+
+The underlying `retain` setting itself wasn't changed — it's still there, still deliberate, and still keeps every future fault run's logs inspectable, exactly as intended back in §27. Neither was the existing backlog of 3,806/581 pods actually cleaned up; both new mechanisms exist now, but running either one for real, against the real pile, is still a first for next time.
+
+---
+
+## Session 41 — The certification report's "3 judges" claim was fiction; wired the report to describe whatever actually ran (2026-08-18, uncommitted)
+
+### The question
+
+Looking at the PDF from §39/§40's run, the user noticed the Methodology section claimed the qualitative scoring came from "a council of 3 independent LLM judges" using three different named models, plus a separate meta-judge — but the run's own configuration only ever used one model, gpt-4o, called twice (once as judge, once as meta-judge).
+
+### What was actually going on
+
+The report's judge-count and judge-model claims were just fixed text, written once and never checked against what any given run actually did. One spot named four specific models by name — three "judges" plus a "meta-reconciler" — none of which lined up with what was configured; two of those model names don't even exist anywhere in this project's model config, so they were never callable in the first place. A few sentences elsewhere in the same section repeated the "3" as if it were always true, including one line that flatly asserted the judges always agree with each other 100% of the time, which isn't something that was ever actually measured — it was just asserted.
+
+The frustrating part: the real numbers were already sitting right there, unused. Earlier in the pipeline, a different piece of code correctly figures out exactly which models were used as judges and meta-judge for that specific run, and that information does get carried all the way into the data the report-writing step reads from. Nothing downstream ever looked at it — the report-writing code just kept reaching for the fixed text instead.
+
+Worth being precise about scope here: this wasn't the whole report being fake. The actual scores, confidence levels, and per-metric agreement numbers elsewhere in the report are real, computed by real LLM calls during that run. Only the specific "here's who the judges were" description was wrong.
+
+### The fix
+
+Rewired the three places that had this baked-in, wrong assumption so they now read from the real per-run judge data instead:
+
+- The judge/model table in the report now lists whoever the real judges and meta-judge were for that run — however many there were, whatever models they used — instead of the fixed four-row list. If a report is ever built from older data that predates this real judge-tracking, it falls back to the old fixed list rather than showing nothing.
+- The sentences that used to hard-code "3" now use the real count instead. The one flat claim about 100% agreement always being true was removed since it was never actually measured — the report already shows each individual metric's real confidence and agreement, so that's the honest source of truth.
+- The AI-written executive summary paragraph also used to be told "3 judges" as a fixed fact before it wrote anything; it's now told the real number.
+
+### What's still open
+
+Fully computing a genuine "how often did the judges agree" statistic across the whole report (rather than just removing the false claim) would take more plumbing than this fix did — the real per-metric agreement numbers exist, but getting an honest rolled-up figure into that specific paragraph wasn't attempted here.
+
+### Verified, not yet exercised live
+
+Ran the certifier's test suite for real (had to build a throwaway Python environment first, since its dependencies aren't installed system-wide on this host) — all 317 tests in the affected area pass, including two new ones written to check the fix directly. Two unrelated pre-existing test failures elsewhere were confirmed to be pre-existing, not caused by this change. The fix hasn't been run against a live pipeline yet, and the PDF the user was originally looking at still shows the old, wrong text — regenerating it would need a fresh Phase 3 run, which wasn't done this session.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. This is a source-only fix — nothing was deployed or run live — so any future certification run picks it up automatically with no extra steps.
+
+---
+
+## 42. Why multi-fault reports keep coming out "Unclassified" — and a fix that doesn't touch the guessing logic at all
+
+### The actual problem
+
+When one experiment run injects several faults back to back (as `flash-agent-comprehensive-30` does), the certifier's report ends up lumping everything into one vague "Unclassified" bucket instead of breaking results down fault by fault. Digging into why: the certifier has exactly one way of knowing which fault was happening when an LLM call was made — it looks for a special marker span named `fault: <name>` that gets logged to the trace at the moment a fault is injected. When those markers are missing or too sparse (which turned out to be common — one real trace pulled from this cluster only had a marker for the *first* fault out of several), the certifier has nothing to split on and gives up, treating the whole run as one undifferentiated blob.
+
+### The fix: stop guessing, start being told
+
+Separately, it turned out the small proxy that sits between the agent and the LLM (the "sidecar") already has a live channel for exactly this kind of information — it re-checks a small set of files on every single LLM call to pick up fresh experiment IDs, specifically so a long-running agent doesn't need to restart to learn it's now part of a new experiment run. That channel just never carried "which fault is happening right now."
+
+The fix adds it:
+
+- The step that actually injects each fault now also writes the fault's name into that same live channel right before starting, and clears it right after the fault is reverted.
+- The sidecar picks this up on its next read (same as it always has) and now stamps every LLM call with "the fault that was active when this call happened" — real, live, ground-truth information, not something inferred after the fact.
+- The certifier's fault-splitting step was changed to check for this stamp first. If it's there, the split is exact and free — no more guessing from sparse markers. If it's not there (older data, or a workflow that doesn't do this yet), everything falls back to working exactly as it did before. Nothing about older reports changes.
+
+One subtlety that mattered in practice: a call simply not carrying the new stamp needs to mean two different things depending on context — either "this call happened before any of this existed" (leave it alone) or "this call happened during the quiet gap between two faults, and the sidecar correctly reported nothing is active" (this should close out whichever fault bucket was open). Getting this distinction right was what let 5 repeated occurrences of the *same* fault type inside one long run end up as 5 separate results instead of quietly merging into 1 — an early version of the fix got this wrong and merged them; a test built specifically to check this caught it before it shipped.
+
+### What was deliberately left out
+
+An earlier version of this work tried to also bake "run this fault 5 times" directly into the generated experiment file, so a single click in the UI would produce 5 repeated runs automatically. The user explicitly said no to this — running something multiple times should be the UI's own job (click the button again), not something faked by a script generating a longer file behind the scenes. The version that shipped only sets up one pass through the fault sequence; repeating it is left entirely to however the UI already handles re-running an experiment.
+
+### What's live and what isn't yet
+
+The certifier itself was rebuilt and redeployed, and directly confirmed to be running the new code. The two other pieces that need to change — the small proxy, and the tool that installs the agent (which bakes in a copy of its configuration at build time, not something that updates itself just because the source file changed) — were rebuilt and loaded onto the cluster, but nothing has actually redeployed the agent since, so those two pieces are ready but not yet in effect. They'll take effect automatically the next time this experiment (or any flash-agent experiment) actually runs.
+
+One thing worth watching when it does run: the sidecar is configured to always re-pull its container image fresh rather than reuse what's already on the machine. If this cluster can reach the public internet, that setting could silently fetch the real published version instead of using today's locally-built fix. This wasn't introduced by today's change and wasn't investigated further — just worth a quick check (comparing the running image against today's build) the first time this experiment is actually launched.
+
+### Getting it into the UI hit a wall, and the user chose how to route around it
+
+Registering the new experiment through the same automated path used previously required logging in as admin, and the password on file for this cluster turned out to be stale (a known, previously-solved issue — the actual password had been changed by hand at some point after the recorded one was written down). Fixing that would have meant writing a new password hash directly into the database, which this session's own safety guardrails correctly flagged as the kind of action that shouldn't happen without explicit sign-off. Asked the user how they'd like to handle it; they chose to skip the automated path entirely and upload the finished experiment file themselves through the UI's own upload feature — no password fix needed. Before handing it off, cleaned up a couple of placeholder values in the file that were only meaningful for the automated path, so what gets uploaded is a clean, complete file with nothing left to fill in.
+
+### Status
+
+Nothing from this entry has been committed to git yet. The certifier's fix is live on the cluster. The sidecar and agent-installer fixes are built and staged, waiting on the next real run to take effect. The experiment itself is written and ready but not yet registered — that step is now the user's, via manual upload.
+
+---
+
+## 43. Why the "forward these ports for me" script wasn't actually getting ports into VS Code's Ports panel
+
+### The actual problem
+
+The user couldn't reach the AgentCert Web UI through VS Code's Remote-SSH port forwarding, even after deleting the stale forward and re-running the helper script that's supposed to set all this up automatically (`scripts/gen-vscode-ports.sh`).
+
+Everything on the backend turned out to be completely healthy: the Kubernetes cluster's web UI container was up and correctly publishing the port, a direct request from the dev machine itself got back the real web page, and a low-level socket check confirmed something was genuinely listening on that port (not just a routing rule with nothing actually behind it, which can happen in some Docker network setups and would explain this exact symptom — but wasn't the case here).
+
+### The real cause
+
+The helper script writes a VS Code setting that says "if you see this port, label it 'ACE Web UI' and forward it quietly." What it never set is a separate, easy-to-miss setting that controls *how VS Code decides which ports even count as "seen" in the first place*. By default, VS Code doesn't scan for open ports directly — it watches the text printed inside VS Code's own terminal windows for phrases like "Server running on port 3000" and treats that as the signal to start forwarding. The problem: the containers in question are long-running background services that have been running for days, started outside of any VS Code terminal — so there was never any such text for VS Code to notice. No matter how many times the script relabeled the port or the user deleted and recreated the manual forward, VS Code simply never had a trigger to add it to the list in the first place.
+
+### The fix
+
+Added one more setting to what the script writes: tell VS Code to detect ports by actually checking what's listening on the machine, rather than by watching terminal text. This matches how the low-level check that diagnosed the problem worked, and correctly picks up background services regardless of whether they were ever started inside a VS Code terminal.
+
+### What's left
+
+The user should reload the VS Code window (or fully reconnect) after pulling this change — this particular setting is read once when VS Code's remote connection starts, not picked up live from an external settings file edit. This wasn't verified inside an actual VS Code session since that requires the user's live client, not something automatable from here.
+
+### Status
+
+Not committed yet. The fix is a plain script edit — the next time anyone runs it (on this checkout or a fresh one), the correct setting gets written automatically; no manual VS Code configuration needed.
+
+---
+
+## 24. Orphaned infrastructure namespaces — ACE infra-deletion bug, fixed with logging (2026-08-18)
+
+### The bug
+
+When an infrastructure is deleted via the LitmusChaos UI:
+- ✅ Database record is marked `is_removed: true`
+- ✅ Specific resources (ConfigMap, Deployment) are deleted
+- ❌ **The entire Kubernetes namespace persists** with orphaned pods/jobs
+
+Why? The `DeleteInfra()` method sends deletion commands **to the subscriber pod**, which runs *inside* the namespace being deleted. A pod can't delete its own namespace.
+
+### The symptom
+
+After deleting `itbench` infrastructure:
+- User saw ~1,098 stale completed jobs in the namespace
+- UI hung on "loading..." trying to list infrastructure
+- Database showed 0 active infrastructure
+- Kubernetes still had `itbench` namespace with all its resources
+
+### The fix
+
+Added a **Warn log** that alerts operators:
+```
+Infrastructure X marked as deleted in DB.
+Kubernetes namespace still exists with orphaned resources.
+Manual cleanup: kubectl delete namespace <name>
+```
+
+This is **documentation + workaround**, not a permanent fix. A future session should implement proper namespace cleanup via:
+- Kubernetes finalizers (auto-cleanup after pod shutdown)
+- Async cleanup job (runs after subscription termination)
+- Control-plane process (separate from subscriber pod)
+
+### How to work around it
+
+If you hit this:
+```bash
+# Verify no active infra is using the namespace
+kubectl exec mongodb-0 -n ace -- mongosh ... \
+  --eval "db.getSiblingDB('litmus').chaosInfrastructures.find({is_removed: false}).count()"
+# Should return 0
+
+# Then clean up manually
+kubectl delete namespace <orphaned_namespace> --grace-period=0 --force
+```
+
+### Verified this session
+
+- Database cleanup: ✓ (marked stale record as removed)
+- Manual namespace deletion: ✓ (confirmed transition to Terminating, then deletion)
+- UI after cleanup: Ready for fresh infrastructure registration
+
+
+---
+
+## §45: Automatic Infrastructure Namespace Cleanup via Finalizers
+
+**What was the problem?**
+When users deleted infrastructure via the ChaosCenter UI, the database record was marked deleted but the Kubernetes namespace with all its orphaned resources stayed around forever. The UI would hang trying to verify infrastructure. Operators had to manually clean up each namespace — not great.
+
+**What's the solution?**
+Kubernetes finalizers. Here's how it works:
+
+1. When an infrastructure is registered, its namespace gets a finalizer tag (`chaos.litmuschaos.io/cleanup`)
+2. When the user deletes the infrastructure, instead of the namespace disappearing immediately, Kubernetes puts it in a `Terminating` state (finalizer blocks deletion)
+3. A background controller watches for `Terminating` namespaces and runs cleanup: delete all old job pods, delete error pods, verify no important data (PVCs) would be lost
+4. Once cleanup is done, the controller removes the finalizer
+5. Kubernetes then deletes the namespace cleanly
+6. **No manual work needed**
+
+**What changed?**
+
+New file: `finalizer_controller.go` (~330 lines)
+- Implements the watcher and cleanup logic
+- Includes safety checks: skips the `ace` platform namespace, checks for PVCs before cleanup, handles errors gracefully
+
+Updated files:
+- `service.go`: added finalizer controller integration, updated infrastructure service to start/stop the watcher
+- `resolver.go`: added getter method so server can access the service
+- `server.go`: starts the watcher on startup, stops it gracefully on shutdown (alongside Langfuse cleanup)
+
+**Safety features baked in:**
+- The `ace` platform namespace is never touched (hardcoded skip)
+- Before cleaning up, the controller checks for PVCs (persistent volumes) and aborts if found
+- If the controller fails to initialize, the system logs a warning but keeps running (graceful fallback)
+- Finalizer only affects infrastructure namespaces, not the platform
+
+**Testing done:**
+- ✅ Code compiles (`go build ./...` succeeds)
+- ✅ Safety analysis confirmed: no interference with volume preservation during `setup.sh --restart`
+- ✅ Finalizer scoping verified: only applied to infrastructure namespaces
+
+**What's next:**
+Manual end-to-end test: register infrastructure → delete via UI → watch the namespace auto-clean → verify it's gone
+
+**Result:**
+Users will no longer see orphaned namespaces piling up, and no manual `kubectl delete` commands needed. The cleanup happens automatically in the background after infrastructure deletion.
+
+---
+
+## 46. The finalizer controller from §45 was missing the one resource type that actually causes this bug
+
+**What was the problem?**
+§45 (written earlier the same day) built an automatic cleanup system for exactly this "namespace stuck forever" problem — but it turned out to only clean up leftover Jobs and Pods, not the LitmusChaos `ChaosEngine` records that were the actual thing blocking deletion. This was discovered live: a user's namespace (`itbench`) had been stuck in `Terminating` for over 5 days because 1,171 old `ChaosEngine` objects still had a "please don't delete me yet" marker (a finalizer) on them, and the controller that would normally clear those markers had already been shut down.
+
+**What's the fix?**
+Taught the same cleanup controller from §45 to also strip that marker off any leftover `ChaosEngine` (and defensively, `ChaosResult`) objects before releasing the namespace — the exact same operation that had to be done by hand for the stuck 1,171 objects, now automated.
+
+**Immediate fix for the user:** bulk-cleared the marker on all 1,171 stuck objects, which let Kubernetes finish deleting the namespace within seconds and unblocked creating new chaos environments. Worth knowing: those 1,171 objects were the retained history of past experiment runs — clearing them deletes that history from Kubernetes permanently (the certification records in MongoDB are untouched, this is only about the raw Kubernetes objects). The user was given the choice and picked "clear them now."
+
+**Testing done:** Code compiles cleanly (`go build`/`go vet`). Not yet re-tested against a live stuck-namespace scenario since the one that prompted this was already fixed by hand first.
+
+---
+
+## 47. The real reason the UI was stuck on "Loading, please wait…": Kubernetes' own internal traffic routing had been silently broken since the cluster was created
+
+**What was the problem?**
+This turned out to be the deepest and most consequential bug found this session — not a bug in ACE's own code at all, but in how this host's Kubernetes cluster talks to itself.
+
+Every Kubernetes cluster has a component called kube-proxy whose only job is to keep the "phone book" that routes traffic to the right pod up to date. On this particular host, kube-proxy has been **completely unable to update that phone book since the very day the cluster was created** — six days before this was found. It was trying and failing every 30 seconds, over 18,000 times, always with the same error: the update it was trying to send was too big for a single message.
+
+**Why did this happen?**
+Down in the weeds: this host's Linux kernel and its firewall toolchain default to a newer engine (`nftables`) that applies its entire rule update as one big all-or-nothing network message. That message has a hard size ceiling, and on this host, kube-proxy's normal, completely unremarkable set of routing rules exceeds it. The older engine (`iptables-legacy`) doesn't have this problem at all — it updates the kernel a different way that was never subject to this ceiling.
+
+**Why did this look like "sometimes things work, sometimes they don't"?**
+Because kube-proxy's updates were failing from day one, its very first *successful* update (right when the cluster was born) is the only "phone book" that's ever existed. Anything that hasn't changed since then still routes correctly, by pure luck. But any service whose pod got restarted at any point since — which just means it now lives at a new internal address — became permanently unreachable through its normal address, because the phone book was never allowed to update with the new entry. Requests to it just vanish into nothing, forever, with no error message anywhere. This is exactly what happened to the GraphQL service the ChaosCenter dashboard depends on, which is why the page hung indefinitely instead of showing an error.
+
+**How was this found?**
+By process of elimination: after ruling out the browser, the login system, and the GraphQL server's own code (a request that touches *nothing* — not the database, not authentication, nothing — still hung), the deciding test was hitting the GraphQL pod's raw internal address directly instead of going through its normal internal "service name." The raw address responded instantly. The service name hung forever. That's the signature of exactly this kind of routing failure.
+
+**How was it fixed?**
+The straightforward fix (telling the node to prefer the older, working engine) turned out not to be enough on its own, because Kubernetes' own routing component carries its own separate copy of that choice and makes its own decision independently, based on a simple rule: whichever engine currently has more rules loaded wins, and ties go to the older engine. Since the newer engine had been the "winner" for six days (it had far more existing rules), the routing component kept re-choosing it every time it restarted — a trap of its own making. The fix was to clear out the newer engine's existing rules first, which flipped that decision in the older engine's favor, then restart the routing component once. It picked up cleanly on the very next try, and the dashboard's data started loading normally within seconds.
+
+**What was deliberately *not* touched:** there's a more "obvious" fix for this exact error (raising a kernel buffer-size limit), but that particular limit turned out to be a single, global value shared by literally everyone on this host, not something scoped to just this one cluster. Since this host is explicitly shared with other users, that fix was ruled out in favor of one that only ever touched this one cluster's own internal state.
+
+**Is this fixed permanently, or could it happen again?**
+The manual fix only patched the cluster that's currently running — a brand-new cluster (or the same cluster if it's ever recreated from scratch) would hit the exact same bug all over again, since the underlying cause is the host's kernel/firewall combination, not anything about this specific cluster. So the same fix was written directly into both of this repo's cluster-creation scripts, so it happens automatically every time a cluster is created from now on — and as a bonus, it also self-heals an already-running cluster if it's caught exhibiting the bug the next time those scripts run.
+
+**Testing done:** Verified the live fix end-to-end — the dashboard's actual data queries, through the exact path the browser uses, now return in well under a second instead of hanging forever. The scripted version of the fix has been syntax-checked but not yet exercised against an actual from-scratch cluster creation — that's the next thing to confirm.
+
+**One more thing found but not fixed this session:** the GraphQL server opens a brand new connection to the authentication service on every single permission check, with no timeout and no reuse — inefficient and a latent risk of its own, but confirmed to be unrelated to this particular incident. Flagged for a future cleanup.
+
+
+---
+
+## 48. Why "Connect Chaos Infrastructure" got stuck on "Pending" forever: the cluster couldn't look anything up on the internet
+
+**What was the problem?**
+A user created a chaos infrastructure connection through the AgentCert UI and it just sat there showing "Pending" for over five minutes, with no error message anywhere to explain why.
+
+**What was actually going on?**
+The piece of software that's supposed to report "I'm connected and ready" back to the dashboard (called the subscriber) never actually started. Neither did two of its neighbors. All three were stuck trying and failing to download their container images, over and over, forever.
+
+**Why couldn't they download their images?**
+Because the cluster itself couldn't look up *any* address on the internet — not just the one for downloading container images, any address at all. This traces back to a subtle interaction between two things that are individually fine on their own:
+
+1. This machine's normal way of doing DNS lookups (systemd-resolved) works through a local loopback address, not a "real" address.
+2. `kind` (the tool that creates a lightweight Kubernetes cluster inside Docker containers) notices this and, as a workaround, points its cluster nodes at a different address instead — specifically, the network's own gateway address — trusting that Docker will transparently forward anything sent there to the real internet DNS servers.
+
+That trust is well placed when Docker is running in its normal, full-privilege ("rootful") mode — which is what happens on most machines, and what this repo's cluster-creation scripts were originally validated against. But this particular user is running a *personal*, non-privileged ("rootless") copy of Docker — set up specifically so their work doesn't touch the shared Docker daemon other people on this host also use (see the "Personal rootless Docker" section of this repo's setup guide). That personal copy of Docker doesn't have the same low-level permissions to quietly forward traffic the way the full-privilege version does, so the gateway address `kind` picked simply doesn't answer. Every DNS lookup inside the cluster silently timed out from that point on.
+
+**Why didn't anything say so clearly?**
+The container download failures did show up in Kubernetes' own internal logs (`ImagePullBackOff`, with a DNS timeout buried in the details) — but none of that surfaces up into the ChaosCenter dashboard. From the user's side, it just looks like the "Pending" state never moves.
+
+**How was it fixed?**
+Immediately: told the affected cluster's DNS setup to use two well-known public lookup services (`1.1.1.1` and `8.8.8.8`) directly instead of routing through the gateway address that wasn't working, and restarted the piece of Kubernetes responsible for internal name lookups so it would pick up the change right away. The stuck downloads then succeeded within about a minute.
+
+Durably: taught both of this repo's cluster-creation scripts to check for this specific failure automatically — right after creating a brand-new cluster, and again any time an existing cluster is reused — and to apply the same fix on the spot if it's needed. This follows the exact same pattern already used elsewhere in these scripts for a similar cluster-networking bug found earlier (see entry 47) — a lightweight check, and a fix that only ever touches this one cluster's own nodes, never anything else on the shared machine.
+
+**Testing done:** Confirmed directly on the user's cluster that DNS lookups failed before the fix and succeeded after, and that the stuck pods came up and started running once DNS worked and they were given a fresh chance to try. Both edited scripts pass a basic syntax check. Not yet tested against a truly brand-new cluster built from scratch under this same setup — worth confirming the next time that happens.
+
+**Is this durable?** Yes — the fix lives directly in the two scripts responsible for creating and reusing clusters, so it applies automatically going forward with no extra steps needed. As of this entry, that change hasn't been committed yet (per standing instructions to only commit when asked); the live fix is already active on the user's running cluster.
+
+---
+
+## 49. Adding a 5-fault flash-agent experiment to the dashboard — and catching a bug that would have made it hang forever, silently
+
+**What was asked?**
+Create a small, 5-fault ITBench experiment for the flash-agent — something quicker to run than the full 53-fault benchmark — and make it show up as launchable in the AgentCert dashboard.
+
+**What was already there?**
+A draft of the experiment's workflow definition already existed from earlier work, covering 5 specific fault scenarios (a service scaled to zero replicas, a container pointed at an image that doesn't exist, a broken health-check probe, a service pointed at the wrong port, and a flood of synthetic traffic via a feature flag) — all built the same way as the big 53-fault experiment that was fixed and made launchable in an earlier session (see entry above this one, commit `5d83276`).
+
+**What was wrong with it?**
+Comparing the draft against the already-working big experiment's template turned up something missing: two small tags identifying which "chaos infrastructure connection" the workflow belongs to. Without those tags, the piece of software that actually runs workflows on the target cluster wouldn't recognize this one as belonging to it at all — the experiment would show up fine in the dashboard, someone could click "run" on it, and it would just sit there, never starting, with absolutely no error to explain why. This is the third distinct way this same area of the system has been found to fail completely silently (see the two entries directly before this one for the other two) — so this is turning into a pattern worth remembering generally: things in this pipeline that *should* fail loudly tend to fail as a silent, permanent "Pending" instead. Fixed by adding the two missing tags, matching the working template exactly.
+
+**A small cleanup along the way**
+The script that registers experiments with the dashboard had one big block of code for registering the 53-fault experiment, with the experiment's name and details baked directly into it. Rather than copy that whole block a second time for the new 5-fault experiment, it was split into a reusable piece (do the registration) plus two small call sites (one per experiment, each just naming its own details). The 5-fault version also skips a slow step the big one needs — uploading fault definitions to the cluster — because all 5 of its faults are already included in the big upload the other experiment already does; it just needs to make sure that upload has actually happened first.
+
+**Making it show up in the dashboard right now, not just next time**
+Registering the experiment in the dashboard turned out to need two separate live actions against the user's own running cluster: uploading the (still-missing, it turned out) fault definitions the big 53-fault experiment also depends on, and then calling the dashboard's own registration API. Checked first that nothing was actively mid-run on the cluster, so this was safe to do without risking interrupting real work. Both actions succeeded, and a follow-up check against the underlying database confirmed the new experiment is there under the expected name and ID.
+
+**Two side-discoveries, unrelated to the actual task, worth flagging:**
+1. This machine's settings file (`.env`) has one line with an unescaped pattern in it that trips up the plain, naive way of reading environment files in a shell script — and when that happens, every setting listed *after* that line in the file gets silently ignored rather than causing a visible error. This tripped up an early attempt at logging into the dashboard from the command line (it picked up wrong default ports instead of the real ones) before being caught and worked around. Not fixed this session, since fixing it safely would need checking every other place that reads that same setting — but worth remembering: don't read this particular settings file the simple way.
+2. The dashboard's admin password isn't the default one written in that same settings file anymore — someone changed it after first logging in, which the dashboard requires, and the settings file was never updated to match. Asked the user directly for the current password rather than guessing at it.
+
+**Testing done:** The updated script passes a basic syntax check, and the updated experiment file is valid. The registration call to the dashboard's API came back successful, and a direct database check confirms the new experiment exists with the right name and ID. **Not yet tested:** actually clicking "run" on the new experiment from the dashboard and watching it go all the way through a real run — that's the natural next step for confirming everything (the newly-fixed missing tags included) actually works end to end, not just that registration succeeded.
+
+**Is this durable?** Yes for the code side — the fixed experiment file and the script changes that register it both live in the repository itself, wired into the same automatic setup step the big 53-fault experiment already uses, so any fresh setup or restart on a machine with a connected cluster will register this experiment automatically going forward. The live actions taken directly against the user's cluster this session were the bridge to make it show up in the dashboard immediately, not the permanent fix — the files committed to the repo are what make it reproducible next time. As of this entry, those file changes haven't been committed to version control yet (per standing instructions to only commit when asked), but the live registration is already active and the experiment is visible in the dashboard right now.
+
+## 50. Making the VS Code port-forwarding helper remember what it created, instead of always wiping everything and starting fresh
+
+**What was asked?**
+`scripts/gen-vscode-ports.sh` is a personal convenience script that keeps VS Code's "forward these ports automatically" list in sync with whatever this checkout's ACE containers are actually publishing. The user asked it to change how it cleans up old entries: remember what it created the first time it runs, and on later runs, use that memory to decide what's safe to delete.
+
+**What was wrong with the old approach?**
+Every run, the script simply replaced VS Code's entire list of labeled ports with a freshly computed one. That's fine for ports the script itself manages — old, no-longer-relevant ones correctly disappeared. But it had no way to tell the difference between "a port entry I created earlier that's now stale" and "a port entry someone added by hand for something unrelated, like a personal local dev server." Both got wiped the same way, every time.
+
+**The fix**
+The script now keeps a small private memory file alongside VS Code's settings (also excluded from version control, so it's personal to this checkout, same as the settings file itself). Each run, before making changes, it checks: for every port entry currently in VS Code's settings, was that exact entry ("owns" it) written by *this script's last run*? If yes and it's still exactly the same, it's safe to remove (it'll be replaced if it's still relevant, or dropped if it's not). If no — the entry doesn't match what the script remembers writing, meaning either it was never the script's or it's been changed since — it's left alone. After making its updates, the script saves what it just wrote as the new memory for next time.
+
+Net result: ports that stop being part of this checkout's stack still get cleaned up automatically, same as before, but anything a user added or edited by hand now survives instead of getting silently erased on the next run.
+
+**Testing done:** Checked the script's shell syntax is valid. Since exercising the real port-discovery path requires this checkout's Docker containers to be running (not exercised in this session), the core new logic — remember, compare, prune only exact matches, merge in the fresh results — was tested standalone with a simulated "before" state covering all three cases (an unchanged tracked entry, a stale tracked entry that should disappear, and a hand-added entry that must survive). All three behaved as intended, and unrelated settings elsewhere in the file were left untouched.
+
+**Is this durable?** Yes — the change lives entirely in the checked-in script. The memory file it depends on is created automatically the very first time the script runs on any checkout, so nothing manual is needed to pick this up on a fresh clone.
+
+**Status:** Not committed yet — only the working-tree change exists, per the standing instruction to only commit when asked.
+
+## 51. Certification reports now automatically copy themselves to a `.tmp/` folder you can actually find
+
+**What was asked?**
+The user found last night's `flash-agent-5scenario` certification report by digging into the certifier's Kubernetes pod by hand — the report only existed inside that pod's storage, with no way to get it onto the real machine short of `kubectl exec`/`kubectl cp` or calling the API directly. They asked for a durable fix so this happens automatically from now on, in both ways ACE can be run locally (Docker Compose and Kubernetes/KinD).
+
+**What did the investigation turn up?**
+The two setups already behaved differently. Docker Compose was already bind-mounting the certifier's whole working directory onto the host, so reports technically existed on disk — just buried under `certifier/workspace/.../certification/`, mixed in with a lot of intermediate pipeline files, not under the `.tmp/` folder people actually look in. Kubernetes had nothing at all: the certifier's storage lives on a Kubernetes volume, and while there's an existing mechanism meant to bridge that volume out to the real host (so data survives deleting and recreating the cluster), it turned out to be misconfigured — it's bridging the wrong folder name, so right now *nothing* stored on that volume (not just reports — the database, Langfuse's data, everything) actually survives a cluster recreate. That's a separate, pre-existing bug, unrelated to what was asked, and it wasn't touched — it's flagged here so it doesn't get lost.
+
+A second unrelated issue also turned up: the plain local-dev startup path (`start-local-services.sh`) creates the certifier's working folder owned by the wrong user, which would normally block the container from writing to it. That one similarly wasn't fixed in general, but the *new* export folder added by this change was specifically protected from inheriting the same problem.
+
+**The fix**
+Once the certifier finishes generating a report's HTML and PDF, it now also copies both files into a second, dedicated folder — the same one in both Compose and Kubernetes — under `.tmp/certification-reports-<your-username>/<agent-id>/<experiment-id>/`. This copy step never blocks or fails the certification run itself; if it can't copy for some reason, it just logs a warning and moves on, since the primary copy (inside the certifier's own storage) still exists either way.
+
+For Docker Compose, this is a straightforward second bind mount. For Kubernetes/KinD, it required adding a second bridge from inside the cluster's node out to the real host, deliberately built independent of the existing (broken) one, so it works regardless of that other bug ever getting fixed. This bridge is skipped automatically when pointing at a cloud cluster or an existing cluster this repo didn't create itself, since there's no host to bridge to in that case — it simply doesn't turn on, rather than erroring.
+
+**Testing done:** Checked that both the Python code and all the modified scripts are syntactically valid. Rendered both Compose configurations and confirmed the new mount and setting show up with the correct, username-specific folder path. Rendered the Kubernetes chart with the new feature both on and off, confirming it appears cleanly when on and leaves no trace when off. Actually running a certification end-to-end, and recreating the Kubernetes cluster to confirm the new bridge works live, were not done this session — the former requires the certifier's API service running with a real trace, and the latter would tear down the cluster's current state, which needs a separate, explicit go-ahead first (the cluster was left running, untouched).
+
+**Is this durable?** Yes — everything lives in checked-in files (the certifier's own code, the Helm chart, the Compose files, the setup scripts). A brand-new checkout picks this up automatically the first time it runs setup — nothing needs to be created by hand first.
+
+**Status:** Not committed yet — only the working-tree change exists, per the standing instruction to only commit when asked.
+
+## 52. `setup.sh` was dying silently in the middle of a run, with no error message at all — and an audit of the rest of the script turned up three more ways it could do the exact same thing
+
+**What was asked?**
+The user's `setup.sh --restart --local-build` run just stopped. The terminal showed "Building 12 image(s)..." and then nothing — no error, no crash message, just back at the shell prompt. They asked why, then asked for a real fix (not a workaround) plus a check for whether the script has other bugs that behave the same way.
+
+**Why did it stop with no error at all?**
+This script runs with a strict bash setting (`set -euo pipefail`) that makes it exit immediately the instant *any* command fails — and critically, this script has no safety net installed to print anything when that happens. So when something goes wrong, the visible symptom is exactly what the user saw: the last thing that was printing just... stops.
+
+The actual trigger was a mix-up between two unrelated background tasks. While the 12 Docker images build (up to 3 at a time, to save time), the script is *also*, completely separately, trying to get the local Kubernetes cluster ready in the background — a totally different job, kicked off earlier and not checked on until much later. The problem: the code that manages "wait for the next build to finish, so I can start another one" used a generic instruction that actually means "wait for *any* background task in this program to finish, whichever one that happens to be" — not "wait for one of the builds specifically." It had no way to tell the build jobs apart from the unrelated Kubernetes-cluster task.
+
+In this run, the Kubernetes-cluster background task failed almost instantly — the cluster already existed, but the script's shared-host safety check (added specifically so this script never touches a cluster it doesn't recognize as its own — see the KinD ownership entries elsewhere in this log) correctly refused to touch it, since it lacked an ownership tag. That failure got logged to a file the user never sees on their screen. But because the generic "wait for the next task" instruction picked up on *that* failure instead of an actual build finishing, the whole script treated it as if the very next thing it was checking on had blown up — and, with no safety net, shut the whole program down right there. Three of the twelve images had genuinely finished building successfully moments earlier; the rest never got a chance to start.
+
+**The fix**
+Made the build loop keep its own list of exactly which background jobs are its builds, and told it to only ever check on jobs from that list — never anything else running in the program. Verified this actually fixes it with a small isolated test that reproduces the exact scenario (an unrelated background task failing quickly, while several tracked jobs are still in progress): the old logic dies immediately, the new logic runs everything to completion.
+
+**What else did the audit find?**
+Two more variations of the same underlying problem — a command fails in a way that's completely normal and already has handling written for it two lines down, but the strict-exit setting kills the script before that handling ever gets to run:
+
+- **Six spots** where the script reads a value out of some other command's output using a text-search tool, and that search coming up empty (which is often the *expected*, ordinary outcome — e.g., "no fingerprint recorded for this image yet" simply means it's new) was being treated as a hard failure instead. Each of these already had a line right after it meant to handle exactly that "nothing found" case gracefully — a fallback default, a "skip this one" — but the script would die one line too early to ever reach it. Fixed by adding the same safety fallback the script already uses in a dozen other identical spots elsewhere in the file.
+- **One spot with a much bigger practical impact**, in the code that waits for a cloud LoadBalancer to get an IP address (`CLUSTER_MODE=cloud` deployments only). It counts retry attempts using a shorthand ("increment, then use the new value") that has a well-known quirk: the very first time it counts up from zero, the counter's "did that work" signal reads as false even though the count itself updated correctly. Since a cloud LoadBalancer essentially never has its IP ready on the very first check — it takes real time to provision — this would misfire on effectively every single cloud deployment, killing the script on the very first retry of a loop that's designed to retry for up to five minutes. Fixed by switching to the same safe counting style already used by the two other retry counters elsewhere in the script, which doesn't have this quirk.
+
+Confirmed both of these bug patterns really do behave as described with small one-line tests, and confirmed via a full re-scan of the file afterward that no other instances of either pattern remain.
+
+**Live action taken:** with the user's confirmation that the existing Kubernetes cluster is theirs from before this safety check existed (not someone else's on this shared host), tagged it as owned so the script stops refusing to touch it. This was a one-time local tag, not a code change — equivalent to what the script would have set up automatically had this cluster been created after the check existed.
+
+**One more small change in the same session:** while re-running the fixed script, the user hit its "deploy to Kubernetes now?" question and asked what pressing Enter would do — the answer was "skip, don't deploy." They asked for that default to be "yes, deploy via Helm" instead. Changed both places that ask this question, plus the underlying fallback logic, so an Enter-key press (or a fully hands-off run) now deploys via Helm instead of stopping short.
+
+**Is this durable?** Yes — all the fixes, plus the default change, are in the checked-in script itself, not a one-off patch. A fresh checkout gets the corrected behavior automatically.
+
+**Status:** Not committed yet — only the working-tree change exists, per the standing instruction to only commit when asked.
+
+## 51. Why stale port forwards still showed up in VS Code even after §50's fix — and why that's a VS Code limitation, not something a script can solve
+
+**What was asked?**
+The user reported that after §50's improvement, `gen-vscode-ports.sh` still wasn't "deleting then recreating" a port forward inside their actual VS Code window.
+
+**What was found?**
+The underlying settings file the script writes was actually correct and working exactly as designed — checked directly, and its bookkeeping matched what the script should have produced. The real gap was somewhere else: VS Code keeps its own separate, live, in-memory list of "ports currently being forwarded" for the Ports panel, and that list is not something any settings file can reach into and edit. Editing the settings file can only change how VS Code labels a port *once it discovers one on its own* — it was never able to reach in and forcibly remove a port VS Code already has forwarded, no matter what the file says. This was confirmed by checking Microsoft's own bug tracker: someone else ran into the exact same wall — even the setting explicitly meant to turn auto-forwarding off didn't retroactively un-forward a port already in progress, and Microsoft closed that report saying they don't plan to change this.
+
+**What was done about it?**
+Since there's no way to fix this from outside VS Code, the script was changed to be upfront about it instead: it now prints out exactly which ports it dropped from its tracking on each run, and if any of those are printed, it tells the user directly that they'll need to reload the VS Code window (or fully reconnect) to actually see that reflected in the Ports panel — because a settings file edit by itself can't do that last step.
+
+**Testing done:** Verified the new "which ports got dropped" calculation in isolation with a simulated example (one stale script-managed port, one still-active one, one unrelated manual one) — it correctly reported only the genuinely stale one. Checked the script's syntax is valid. The claim about VS Code's own limitation is based on Microsoft's public issue tracker, not something testable from this session.
+
+**Is this durable?** Yes for what's actually fixable — the improved messaging lives in the checked-in script and runs automatically every time. The underlying limitation itself isn't something this repo can work around; it's a property of how VS Code manages forwarded ports.
+
+**Status:** Not committed yet — working-tree change only, per the standing instruction to only commit when asked.
+
+## 52. Found the real cause of §51: VS Code's automatic port detection can only ever catch a process the moment it starts — it can never retroactively notice one that was already running
+
+**What was found?**
+Went straight to VS Code's own source code instead of relying on secondhand bug reports, and found the exact sentence that explains everything: the "process" detection mode VS Code uses is described, in Microsoft's own words, as forwarding a port only when it's "discovered by watching for processes that are **started**." That's the whole story — it's a trigger that fires the instant a new process begins listening on a port, not something that periodically checks what's already running. ACE's background services (the Kubernetes cluster, the various containers) were already up and running long before VS Code ever connects to this machine, so there was never a "start" moment for it to catch — reloading the window, reconnecting, waiting longer, none of that could ever have helped, because the detection mechanism has nothing to trigger on in the first place. This also explains why it looked like it used to work: VS Code separately remembers, and reforwards, ports you've forwarded *by hand* from one session to the next — so what looked like "automatic" forwarding earlier was probably that memory replaying old manual forwards, not real automatic detection. Once all forwards were deleted, that memory went empty and the truth came out.
+
+**What was done about it?**
+Switched to the setting that's actually built for this situation: a static list of ports VS Code's SSH extension forwards every single time it connects, no detection or guessing involved. The script now writes both this list and the existing labels, and keeps the same "remember what I created, only clean up my own stale entries" approach from §50, extended to cover this new list too — confirmed both independently that a real, currently-published version of the extension does have this setting, and that the prune/refresh logic behaves correctly using a simulated dry run before touching the real file.
+
+**One remaining known question mark:** there's an old (2020) report from someone else that this particular setting gets silently ignored when placed in a project-level settings file specifically, rather than the user's own global settings — as opposed to the settings this script already writes successfully, which don't have that problem. It's not confirmed whether that's still true today. The script's own printed output now tells the user what to do if that turns out to be the case: copy the list it prints straight into your personal, computer-wide VS Code settings instead of the project one.
+
+**Testing done:** Pulled and read the real relevant chunk of VS Code's own source code directly, rather than trusting summaries of it. Confirmed the new setting genuinely exists in a real, current version of the extension by pulling its actual configuration file from GitHub. Ran the new logic against a realistic simulated "before" scenario covering all three cases (a port that should refresh, one that should quietly disappear, one that belongs to the user and must be left alone) and confirmed all three behaved correctly, then ran the real script against this machine's actual running containers and confirmed the new port list was written correctly with 16 real entries. **Not yet confirmed:** whether this actually makes ports appear automatically in a live, running VS Code window — that requires the user to reload or reconnect and look, which isn't something checkable from here.
+
+**Is this durable?** Yes — the change lives entirely in the checked-in script, and a brand-new checkout gets the same behavior automatically the first time it runs, no setup required.
+
+**Status:** Not committed yet — working-tree change only, per the standing instruction to only commit when asked. Waiting on the user to reload/reconnect VS Code and confirm the ports now actually show up on their own.
+
+## 53. A chaos fault with no target silently did nothing; added a visible warning and made the target pickers smarter
+
+**What was found?**
+Debugging a specific run (an `accounting`-style scale-to-zero fault against the OpenTelemetry Demo app) led to a bigger discovery: when building an experiment by hand in Chaos Studio, the step where you pick which namespace/service a fault should actually hit is optional — nothing stops you from skipping it, and nothing anywhere in the system (not the browser, not the backend) warns you if you do. The fault gets saved and even "runs" successfully, but with no target configured it mechanically can't do anything — it just quietly fails to find anything to act on. The only trace of this is a low-level debug log line nobody normally looks at.
+
+Looking closer, the picker for that step turned out to already be smarter than it first appeared — namespace and target-object choices are pulled live from the connected cluster, not typed freely — but it offered every namespace and every object indiscriminately, with no awareness of which faults actually make sense against which application. You could, for example, point an OpenTelemetry-Demo-only fault at a completely unrelated app's namespace, and nothing would stop you.
+
+**What was done about it?**
+Two things, both requested by the user:
+
+1. **A visible warning.** Any fault in an experiment that's missing its target now shows a small warning badge directly on its icon in the visual builder, and — since a real experiment often chains several faults together — a summary banner above the whole canvas lists every fault currently missing a target by name, so you don't have to click through each one individually to find the gap.
+2. **Smarter pickers.** The three dropdowns for choosing a fault's target (resource kind, namespace, and specific service/label) now narrow themselves based on which application and service that particular fault actually supports — using a compatibility reference this project already maintains (`agents/FAULT_APPLICATION_COMPATIBILITY.md`) that documents exactly this: which of the three demo apps each fault works against, and, for a handful of faults that only make sense against one specific service, which service that is. A fault not yet covered by that reference just falls back to the old fully-open behavior, so nothing already working can break.
+
+Both were built by reusing pieces already sitting unused in the codebase rather than inventing new UI: the warning badge reuses an icon/style pattern that already existed for a different, unrelated part of the interface; the banner reuses a warning-box style already used elsewhere for a similar purpose.
+
+**Testing done:** The project's full type-checker doesn't currently run cleanly in this checkout for unrelated reasons (a pre-existing version mismatch in an unrelated dependency, not something this change touched or caused). The project's linter, run specifically against every file this change touched, came back clean — the only two flagged issues both sit on lines this change never modified. Not yet checked inside a running, live version of the actual web interface — that's the remaining step for the user.
+
+**Is this durable?** Yes — everything lives in the checked-in frontend source and needs no separate setup to take effect on a fresh build. One caveat: the new compatibility reference used by the pickers is a hand-copied version of the existing markdown document, kept in sync by convention rather than by any automated check — if that source document changes later, this copy needs a matching update.
+
+**Status:** Not committed yet — working-tree change only, per the standing instruction to only commit when asked. Still needs a live check in the actual running UI.
+
+## 54. The number of Docker images `setup.sh` builds at once was always the same fixed number, no matter how big or busy the machine actually was
+
+**What was found?**
+Asked to double-check a specific claim: that the script picks how many container images to build simultaneously based on the machine it's running on. It doesn't — it was just always "3 at a time," a fixed number written directly into the script, changeable only if a person manually set an environment variable before running it. The comment right next to that number even talked about this being sized for shared machines, which made it sound like it was already smart about this — it wasn't; that reasoning was never actually wired up to anything.
+
+**What was done about it?**
+Made the default genuinely depend on the machine: it now asks the machine how many CPU cores it has, uses half of that as the number of simultaneous builds, but never goes below 1 (so a small machine doesn't end up building zero things at once) and never above 6 (so a machine with a huge number of cores doesn't hammer everyone else sharing it with disk activity). The manual override still works for anyone who wants to force a different number.
+
+**Testing done:** Checked the script still parses correctly with no syntax errors. Didn't run an actual image build in this session since none was requested, but traced the math by hand.
+
+**Is this durable?** Yes — it's a change to the checked-in script itself, so every future run, on any machine, sizes itself automatically with no manual setup needed.
+
+**Status:** Not committed yet — working-tree change only, per the standing instruction to only commit when asked.

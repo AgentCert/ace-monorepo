@@ -37,7 +37,8 @@
 #   KIND_HOSTPORT_CERTIFIER, KIND_HOSTPORT_LITELLM, KIND_HOSTPORT_LANGFUSE,
 #   KIND_HOSTPORT_MONGO, KIND_HOSTPORT_MINIO, KIND_HOSTPORT_OTEL_PROM_MCP,
 #   KIND_HOSTPORT_OTEL_K8S_MCP, KIND_HOSTPORT_PROMETHEUS,
-#   KIND_HOSTPORT_GRAFANA, KIND_HOSTPORT_DEX
+#   KIND_HOSTPORT_GRAFANA, KIND_HOSTPORT_DEX, KIND_HOST_DATA_DIR,
+#   KIND_CERT_EXPORT_DIR, ACE_INSTANCE_NAME
 # =============================================================================
 set -euo pipefail
 
@@ -57,7 +58,25 @@ fi
 
 mkdir -p "$(dirname "${OUT}")"
 
+# Host directory that backs local-path-provisioner's PV storage inside the
+# node (see the template's extraMounts comment) -- instance-scoped so two
+# checkouts on this shared host never share PV data. Must exist before
+# `kind create cluster` runs: kind does not create extraMounts.hostPath
+# directories itself.
+KIND_HOST_DATA_DIR="${KIND_HOST_DATA_DIR:-${REPO_ROOT}/.tmp/kind-data-${ACE_INSTANCE_NAME:-unconfigured}}"
+mkdir -p "${KIND_HOST_DATA_DIR}"
+
+# Host directory bridged out for finished-certification-report export (see the
+# template's second extraMounts entry) -- instance-scoped for the same reason
+# as KIND_HOST_DATA_DIR above. Separate directory, separate purpose: this one
+# is not PV-backed and is unaffected by whatever state local-path-provisioner's
+# own bridge is in.
+KIND_CERT_EXPORT_DIR="${KIND_CERT_EXPORT_DIR:-${REPO_ROOT}/.tmp/certification-reports-${ACE_INSTANCE_NAME:-unconfigured}}"
+mkdir -p "${KIND_CERT_EXPORT_DIR}"
+
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agentcert}" \
+KIND_HOST_DATA_DIR="${KIND_HOST_DATA_DIR}" \
+KIND_CERT_EXPORT_DIR="${KIND_CERT_EXPORT_DIR}" \
 KIND_HOSTPORT_INGRESS="${KIND_HOSTPORT_INGRESS:-8088}" \
 KIND_HOSTPORT_WEB="${KIND_HOSTPORT_WEB:-2001}" \
 KIND_HOSTPORT_AUTH_REST="${KIND_HOSTPORT_AUTH_REST:-3005}" \
@@ -104,6 +123,9 @@ PORT_VARS = {
 
 text = re.sub(r'^name: .*$', f'name: {os.environ["KIND_CLUSTER_NAME"]}',
               text, count=1, flags=re.MULTILINE)
+
+text = text.replace("/__KIND_HOST_DATA_DIR__", os.environ["KIND_HOST_DATA_DIR"])
+text = text.replace("/__KIND_CERT_EXPORT_DIR__", os.environ["KIND_CERT_EXPORT_DIR"])
 
 def replace_hostport(match):
     var = PORT_VARS.get(int(match.group("cport")))

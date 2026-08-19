@@ -59,6 +59,14 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /ws
+        {{- if .Values.certHostExport.enabled }}
+        - name: cert-export-init
+          image: {{ .Values.images.busybox }}
+          command: [sh, -c, "mkdir -p /export && chown -R 1000:1000 /export && chmod 755 /export"]
+          volumeMounts:
+            - name: cert-export
+              mountPath: /export
+        {{- end }}
       containers:
         - name: certifier
           image: {{ .Values.images.certifier }}
@@ -99,9 +107,17 @@ spec:
               value: "/app/workspace"
             - name: CERT_WORKSPACE_DIR
               value: "/app/workspace/cert"
+            {{- if .Values.certHostExport.enabled }}
+            - name: CERT_HOST_EXPORT_DIR
+              value: "/app/cert-export"
+            {{- end }}
           volumeMounts:
             - name: workspace
               mountPath: /app/workspace
+            {{- if .Values.certHostExport.enabled }}
+            - name: cert-export
+              mountPath: /app/cert-export
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /docs
@@ -113,6 +129,12 @@ spec:
         - name: workspace
           persistentVolumeClaim:
             claimName: certifier-workspace
+        {{- if .Values.certHostExport.enabled }}
+        - name: cert-export
+          hostPath:
+            path: {{ .Values.certHostExport.nodeHostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

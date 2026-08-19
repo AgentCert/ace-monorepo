@@ -20,6 +20,17 @@
 # submodule's own compose file already parameterizes it as
 # `${API_PORT:-8000}:${API_PORT:-8000}`.
 # =============================================================================
+# CERT_REPORTS_HOST_DIR: absolute path, exported by start_certifier() in
+# scripts/start-local-services.sh (which also mkdir -p/chmod's it before `up`
+# — see that function for why). The relative fallback below only applies to a
+# standalone `docker compose -f ... -f ...` invocation outside that script;
+# it resolves against the project directory, which is `certifier/` here (cwd
+# is `cd`'d there before compose runs), so `../.tmp/...` lands at
+# <repo-root>/.tmp/..., matching root docker-compose.yml's convention.
 services:
   app:
     container_name: ${CERTIFIER_CONTAINER_NAME:-certifier_app}
+    environment:
+      CERT_HOST_EXPORT_DIR: /app/cert-export
+    volumes:
+      - ${CERT_REPORTS_HOST_DIR:-../.tmp/certification-reports-${ACE_INSTANCE_NAME:-unconfigured}}:/app/cert-export

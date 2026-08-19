@@ -5,10 +5,20 @@
 # A separate Job (mongodb-rs-init) runs after the StatefulSet is ready and
 # calls rs.initiate() — safe to re-run because it checks rs.status() first.
 #
-# Connection string for other services:
-#   mongodb://<user>:<pass>@mongodb:27017/<db>?authSource=admin&directConnection=true
-# directConnection=true bypasses replica-set topology discovery (which
-# advertises localhost:27017) so the service-name mongodb resolves correctly.
+# The replica-set member host MUST be the pod's stable per-pod DNS name via
+# the headless service (mongodb-0.mongodb-headless.ace.svc.cluster.local),
+# never the "mongodb" ClusterIP service name. A ClusterIP is a virtual
+# address rewritten by kube-proxy iptables/ipvs NAT — it is never bound to
+# an interface inside the mongod pod's own network namespace, so mongod's
+# isSelf() check can never match it. That leaves the node believing it is
+# not a member of its own replica set forever: rs.status() fails with
+# "we are not a member of it" and no primary is ever elected, even though
+# the pod itself stays Running/Ready. (Seen in production on this cluster —
+# see OPEN_WEIGHT_CERTIFICATION_HANDOFF.md for the incident writeup.)
+#
+# Connection string for other services (topology discovery works correctly
+# once the member host above is a real, resolvable, connectable address):
+#   mongodb://<user>:<pass>@mongodb:27017/<db>?replicaSet=rs0&authSource=admin
 # =============================================================================
 
 # ── Headless service (required by StatefulSet) ──────────────────────────────
@@ -165,7 +175,7 @@ spec:
                       print("rs0 already initialized");
                     }
                   } catch (e) {
-                    rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb:27017"}]});
+                    rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb-0.mongodb-headless.ace.svc.cluster.local:27017"}]});
                     print("rs0 initiated");
                   }
                 '

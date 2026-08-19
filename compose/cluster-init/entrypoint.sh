@@ -109,13 +109,135 @@ assert_kind_cluster_ownership() {
 mark_kind_cluster_owned()   { docker volume create --label "ace.kind.owner=${HOST_REPO_ROOT}" "$(kind_owner_marker "$1")" >/dev/null; }
 unmark_kind_cluster_owned() { docker volume rm "$(kind_owner_marker "$1")" >/dev/null 2>&1 || true; }
 
+# kind node images default the `iptables` alternative to the nft backend. On
+# this host's kernel/iptables toolchain, nft's netlink-based rule loading has
+# a hard per-message size ceiling that kube-proxy's normal Service ruleset
+# exceeds -- every periodic resync then fails with
+# "sendmsg() failed: Message too long" (kube-proxy retries every 30s, forever,
+# and never once succeeds again after the first sync that happened to fit).
+# The practical effect: Service routing silently freezes at whatever ruleset
+# loaded at the very first successful sync. Any Service whose backing pod
+# later restarts (gets a new IP) is blackholed from that point on -- new
+# connections to its ClusterIP get NATed to a now-dead pod IP and silently
+# dropped -- while every other Service keeps "working" purely by accident
+# (their stale rules still happen to be correct). This is exactly what broke
+# the ChaosCenter UI's GraphQL calls after a graphql pod restart; see
+# OPEN_WEIGHT_CERTIFICATION_HANDOFF.md for the live incident this was found in.
+#
+# iptables-legacy sidesteps the bug entirely -- it programs the kernel via a
+# setsockopt() ruleset replace, not one giant batched netlink message, so
+# there's no comparable size ceiling to hit.
+#
+# kube-proxy bundles its own copy of the iptables tools (it does not use the
+# node's /usr/sbin), so flipping the node's own `update-alternatives` default
+# has no effect on it. kube-proxy instead auto-detects nft vs legacy at its
+# own startup by counting which backend currently has MORE rules already
+# loaded in the kernel (ties favor legacy) -- so the only way to make it
+# actually choose legacy is to zero out nft's rule count *before* kube-proxy
+# starts (fresh cluster) or before it next restarts (existing cluster), so
+# legacy's smaller-or-equal count wins that tie-break. Everything here is
+# scoped to nftables tables inside this one kind node container's own network
+# namespace -- it never touches the shared host's kernel state or any other
+# checkout's containers.
+steer_kube_proxy_onto_iptables_legacy() {
+    local node
+    for node in $(docker ps --format '{{.Names}}' | grep -E "^${KIND_CLUSTER_NAME}-(control-plane|worker)" || true); do
+        docker exec "${node}" sh -c '
+            update-alternatives --set iptables /usr/sbin/iptables-legacy >/dev/null 2>&1 || true
+            update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy >/dev/null 2>&1 || true
+            for t in "ip nat" "ip mangle" "ip filter" "ip6 nat" "ip6 mangle" "ip6 filter"; do
+                nft delete table ${t} >/dev/null 2>&1 || true
+            done
+        ' 2>/dev/null || warn "Could not steer ${node} onto iptables-legacy -- kube-proxy may hit the nft message-size bug (see innovation.md)."
+    done
+    # kube-proxy only auto-detects once, at its own startup -- bounce it now
+    # so it re-evaluates against the rule counts set up above.
+    if kubectl -n kube-system get daemonset kube-proxy >/dev/null 2>&1; then
+        kubectl -n kube-system delete pod -l k8s-app=kube-proxy >/dev/null 2>&1 || true
+        kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-proxy --timeout=60s >/dev/null 2>&1 \
+            || warn "kube-proxy did not report Ready within 60s after the iptables-backend fix -- check manually (kubectl -n kube-system logs -l k8s-app=kube-proxy)."
+    fi
+}
+
+# Cheap, read-only check so the "reuse an existing cluster" path only pays
+# for the (mildly disruptive -- it bounces kube-proxy) fix above when the
+# cluster is actually hitting the bug, e.g. one created before this fix
+# existed. Fresh clusters always get the fix unconditionally (see ensure_kind
+# below) since they always start out on the broken nft default.
+kube_proxy_iptables_broken() {
+    kubectl -n kube-system logs -l k8s-app=kube-proxy --tail=20 2>/dev/null | grep -q "Message too long"
+}
+
+# kind's node entrypoint rewrites each node's /etc/resolv.conf to point at
+# the node's own docker-network gateway IP (e.g. 172.18.0.1:53) whenever it
+# detects the host's own resolv.conf uses a loopback resolver -- true on this
+# fleet, since it uses systemd-resolved's 127.0.0.53 stub. Under the ROOTFUL
+# daemon that gateway IP is transparently proxied through to the host's real
+# resolver (iptables DNAT the rootful daemon sets up) and everything just
+# works. Under a PERSONAL ROOTLESS daemon (see CLAUDE.md §6 "Personal
+# rootless Docker") RootlessKit/slirp4netns does not replicate that DNAT, so
+# the gateway IP is simply unreachable on :53 and EVERY external DNS lookup
+# inside every node times out -- this includes containerd's own image pulls
+# (it reads the node container's /etc/resolv.conf directly) and CoreDNS's
+# upstream forwarding (its default Corefile is `forward . /etc/resolv.conf`,
+# inherited from the node via dnsPolicy: Default). The practical symptom:
+# any chaos-infrastructure connect (subscriber/chaos-exporter/chaos-operator)
+# -- or any other in-cluster image pull -- sits in ImagePullBackOff forever,
+# and the ChaosCenter UI shows the infra stuck "Pending" indefinitely with no
+# error surfaced anywhere in the UI itself. Fix: detect the broken gateway
+# resolver per-node and fall back to public resolvers, which rootless
+# networking (slirp4netns) CAN reach directly as ordinary outbound traffic.
+node_dns_broken() {
+    local node="$1"
+    ! docker exec "${node}" timeout 3 getent hosts registry-1.docker.io >/dev/null 2>&1
+}
+
+fix_node_dns() {
+    local node="$1"
+    if docker exec "${node}" sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'; then
+        ok "Rewrote ${node}'s /etc/resolv.conf to public resolvers (gateway-IP resolver unreachable under rootless Docker)."
+    else
+        warn "Could not patch ${node}'s /etc/resolv.conf -- image pulls and in-cluster DNS may keep failing."
+    fi
+}
+
+ensure_node_dns() {
+    local node any_fixed=0
+    for node in $(docker ps --format '{{.Names}}' | grep -E "^${KIND_CLUSTER_NAME}-(control-plane|worker)" || true); do
+        if node_dns_broken "${node}"; then
+            warn "${node} cannot resolve external DNS (gateway-IP resolver unreachable) -- patching ..."
+            fix_node_dns "${node}"
+            any_fixed=1
+        fi
+    done
+    # CoreDNS pods inherit the node's resolv.conf at pod-start time -- if any
+    # were already running against the broken one, bounce them so they pick
+    # up the patched file rather than keep SERVFAILing on cached failures.
+    if [[ "${any_fixed}" == "1" ]] && kubectl -n kube-system get deployment coredns >/dev/null 2>&1; then
+        kubectl -n kube-system delete pod -l k8s-app=kube-dns >/dev/null 2>&1 || true
+        kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-dns --timeout=60s >/dev/null 2>&1 \
+            || warn "CoreDNS did not report Ready within 60s after the DNS fix -- check manually (kubectl -n kube-system logs -l k8s-app=kube-dns)."
+    fi
+}
+
 ensure_kind() {
     # Hard stop before touching ANYTHING by this name -- see CLAUDE.md section 0.
     assert_kind_cluster_ownership "${KIND_CLUSTER_NAME}" || exit 1
 
     if kind_cluster_exists; then
-        kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
+        # kind create's merge-on-create is not guaranteed to have landed in
+        # THIS KUBECONFIG (e.g. a previous run under a different resolved
+        # ${HOME}/.kube bind-mount source) -- re-derive the entry from the
+        # running cluster rather than best-effort switching to a context that
+        # may not exist yet. `context_works` below is the real gate; this
+        # `|| true` is fine because that check catches a failed export too.
+        kind export kubeconfig --name "${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
         if context_works; then
+            if kube_proxy_iptables_broken; then
+                warn "kube-proxy on '${KIND_CLUSTER_NAME}' is hitting the iptables-nft message-size bug (Service routing silently stale) — fixing ..."
+                steer_kube_proxy_onto_iptables_legacy
+            fi
+            ensure_node_dns
             ok "kind cluster '${KIND_CLUSTER_NAME}' already exists and is reachable — reusing it."
             return 0
         fi
@@ -138,14 +260,34 @@ ensure_kind() {
     mkdir -p "$(dirname "${KUBECONFIG}")"   # so kind can write the kubeconfig
     if [[ -f "${KIND_CONFIG}" ]]; then
         log "Using kind config ${KIND_CONFIG}"
-        kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"
+        if ! kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"; then
+            err "kind create cluster failed for '${KIND_CLUSTER_NAME}' (config: ${KIND_CONFIG})."
+            err "Common causes: a hostPort in ${KIND_CONFIG} already bound by another checkout on this host,"
+            err "or /var/run/docker.sock (bind-mounted into this container) not reaching a working daemon."
+            exit 1
+        fi
     else
         warn "No kind config at ${KIND_CONFIG} — creating with defaults (no ACE port mappings, and NOT instance-scoped)."
         warn "Run deploy/kind/render-kind-config.sh --personal-workspace on the host first, then re-run, to get ACE's port mappings without colliding with another checkout on this host."
-        kind create cluster --name "${KIND_CLUSTER_NAME}"
+        if ! kind create cluster --name "${KIND_CLUSTER_NAME}"; then
+            err "kind create cluster failed for '${KIND_CLUSTER_NAME}' (no config -- created with defaults)."
+            exit 1
+        fi
     fi
     mark_kind_cluster_owned "${KIND_CLUSTER_NAME}"
-    kubectl config use-context "kind-${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
+    # Same rationale as above: force the merge instead of hoping
+    # `kind create`'s implicit one landed correctly.
+    kind export kubeconfig --name "${KIND_CLUSTER_NAME}" >/dev/null 2>&1 || true
+    # A brand-new cluster always starts on the broken nft default (see the
+    # comment on steer_kube_proxy_onto_iptables_legacy above) -- fix it now,
+    # before anything else depends on Service routing actually working.
+    log "Steering kube-proxy onto iptables-legacy to avoid the nft netlink message-size bug ..."
+    steer_kube_proxy_onto_iptables_legacy
+    # A brand-new node always starts with whatever resolv.conf kind's own
+    # entrypoint wrote -- check and patch it now, before anything (image
+    # pulls, CoreDNS) depends on external DNS actually working.
+    log "Checking node DNS reaches the outside world (rootless Docker can't proxy the gateway-IP resolver) ..."
+    ensure_node_dns
 }
 
 # az CLI writes command logs to $AZURE_CONFIG_DIR/commands/. The host ~/.azure
@@ -267,6 +409,30 @@ KUBECFG
         else
             warn "Could not write shared kubeconfig to ${KUBECONFIG_OUT}"
         fi
+    fi
+fi
+
+# Export an ADDITIONAL "internal" kubeconfig for containers that are NOT
+# real-host-networked — currently just graphql, which runs on bridge
+# networking + explicit ports: under docker-compose.yml so it's reachable at
+# all under a personal rootless Docker daemon (see CLAUDE.md §6 "Personal
+# rootless Docker"). `kind get kubeconfig --internal` resolves the API server
+# as https://<cluster>-control-plane:6443 — a Docker-network container DNS
+# name, reachable by anything sharing the `kind` network (see
+# KIND_EXPERIMENTAL_DOCKER_NETWORK / docker-compose.yml) — instead of
+# https://127.0.0.1:<port>, which only resolves for containers sharing the
+# real (or, under rootless, RootlessKit's) host network namespace, same as
+# this container. Only meaningful for an actual local kind cluster; cloud/
+# local contexts leave KUBECONFIG_INTERNAL_OUT unset or the kind-cluster
+# check below simply no-ops.
+if [[ -n "${KUBECONFIG_INTERNAL_OUT:-}" ]] && kind_cluster_exists && [[ -d "$(dirname "${KUBECONFIG_INTERNAL_OUT}")" ]]; then
+    if kind get kubeconfig --internal --name "${KIND_CLUSTER_NAME}" > "${KUBECONFIG_INTERNAL_OUT}.tmp" 2>/dev/null; then
+        mv "${KUBECONFIG_INTERNAL_OUT}.tmp" "${KUBECONFIG_INTERNAL_OUT}"
+        chmod 644 "${KUBECONFIG_INTERNAL_OUT}"
+        ok "Wrote internal (container-DNS) kubeconfig → ${KUBECONFIG_INTERNAL_OUT}"
+    else
+        rm -f "${KUBECONFIG_INTERNAL_OUT}.tmp"
+        warn "Could not write internal kubeconfig — graphql's Kubernetes access will not work unless it shares this container's network."
     fi
 fi
 

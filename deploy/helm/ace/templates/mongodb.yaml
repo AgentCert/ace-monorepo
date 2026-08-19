@@ -149,7 +149,7 @@ spec:
                   try {
                     if (rs.status().ok) { print("rs0 already initialized"); }
                   } catch (e) {
-                    rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb:27017"}]});
+                    rs.initiate({_id:"rs0", members:[{_id:0, host:"mongodb-0.mongodb-headless.{{ include "ace.namespace" . }}.svc.cluster.local:27017"}]});
                     print("rs0 initiated");
                   }
                 '

@@ -28,11 +28,24 @@
 #   app           Certifier API   (included)          (http://localhost:8000)
 #   langfuse-*    Langfuse stack   [profile: langfuse](http://localhost:4000)
 #
-# Networking: the control-plane services (cluster-init, mongo, auth, graphql,
-# web) use host networking so they bind the same host ports the old scripts did
-# and the existing .env contract (172.26.0.1 / localhost) keeps working across
-# every cluster scenario. In-cluster pods reach host-published services
-# (litellm :14000, langfuse :4000) via the kind gateway 172.26.0.1.
+# Networking: mongo, auth, graphql, web, and app (certifier) all use bridge
+# networking + explicit ports: (not network_mode: host) so they're reachable
+# under both the shared root Docker daemon and a personal rootless one
+# (./scripts/setup.sh --rootless-docker, CLAUDE.md §6) — rootless "host"
+# networking is RootlessKit's own private netns, not the real host's, so
+# explicit ports: is the one publishing form that actually forwards out.
+# Service-to-service calls (web→auth/graphql, auth/graphql→mongo, graphql→
+# certifier) use Docker Compose service-name DNS on the default network
+# instead of the old 127.0.0.1/extra_hosts wiring that only worked when every
+# container shared the real host loopback. graphql additionally joins the
+# `kind` network to reach the KinD control-plane container directly (see the
+# `networks:` block and cluster-init's KUBECONFIG_INTERNAL_OUT below) instead
+# of via a host-published port. cluster-init alone stays network_mode: host —
+# it needs the real docker.sock + ~/.kube either way, and KinD's node
+# containers' host-published ports land in the same netns it occupies
+# (RootlessKit's, under rootless) regardless. In-cluster pods still reach
+# host-published services (litellm :14000, langfuse :4000) via the kind
+# gateway 172.26.0.1, unaffected by any of the above.
 # =============================================================================
 
 # Suffixed with ACE_INSTANCE_NAME so this checkout's Compose project never
@@ -76,9 +89,28 @@ services:
       HOST_PUBLIC_IP: ${HOST_PUBLIC_IP:-}
       KUBECONFIG: /host-kube/config
       KUBECONFIG_OUT: /shared/config
+      # Additional "internal" kubeconfig (server: https://<cluster>-control-plane:6443,
+      # a Docker-network container DNS name) for containers that are NOT
+      # real-host-networked — currently just graphql, which runs on bridge
+      # networking + explicit ports: so it's reachable under rootless Docker
+      # (see CLAUDE.md §6). Written into the same `kubeconfig` volume cluster-init
+      # already populates; only meaningful for actual local kind clusters.
+      KUBECONFIG_INTERNAL_OUT: /shared/config-internal
       KIND_CONFIG: /repo/local-personal-workspace/kind-agentcert.yaml
+      # Tells `kind create cluster` (invoked below via the bind-mounted docker.sock)
+      # to attach its node containers to this pre-existing, checkout-scoped Compose
+      # network instead of creating/reusing the docker-wide default "kind" network
+      # every checkout on this host would otherwise share. Read directly by the
+      # `kind` CLI's own environment — no entrypoint.sh change needed for this part.
+      KIND_EXPERIMENTAL_DOCKER_NETWORK: kind-${ACE_INSTANCE_NAME:-unconfigured}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Defaults to the shared root daemon's socket. Under a personal rootless
+      # daemon (./scripts/setup.sh --rootless-docker), that script writes
+      # DOCKER_HOST_SOCK to .env pointing at the rootless socket instead — a
+      # bind-mount source is a literal host path, not context-aware, so
+      # without this override `kind create` below would silently keep talking
+      # to the SHARED daemon even after `docker context use rootless`.
+      - ${DOCKER_HOST_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       # Directory (not file) so a machine with no ~/.kube still works.
       - ${HOST_KUBE_DIR:-${HOME}/.kube}:/host-kube
       # World-readable kubeconfig copy for non-root app containers.
@@ -95,9 +127,13 @@ services:
       - ${AWS_CONFIG_DIR:-empty-aws-creds}:/root/.aws:ro
       - ${GCLOUD_CONFIG_DIR:-empty-gcloud-creds}:/root/.config/gcloud:ro
       # Mount the host /etc/hosts so pin_api_server_host() writes the private
-      # cluster DNS→IP entry onto the host.  graphql uses network_mode:host and
-      # therefore reads the same file — this is what makes the RBAC preflight
-      # resolve the privatelink hostname after cluster-init exits.
+      # cluster DNS→IP entry onto the host, for cluster-init's OWN kubectl calls
+      # (this container stays network_mode: host, so it still shares the real/
+      # RootlessKit host loopback either way). NOTE: graphql no longer shares
+      # this file now that it runs on bridge networking (see KUBECONFIG_INTERNAL_OUT
+      # above) — CLUSTER_MODE=cloud's privatelink-hostname RBAC preflight is a
+      # known follow-up gap for graphql specifically, not yet fixed. See
+      # innovation.md §3.19.
       - /etc/hosts:/etc/hosts
     restart: "no"
 
@@ -168,9 +204,14 @@ services:
       dockerfile: Dockerfile
     image: agentcert/agentcert-auth:latest
     container_name: agentcert-auth-${ACE_INSTANCE_NAME:-unconfigured}
-    network_mode: host
-    extra_hosts:
-      - "mongodb:127.0.0.1"
+    # Bridge networking (NOT host) + explicit ports: — same pattern as mongo/
+    # certifier's `app` service above. Required for reachability under a
+    # personal rootless Docker daemon (CLAUDE.md §6): rootless "host" networking
+    # is RootlessKit's own private netns, not the real host's, so explicit
+    # ports: is the one publishing form that's actually forwarded out.
+    ports:
+      - "${AUTH_REST_PORT:-3000}:${AUTH_REST_PORT:-3000}"
+      - "${AUTH_GRPC_PORT:-3030}:${AUTH_GRPC_PORT:-3030}"
     depends_on:
       mongo-init:
         condition: service_completed_successfully
@@ -183,6 +224,11 @@ services:
       GRPC_PORT: "${AUTH_GRPC_PORT:-3030}"
       DB_USER: ${MONGODB_USERNAME:-admin}
       DB_PASSWORD: ${MONGODB_PASSWORD:-1234}
+      # .env's own DB_SERVER hardcodes 127.0.0.1, which only ever worked because
+      # this container shared the real host loopback via network_mode: host.
+      # Override to the compose service name — mongo is reachable by Docker DNS
+      # from any container on the same (default) network regardless of daemon mode.
+      DB_SERVER: "mongodb://${MONGODB_USERNAME:-admin}:${MONGODB_PASSWORD:-1234}@mongo:27017/?replicaSet=rs0&authSource=admin"
     restart: unless-stopped
 
   # ── AgentCert GraphQL control plane ─────────────────────────────────────────
@@ -192,17 +238,17 @@ services:
       dockerfile: server/Dockerfile
     image: agentcert/agentcert-graphql:latest
     container_name: agentcert-graphql-${ACE_INSTANCE_NAME:-unconfigured}
-    network_mode: host
-    extra_hosts:
-      - "mongodb:127.0.0.1"
-      - "auth:127.0.0.1"
-      # graphql uses host networking, so Docker service names don't resolve via
-      # the embedded DNS. Map langfuse-web to the compose-bridge IP so Langfuse
-      # observability calls succeed without timing out.
-      - "langfuse-web:${LANGFUSE_WEB_COMPOSE_IP:-172.21.0.6}"
-      # certifier_app publishes its API on the host port (API_PORT, default 8000),
-      # so the host-networked graphql container reaches it via localhost.
-      - "certifier:127.0.0.1"
+    # Bridge networking (NOT host) + explicit ports:, same reasoning as auth
+    # above. graphql additionally needs the `kind` network to reach the KinD
+    # control-plane container by Docker DNS (see KUBECONFIG below) — it no
+    # longer shares a loopback with KinD's host-published API-server port now
+    # that it isn't network_mode: host itself.
+    networks:
+      default: {}
+      kind: {}
+    ports:
+      - "${GQL_REST_PORT:-8081}:${GQL_REST_PORT:-8081}"
+      - "${GQL_GRPC_PORT:-8082}:${GQL_GRPC_PORT:-8082}"
     depends_on:
       cluster-init:
         condition: service_completed_successfully
@@ -219,6 +265,13 @@ services:
       GRPC_PORT: "${GQL_GRPC_PORT:-8082}"
       DB_USER: ${MONGODB_USERNAME:-admin}
       DB_PASSWORD: ${MONGODB_PASSWORD:-1234}
+      # .env's own DB_SERVER hardcodes 127.0.0.1 — same fix as auth above, same
+      # reason (no longer network_mode: host, so 127.0.0.1 is this container's
+      # own private loopback, not mongo's).
+      DB_SERVER: "mongodb://${MONGODB_USERNAME:-admin}:${MONGODB_PASSWORD:-1234}@mongo:27017/?replicaSet=rs0&authSource=admin"
+      # .env's own default (localhost) only worked via network_mode: host; auth
+      # is reachable by Docker DNS from any container on the default network.
+      LITMUS_AUTH_GRPC_ENDPOINT: auth
       # Required keys the binary validates under LITMUS_*-prefixed names (the v2
       # script renamed CHAOS_*_IMAGE → LITMUS_CHAOS_*_IMAGE at launch). Not in
       # .env, so they survive godotenv.Overload.
@@ -227,23 +280,35 @@ services:
       LITMUS_CHAOS_EXPORTER_IMAGE: ${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}
       # godotenv.Overload re-reads this file at init, so .env stays authoritative.
       AGENTCERT_ENV_FILE: /srv/projects/ace-monorepo/.env
-      # World-readable copy written by cluster-init (host ~/.kube/config is 0600,
-      # unreadable by this container's uid 65534).
-      KUBECONFIG: /kube/config
+      # The "internal" kubeconfig cluster-init writes (server: Docker-network
+      # DNS name, not 127.0.0.1) — see KUBECONFIG_INTERNAL_OUT on cluster-init
+      # and the `kind` network above. Required now that this container is on
+      # bridge networking rather than sharing the host's/KinD's loopback.
+      KUBECONFIG: /kube/config-internal
       # Computed values the v2 script derived (not present verbatim in .env).
       OPENAI_BASE_URL: ${LITELLM_HOST:-http://172.26.0.1:14000}/v1
       OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-agentcert-2026}
       MODEL_ALIAS: ${FLASH_AGENT_MODEL:-gpt-4o}
       CHAOS_CENTER_UI_ENDPOINT: ${SUBSCRIBER_CALLBACK_URL:-http://172.26.0.1:8081}
+      # Human/kubectl-facing address (distinct from the in-cluster/subscriber one
+      # above) — used to build the `kubectl apply -f <url>` manifest-download link
+      # so it is correct regardless of what host:port the browser that requested it
+      # was tunneled/forwarded through, rather than trusting the browser's own
+      # address bar. WEB_PORT is the same host port the web container itself is
+      # published on.
+      CHAOS_CENTER_PUBLIC_ENDPOINT: ${CHAOS_CENTER_PUBLIC_ENDPOINT:-http://localhost:${WEB_PORT:-2001}}
       # graphql → certifier. Two endpoints, both on the certifier service:
       #   CERTIFIER_BASE_URL       — certification data/scorecard API client
       #   CERTIFICATE_PDF_BASE_URL — the "Download Certificate" PDF proxy
-      # Both default to the local compose certifier (host network → published
-      # host API_PORT). Override either in .env to use a hosted/Azure certifier;
-      # they can point at the same host. (graphql's code defaults are the dead
-      # ports :8088/:8089 → "connection refused", so we always set them here.)
-      CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL:-http://localhost:8000}
-      CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL:-http://localhost:8000}
+      # Reach it by the `certifier` network alias (see the `app` service's
+      # networks.default.aliases below) rather than .env's own localhost
+      # default, which only worked via network_mode: host. Override
+      # *_BASE_URL_COMPOSE in .env to point at a hosted/Azure certifier instead
+      # — same escape-hatch pattern as LANGFUSE_HOST_COMPOSE below.
+      # (graphql's code defaults are the dead ports :8088/:8089 → "connection
+      # refused", so we always set them here.)
+      CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL_COMPOSE:-http://certifier:8000}
+      CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL_COMPOSE:-http://certifier:8000}
       DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
       AGENT_HUB_SOURCE_MODE: custom
       DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
@@ -262,8 +327,9 @@ services:
       # modifying this file.
       CONTAINER_SOCKET_PATH: ${CONTAINER_SOCKET_PATH:-/run/k3s/containerd/containerd.sock}
     volumes:
-      # World-readable kubeconfig from cluster-init (kind apiserver reachable on
-      # host net at 127.0.0.1:<port>).
+      # World-readable kubeconfig directory from cluster-init — contains both
+      # config (external, 127.0.0.1:<port>, unused by this container) and
+      # config-internal (Docker-network DNS, see KUBECONFIG above).
       - kubeconfig:/kube:ro
       # Mount the repo at its own absolute path so AGENT_CHARTS_ROOT /
       # APP_CHARTS_ROOT / AGENTCERT_ENV_FILE (all absolute in .env) resolve.
@@ -298,7 +364,11 @@ services:
         ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]
     image: agentcert/agentcert-web:latest
     container_name: agentcert-web-${ACE_INSTANCE_NAME:-unconfigured}
-    network_mode: host
+    # Bridge networking (NOT host) + explicit ports: — same reasoning as auth/
+    # graphql above. web's nginx proxies to auth/graphql by Docker DNS now
+    # (see compose/web-nginx.conf), so it doesn't need the `kind` network.
+    ports:
+      - "${WEB_PORT:-2001}:2001"
     # Run as root so nginx can read the bind-mounted nginx.conf regardless of
     # host file permissions (git does not preserve permissions beyond the
     # executable bit, so clones on other VMs may produce a file not readable
@@ -309,7 +379,8 @@ services:
       graphql:
         condition: service_started
     volumes:
-      # Compose-tailored nginx: proxies /auth/→:3000 and /api/→:8081 on host net.
+      # Compose-tailored nginx: proxies /auth/→auth:3000 and /api/→graphql:8081
+      # by Docker DNS (both containers are on the same default network).
       - ./compose/web-nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
 
@@ -318,7 +389,12 @@ services:
   # ACE_INSTANCE_NAME) so two checkouts on this shared host never collide.
   # OLLAMA_PORT is the host-side port; the system Ollama owns :11434 so this
   # must differ. setup.sh auto-derives a UID-based default; override in .env.
-  # Requires NVIDIA Container Toolkit (nvidia-container-runtime) for GPU access.
+  # Requires NVIDIA Container Toolkit for GPU access. Device request uses CDI
+  # (nvidia.com/gpu=all) rather than the legacy `driver: nvidia` reservation so
+  # it resolves identically under both daemons on this host: the shared root
+  # daemon already publishes a system CDI spec at /etc/cdi, and a personal
+  # rootless daemon (./scripts/setup.sh --rootless-docker) gets its own
+  # user-scoped spec under $HOME/.config/cdi — neither path touches the other.
   ollama:
     image: ollama/ollama:latest
     container_name: ollama-${ACE_INSTANCE_NAME:-unconfigured}
@@ -330,13 +406,8 @@ services:
     environment:
       # Ollama binds to all interfaces inside the container by default.
       OLLAMA_HOST: "0.0.0.0"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    devices:
+      - "nvidia.com/gpu=all"
     restart: unless-stopped
 
   # ── LiteLLM gateway (profile: litellm) ──────────────────────────────────────
@@ -378,9 +449,13 @@ services:
     container_name: ace-workspace-init-${ACE_INSTANCE_NAME:-unconfigured}
     user: root
     command: >
-      bash -c "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"
+      bash -c "mkdir -p /ws/cert /export && chown -R 1000:1000 /ws /export && chmod 755 /ws /export"
     volumes:
       - ./certifier/workspace:/ws
+      # Second, dedicated mount for finished-report export (see CERT_HOST_EXPORT_DIR
+      # below on the app service) — kept separate from /ws so the export dir stays
+      # a clean, predictable location distinct from intermediate pipeline artefacts.
+      - ${CERT_REPORTS_HOST_DIR:-.tmp/certification-reports-${ACE_INSTANCE_NAME:-unconfigured}}:/export
     restart: "no"
 
   # ── Certifier API (inlined from certifier/docker-compose.yml) ───────────────
@@ -402,6 +477,16 @@ services:
         required: false
     ports:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
+    # Alias so graphql's CERTIFIER_BASE_URL/CERTIFICATE_PDF_BASE_URL
+    # (http://certifier:8000) resolve — the compose service name is `app`
+    # (see the file-level note above about avoiding the "services.app conflicts
+    # with imported resource" error), but `certifier` reads better everywhere
+    # else this host is referenced, so keep both names live via an alias
+    # instead of renaming the service.
+    networks:
+      default:
+        aliases:
+          - certifier
     env_file:
       - .env
     environment:
@@ -415,8 +500,13 @@ services:
       API_PORT: "${API_PORT:-8000}"
       WORKSPACE_DIR: /app/workspace
       CERT_WORKSPACE_DIR: /app/workspace/cert
+      # Finished HTML/PDF reports are additionally copied here once generated
+      # (see certifier/main/workers/cert_task_runner.py) so they're discoverable
+      # under .tmp/ without digging through intermediate pipeline artefacts.
+      CERT_HOST_EXPORT_DIR: /app/cert-export
     volumes:
       - ./certifier/workspace:/app/workspace
+      - ${CERT_REPORTS_HOST_DIR:-.tmp/certification-reports-${ACE_INSTANCE_NAME:-unconfigured}}:/app/cert-export
     healthcheck:
       test: ["CMD", "sh", "-c",
              "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:${API_PORT:-8000}/docs')\""]
@@ -427,8 +517,34 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+# Pre-created before any service starts (Compose creates every declared network
+# up front, regardless of dependency order) so `kind create cluster` — invoked
+# by cluster-init via the bind-mounted docker.sock — can attach its node
+# containers to it via KIND_EXPERIMENTAL_DOCKER_NETWORK, and graphql can join
+# the same network to reach the control-plane container by Docker DNS. Needed
+# because graphql runs on bridge networking + explicit ports: (see below),
+# not network_mode: host, so it no longer shares a loopback with the KinD
+# node the way a host-networked container would. Checkout-scoped name so two
+# checkouts' KinD clusters never share a Docker network on this shared host.
+networks:
+  kind:
+    name: kind-${ACE_INSTANCE_NAME:-unconfigured}
+
 volumes:
+  # Scoped by ACE_INSTANCE_NAME so two checkouts on this shared host never
+  # share (or silently overwrite) each other's MongoDB data — matches the
+  # ollama-models pattern below. Also what makes certifier reports durable
+  # across `docker compose down`/up: cert_task_runner.py uploads every
+  # generated report to the cert_reports GridFS bucket unconditionally, so
+  # Mongo's own durability is what keeps reports around, independent of the
+  # certifier/workspace bind mount.
+  #
+  # One-time migration if you have pre-existing data in the old unscoped
+  # `mongodb_data` volume and want to keep it:
+  #   docker run --rm -v mongodb_data:/from \
+  #     -v mongodb_data-$ACE_INSTANCE_NAME:/to alpine cp -a /from/. /to/
   mongodb_data:
+    name: mongodb_data-${ACE_INSTANCE_NAME:-unconfigured}
     driver: local
   mongo_keyfile:
     driver: local

@@ -87,6 +87,17 @@ spec:
             # In-cluster agents call back via the K8s service (not the host IP)
             - name: CHAOS_CENTER_UI_ENDPOINT
               value: "http://graphql.ace.svc.cluster.local:8081"
+            # Optional human/kubectl-facing override (distinct from the in-cluster
+            # CHAOS_CENTER_UI_ENDPOINT above) for the `kubectl apply -f <url>`
+            # manifest-download link. Deliberately NOT hardcoded here: this
+            # Deployment already gets every key from ace-env via envFrom below,
+            # and a K8s env: entry with the same name always wins over envFrom —
+            # so a hardcoded value here would silently shadow whatever a user set
+            # in .env. Leave unset to fall back to request-based detection
+            # (correct for most real clusters reached via LoadBalancer/Ingress);
+            # set CHAOS_CENTER_PUBLIC_ENDPOINT in .env before regenerating the
+            # ace-env secret only if that detection produces an address the
+            # operator's own shell can't actually reach (see .env.example).
             # Allow WebSocket/HTTP connections from in-cluster pods; value set by scripts/setup.sh
             # in .env → ace-env secret. Edit ALLOWED_ORIGINS in .env to customise.
             - name: ALLOWED_ORIGINS

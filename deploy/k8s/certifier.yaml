@@ -80,6 +80,14 @@ spec:
               value: "/app/workspace"
             - name: CERT_WORKSPACE_DIR
               value: "/app/workspace/cert"
+            # NOTE: the Helm chart (deploy/helm/ace) additionally supports
+            # CERT_HOST_EXPORT_DIR, which copies finished certification reports
+            # to a hostPath volume bridged out to the real host by KinD's
+            # extraMounts. This flat manifest intentionally does not mirror it —
+            # that feature is inherently CLUSTER_MODE-conditional (only valid
+            # against a KinD cluster this repo's own setup.sh created), and
+            # these manifests have no templating mechanism to express that. Use
+            # the Helm chart if you need this. See CLAUDE.md §4.1/§6.
           volumeMounts:
             - name: workspace
               mountPath: /app/workspace

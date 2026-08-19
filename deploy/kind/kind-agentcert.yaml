@@ -15,6 +15,28 @@ nodes:
             # trip on that percentage alone even though tens of GB are free in
             # absolute terms. Override with absolute floors instead.
             eviction-hard: "nodefs.available<5Gi,imagefs.available<5Gi,nodefs.inodesFree<5%,imagefs.inodesFree<5%"
+    extraMounts:
+      # Binds the node's local-path-provisioner backing directory to a host
+      # path so PV data (MongoDB, certifier-workspace) survives `kind delete
+      # cluster` + recreate. Without this, all PV data lives inside the KinD
+      # control-plane node's own Docker container storage, which is destroyed
+      # along with the node regardless of any PVC reclaimPolicy/keep
+      # annotation -- those only protect against `helm uninstall` while the
+      # cluster itself stays up. hostPath substituted by
+      # render-kind-config.sh (KIND_HOST_DATA_DIR env var), instance-scoped
+      # by ACE_INSTANCE_NAME so two checkouts never share PV data on this
+      # shared host. See CLAUDE.md §6 "KinD Local Cluster".
+      - hostPath: /__KIND_HOST_DATA_DIR__
+        containerPath: /opt/local-path-provisioner
+      # Separate, dedicated bridge (unrelated to local-path-provisioner above,
+      # and unaffected by whatever state that one is in) so finished
+      # certification reports are discoverable outside the cluster once the
+      # certifier writes them — a plain hostPath volume on the certifier pod,
+      # not a PVC, no StorageClass involved. hostPath substituted by
+      # render-kind-config.sh (KIND_CERT_EXPORT_DIR env var), instance-scoped
+      # by ACE_INSTANCE_NAME. See CLAUDE.md §4.1 "Workspace Layout".
+      - hostPath: /__KIND_CERT_EXPORT_DIR__
+        containerPath: /opt/cert-report-export
     extraPortMappings:
       # ingress
       - containerPort: 80

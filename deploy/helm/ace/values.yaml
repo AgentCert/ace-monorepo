@@ -17,6 +17,19 @@ web:
 
 # graphql is internal-only (reached via the web nginx proxy); always NodePort.
 
+# ── Certifier: host-bridged report export (local KinD only) ──────────────────
+# Mounts a hostPath volume into the certifier pod so finished HTML/PDF reports
+# are also copied to a directory bridged out to the real host via
+# deploy/kind/kind-agentcert.yaml's extraMounts (see CLAUDE.md §4.1/§6).
+# Only meaningful for a KinD cluster this repo's own setup.sh created --
+# setup.sh sets this to false for CLUSTER_MODE=cloud/local (existing/external
+# kubeconfig with no such host bridge; deploy/k8s/certifier.yaml, the flat
+# kubectl-apply alternative, does not support this feature at all).
+certHostExport:
+  enabled: true
+  # Must match deploy/kind/kind-agentcert.yaml's extraMounts containerPath.
+  nodeHostPath: /opt/cert-report-export
+
 # ── Environment variables (populated from .env by setup.sh) ──────────────────
 # scripts/setup.sh generates deploy/helm/ace/values-env.yaml with every
 # KEY: "value" from .env under this key, then passes -f values-env.yaml.

@@ -96,6 +96,17 @@ spec:
               value: "3030"
             - name: CHAOS_CENTER_UI_ENDPOINT
               value: "http://graphql.ace.svc.cluster.local:8081"
+            # Human/kubectl-facing address (distinct from the in-cluster one above) —
+            # used to build the `kubectl apply -f <url>` manifest-download link so it
+            # is correct regardless of what host:port the browser that requested it
+            # was tunneled/forwarded through. Prefers an explicit CHAOS_CENTER_PUBLIC_ENDPOINT
+            # from .env if the user set one (it already reaches .Values.env generically —
+            # see generate_helm_values_env() in setup.sh — and would otherwise be shadowed
+            # by this explicit entry per K8s env/envFrom precedence); otherwise falls back to
+            # KIND_HOSTPORT_WEB, the same instance-scoped, collision-avoided host port
+            # setup.sh already computes and prints in NOTES.txt as the UI URL.
+            - name: CHAOS_CENTER_PUBLIC_ENDPOINT
+              value: {{ .Values.env.CHAOS_CENTER_PUBLIC_ENDPOINT | default (printf "http://localhost:%s" (.Values.env.KIND_HOSTPORT_WEB | default "2001")) | quote }}
             - name: ALLOWED_ORIGINS
               valueFrom:
                 secretKeyRef:

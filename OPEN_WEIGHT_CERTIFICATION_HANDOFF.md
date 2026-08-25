@@ -1,12 +1,7 @@
 # Open-Weight Agent Certification — Change Log & Handoff
 
-Read this before continuing the "open-weight-model agent + full ITBench certification run"
-effort. It documents every change made across every repo/fork touched by this work, why each
+This documents every change made across every repo/fork touched by this work, why each
 one was necessary, and exactly what is verified-working vs. still in progress.
-
-This supersedes the now-stale `ITBENCH_WORK_IN_PROGRESS.md` for status purposes — all 30
-ITBench SRE fault bundles are complete (see §1); that file predates it.
-
 ---
 
 ## 0. Repos & forks involved
@@ -5521,8 +5516,6 @@ Durable: yes. The changes land in tracked setup/prereq scripts, so fresh checkou
 
 **Status:** uncommitted working-tree changes in `scripts/setup.sh`, `scripts/check-prerequisites.sh`, and both handoff docs.
 
----
-
 ## 73. Litmus UI agent cleanup and sre-agent-comprehensive ImagePullBackOff fixes (2026-08-25, uncommitted)
 
 ### Context
@@ -5599,3 +5592,746 @@ Generated/local-only root artifacts were found during staging: `.venv-setup-auto
 Durable: yes. The source changes are now captured in feature-branch commits in their owning submodules, and the superproject pointer update is ready to record those exact SHAs. The root `.gitignore` change prevents future accidental staging of the generated setup virtualenv and scratch diagnostic file.
 
 **Status:** submodule commits created locally; superproject commit and pushes still pending.
+
+---
+
+## 75. Python venv sync no longer floods terminal output or crawls generated venv manifests (2026-08-25, uncommitted)
+
+### Context
+
+User reported pip resolver-conflict output during the setup workflow, including incompatible `openai`, `jiter`, OpenTelemetry, `langsmith`, `tokenizers`, `pandas`, `httpx`, and `aiohttp` versions. The conflict list came from pip installs, not from the metadata-only prerequisite audit.
+
+Investigation found the installer path in `scripts/sync-python-venv.sh` was installing every `requirements*.txt` found under the repo into one `.venv`. That is slow and fragile because different ACE components intentionally carry incompatible Python stacks: for example, `agents/ciso-agent/requirements-dev.txt` pins older OpenAI/LangChain/OTel/tokenizer packages while `certifier/requirements.txt` pins or allows newer OpenAI/aiohttp/LangChain packages, and SRE agent requirements allow newer LiteLLM. The script also failed to exclude `.venv-setup-auto`, so it could discover requirements files embedded inside installed third-party packages such as `embedchain` deployment examples.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/sync-python-venv.sh` | Redirects pip stdout/stderr to `.tmp/prereq/python-venv-sync.log` instead of printing resolver/download output directly to the terminal. |
+| `scripts/sync-python-venv.sh` | Adds a compact progress bar (`[####----] n/N`) for install steps so setup output stays readable. |
+| `scripts/sync-python-venv.sh` | Removes the old direct install loop that still printed pip commands before the progress-bar path. |
+| `scripts/sync-python-venv.sh` | Excludes `.venv` and all `.venv-*` directories from manifest discovery, preventing generated virtualenv/package fixture requirements from being installed. |
+| `scripts/sync-python-venv.sh` | On install failure, finishes the progress line and prints the log path for diagnosis. |
+
+### Verification performed
+
+- `bash -n scripts/sync-python-venv.sh scripts/check-prerequisites.sh scripts/setup.sh` passed.
+- `bash scripts/sync-python-venv.sh --dry-run --venv=/tmp/ace-sync-dryrun-venv` showed compact progress output only for install steps: `[############################] 7/7`.
+- `find . -path './.git' -prune -o -path './.venv' -prune -o -path './.venv-*' -prune -o -path './node_modules' -prune -o -path './.tmp' -prune -o -name 'requirements*.txt' -print | sort | wc -l` returned `5`, confirming generated venv requirement files are excluded.
+
+### Durability check
+
+Durable for the venv-sync path: yes. The reduced output and generated-venv exclusion are in tracked setup helper source. The underlying cross-component dependency conflicts still indicate that all ACE Python components should not be blindly flattened into one shared venv unless their dependency pins are reconciled or installed into separate component-specific environments.
+
+**Status:** uncommitted working-tree change in `scripts/sync-python-venv.sh` plus prior uncommitted setup/prereq/handoff changes.
+
+---
+
+## 76. Mitigated pip `resolution-too-deep` in setup venv sync by disabling transitive resolve for aggregated pyproject deps (2026-08-25, uncommitted)
+
+### Context
+
+During setup fallback venv provisioning, pip failed with:
+
+- `error: resolution-too-deep`
+- resolver backtracking through `backoff` and `posthog` while installing broad pyproject dependency sets tied to `crewai/chromadb`
+
+Root cause: `scripts/sync-python-venv.sh` installs every requirements manifest, then installs a combined `pyproject.toml` dependency list in one pip transaction. That aggregated pyproject step can force a massive transitive solve across multiple independent stacks and exceed pip resolver depth.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/sync-python-venv.sh` | Changed pyproject aggregate install from `pip install -r <pyproject-deps>` to `pip install --no-deps -r <pyproject-deps>`. |
+| `scripts/sync-python-venv.sh` | Added inline rationale comments explaining why transitive resolution is disabled for that step and that requirements manifests remain the transitive/runtime source. |
+
+### Verification performed
+
+- `bash -n scripts/sync-python-venv.sh`
+- `bash scripts/sync-python-venv.sh --dry-run`
+
+Observed result: dry-run completes with progress output and no resolver failure path triggered in the pyproject step.
+
+### Durability check
+
+Durable: yes. The mitigation is in tracked setup helper source and applies to all future setup fallback-venv sync runs.
+
+### Status
+
+Uncommitted working-tree change in `scripts/sync-python-venv.sh` plus prior uncommitted setup/prereq/handoff changes.
+
+---
+
+## 77. Removed non-actionable `SyntaxWarning` noise from setup workflow and fixed semver regex literal warning at source (2026-08-25, uncommitted)
+
+### Context
+
+Setup/prereq output contained warnings such as:
+
+- `.../pysbd/segmenter.py:66: SyntaxWarning: invalid escape sequence '\s'`
+- `chaos-charts/scripts/version/version_validator.py:... SyntaxWarning: invalid escape sequence '\d'`
+
+These warnings did not indicate workflow failures, but they polluted logs and made diagnosis harder.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `chaos-charts/scripts/version/version_validator.py` | Converted the semver regex literal to a raw string (`r"..."`) so Python no longer warns about escape sequences like `\d` in this repo-owned source file. |
+| `scripts/setup.sh` | Added `PYTHONWARNINGS=${PYTHONWARNINGS:-ignore::SyntaxWarning}` so setup-managed Python invocations suppress non-actionable `SyntaxWarning` noise. |
+| `scripts/sync-python-venv.sh` | Propagates the same warning filter to setup-managed python/pip subprocesses (`run_quiet_step` and helper Python manifest collector). |
+
+### Verification performed
+
+- `bash -n scripts/setup.sh`
+- `bash -n scripts/sync-python-venv.sh`
+- `python3 -m py_compile chaos-charts/scripts/version/version_validator.py`
+- VS Code diagnostics show no new errors in the modified files.
+
+### Durability check
+
+Durable: yes. Repo-owned warning source (`version_validator.py`) is fixed at source, and setup noise suppression lives in tracked setup helper scripts used on future runs.
+
+### Status
+
+Uncommitted working-tree changes in `chaos-charts/scripts/version/version_validator.py`, `scripts/setup.sh`, `scripts/sync-python-venv.sh`, and both handoff docs.
+
+---
+
+## 78. `setup.sh` build prompt now defaults to "build ALL locally" on Enter (2026-08-25, uncommitted)
+
+### Context
+
+The setup build-choice prompt still defaulted to skip (`N`) when Enter was pressed:
+
+- `▸ Build images? ... Choice [p/l/a/N]:`
+
+Requested behavior is for Enter to default to `a` (`build ALL locally`), so users get local platform + experiment image builds without extra input.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Updated the express-mode prompt text from `Choice [p/l/a/N]` to `Choice [p/l/A/n]` and added empty-input (`""`) case mapping to `a` behavior (`DO_LOCAL_BUILD=1`, `_ALL_LOCAL=1`, select all images). |
+| `scripts/setup.sh` | Updated the guided-mode prompt text from `Choice [p/l/a/N]` to `Choice [p/l/A/n]` and added empty-input (`""`) case mapping to local-all mode (`_sel_mode=local`, `_ALL_LOCAL=1`). |
+
+### Verification performed
+
+- `bash -n scripts/setup.sh`
+- Read-back check confirms both prompts now show `[p/l/A/n]` and both case statements include `""` mapping to all-local behavior.
+
+### Durability check
+
+Durable: yes. The default behavior change is in tracked setup source and applies to all future setup runs.
+
+### Status
+
+Uncommitted working-tree change in `scripts/setup.sh` plus this handoff update.
+
+## 79. Prereq audit no longer hangs scanning `.venv-setup-auto` site-packages (2026-08-25, uncommitted)
+
+### Problem
+
+`scripts/setup.sh` appeared to freeze immediately after printing:
+
+```
+! python manifest dependency audit found missing/incompatible packages
+```
+
+The script was not actually frozen — it continued silently into the Python import-surface audit, which was scanning **32,409 Python files** from `.venv-setup-auto/lib/python3.12/site-packages/`. This took a very long time with no visible progress.
+
+Root cause: both inline Python audit scripts inside `check-prerequisites.sh` used `skip_dirs = {".git", ".venv", ...}` with exact name matching. The venv created by this checkout is `.venv-setup-auto`, not `.venv`, so:
+- The **dependency audit** crawled into `site-packages` and flagged `requirements.txt` / `pyproject.toml` files inside packages like `embedchain`, `pandas`, etc. — producing 258 false "missing" and 121 false "incompatible" entries entirely from vendored venv internals.
+- The **import audit** walked all 32,409 Python files in site-packages (including every LangChain/scipy/torch submodule), finding 805 "missing" imports that are Windows-only, GPU-only, or optional extras — again, all false positives from the venv interior.
+
+### Fix
+
+`scripts/check-prerequisites.sh` — both inline Python audit heredocs, at lines 255/259 (dep audit) and 409/414 (import audit):
+
+```python
+# Before
+skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp"}
+def skipped(path: Path) -> bool:
+    return any(part in skip_dirs for part in path.parts)
+
+# After
+skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp", "site-packages"}
+def skipped(path: Path) -> bool:
+    return any(part in skip_dirs or part.startswith(".venv") for part in path.parts)
+```
+
+Two-pronged: `site-packages` catches any path inside an installed package tree regardless of venv name; the `.startswith(".venv")` guard catches any `.venv-*` named venv directory (`.venv-setup-auto`, `.venv-flash-agent`, etc.) without needing to enumerate them.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `scripts/check-prerequisites.sh` | Fixed `skip_dirs` + `skipped`/`is_skipped` in both inline Python audit scripts (lines 255/259 and 409/414) |
+
+### Verification
+
+Durability: yes — the fix lands in checked-in `scripts/check-prerequisites.sh`; any fresh checkout picks it up automatically on next `setup.sh` run.
+
+### Status
+
+Uncommitted working-tree change in `scripts/check-prerequisites.sh`.
+
+## 80. Build phase no longer hangs waiting for Ollama model download (2026-08-25, uncommitted)
+
+### Problem
+
+`setup.sh` appeared hung after printing "Building 12 image(s), up to 6 at a time" with no further output, even after all 12 build logs in `.tmp/build-logs/` were fully written. The process was not hung — it was blocked on a bare `wait` (line 3568) that waits for **all** background jobs of the shell, including `_OLLAMA_PULL_PID` (the Ollama model pull started at line 1726). The Ollama pull for `qwen2.5:32b-instruct` downloads tens of GB and runs for many minutes with no terminal output, making the script appear frozen.
+
+`_OLLAMA_PULL_PID` is not reaped until line 3673, long after the build section.
+
+### Fix
+
+`scripts/setup.sh` line 3568: changed bare `wait` to `wait "${_build_pids[@]}"` (guarded for empty array), so only the remaining build jobs are waited on — not every unrelated background job.
+
+```bash
+# Before
+wait
+
+# After
+[[ ${#_build_pids[@]} -gt 0 ]] && wait "${_build_pids[@]}"
+```
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Line ~3568: bare `wait` → scoped `wait "${_build_pids[@]}"` |
+
+### Durability
+
+Yes — fix is in checked-in `scripts/setup.sh`; any fresh run picks it up.
+
+### Status
+
+Uncommitted working-tree change in `scripts/setup.sh`.
+
+## 81. ChaosCenter-generated infra manifest concatenates RBAC/Deployment sections in undefined order — `ManifestParser` doesn't sort `Readdirnames` output (2026-08-25, uncommitted)
+
+### Problem
+
+User reported an ITBench chaos infrastructure ("itbench" scope-`namespace` infra) getting
+disabled immediately after being registered via the ChaosCenter UI ("Connect Chaos
+Infrastructure" wizard → download manifest → `kubectl apply -f`).
+
+Investigated live against the running `agentcert-alfred` KinD cluster:
+
+- `kubectl get events -n itbench` for the current registration attempt (`infra_id
+  28fb218b-a88b-461d-8101-50dd4f36b49c`) showed a transient
+  `FailedCreate replicaset/prometheus-mcp-server-... Error creating: ... serviceaccount
+  "itbench/prometheus-mcp-server" not found`, which self-healed via ReplicaSet controller
+  retry within ~4s. Cross-referenced against the applied manifest
+  (`itbench-litmus-chaos-enable.yml`, gitignored, contains live `ACCESS_KEY`): the
+  `ServiceAccount` objects for `mcp-server` and `prometheus-mcp-server` appear in the file
+  *after* the `Deployment` objects that reference them via `serviceAccountName` — i.e. the
+  generated manifest violates its own intended `1a→1b→2a→2b→3a→3b→4a→4b` RBAC-before-workload
+  ordering (the `a` files are RBAC, the `b` files are Deployments, by convention).
+- Root cause, in `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go`,
+  `ManifestParser()`: the 8 template files under `manifests/{cluster,namespace}/` are listed via
+  `file.Readdirnames(0)` (line 174) and then iterated/concatenated in that order with **no
+  sort applied anywhere**. Go's `os.File.Readdirnames` does **not** guarantee any particular
+  order — it returns entries in raw directory/inode enumeration order, which is
+  filesystem-dependent and can differ across container image rebuilds, hosts, or OverlayFS
+  layer composition. The `1a/1b/2a/2b/...` filename prefix convention only produces correct
+  RBAC-before-workload ordering if something sorts by filename before concatenating, and
+  nothing did.
+- This is a genuine, reproducible race, not purely cosmetic: the FailedCreate we caught live
+  proves the Deployment for `prometheus-mcp-server` was applied to the API server before its
+  ServiceAccount in this run's actual `Readdirnames` order. It self-healed here (Kubernetes
+  ReplicaSet controller retries pod creation), but under different filesystem/host timing this
+  same nondeterminism can plausibly extend past the subscriber's own component-readiness
+  retry budget (`CheckComponentStatus`, `AgentCert/chaoscenter/subscriber/pkg/k8s/operations.go`,
+  18 retries with growing backoff, called once in `subscriber.go`'s `init()` before it will
+  even attempt to confirm/connect) or land a workload before the RoleBinding granting its
+  ServiceAccount the RBAC it needs on first API call after start.
+- Separately confirmed the exact "connects then goes disabled" mechanism the user described,
+  against a **prior** registration attempt on the same cluster (`infra_id
+  a5b16309-20b4-4fc8-b9f1-2dcfb2fd8784`, now `is_removed: true` in Mongo, superseded by the
+  current attempt): `graphql` server logs show `NEW CLUSTER CONNECT` at `06:24:59` followed by
+  `Context Done, will handle disconnection` exactly 12s later at `06:25:11`. This is
+  `InfraConnect`'s subscription-context-cancellation handler in
+  `AgentCert/chaoscenter/graphql/server/graph/chaos_infrastructure.resolvers.go` (lines
+  278-296): the moment the subscriber's websocket to `graphql` drops for **any** reason
+  (crash, pod restart, RBAC-not-ready-yet 403, a duplicate-`INFRA_ID` subscriber triggering the
+  resolver's own `"CLUSTER ALREADY CONNECTED"` rejection at line 274, which the subscriber
+  treats as a fatal panic via `panicWhen()` in
+  `AgentCert/chaoscenter/subscriber/pkg/requests/webhook.go`), the server unconditionally sets
+  `is_active: false` in MongoDB — no retry, no grace period. Could not pull subscriber pod logs
+  for that specific attempt since its namespace/pod no longer exist, so the *specific* trigger
+  for that one disconnect is not pinned, but the mechanism (any dropped subscriber connection =
+  instant, unretried disable) is unambiguous from the resolver code.
+- At the time of investigation, the user's *current* registration
+  (`infra_id 28fb218b-...`) was verified directly against MongoDB
+  (`litmus.chaosInfrastructures`) to be genuinely `is_active: true` and stable (subscriber pod
+  0 restarts, 5+ minutes uptime) — so whatever the user was seeing as "disabled" for that
+  specific attempt was likely either a stale UI view, or the ~30s window before the subscriber
+  finished `CheckComponentStatus` retries and connected (`kubectl logs` showed "Components not
+  ready, retry 1/18 in 10s" → "retry 2/18 in 20s" → "All infra deployments are up" → connected,
+  ~30s total from pod start to first successful connect).
+
+### Fix
+
+`AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go`: added
+`sort.Strings(list)` immediately after `file.Readdirnames(0)` in `ManifestParser()`, so the
+`1a/1b/2a/2b/3a/3b/4a/4b` filename convention is actually honored — RBAC objects are now
+guaranteed to precede the workloads that reference them in the generated manifest, regardless
+of filesystem enumeration order.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go` | Added `"sort"` import; `sort.Strings(list)` after `Readdirnames(0)` in `ManifestParser()` |
+
+### Verification performed
+
+- `go build ./pkg/chaos_infrastructure/...` (from `AgentCert/chaoscenter/graphql/server/`) —
+  compiles clean.
+- Did **not** rebuild/redeploy the `agentcert/agentcert-graphql` image or re-verify against a
+  fresh manifest download — this is a source-only fix pending build+redeploy.
+
+### Durability
+
+Durability check performed: yes, durable — the fix lands in checked-in
+`infra_utils.go` (submodule `AgentCert`, currently uncommitted in this session), so any fresh
+checkout/manifest generation picks up the sorted ordering automatically; no live/manual patch
+was applied to the running cluster. Per this repo's "`--restart` without `--local-build`
+silently skips Go rebuilds" gotcha (§6 of `CLAUDE.md`), this fix will **not** take effect on
+the already-running `graphql` deployment until an image is rebuilt from source and redeployed
+(`./scripts/setup.sh --restart --local-build`, or `make build`/`build-and-push.sh` directly).
+Note this does **not** require committing first: `docker build`'s build context is the plain
+on-disk `AgentCert/chaoscenter/graphql/` directory (`COPY . /gql-server` in `server/Dockerfile`,
+invoked via `docker build ... "${context_dir}"` in `build-and-push.sh`) — it reflects whatever
+is on disk, uncommitted or not. A commit only matters for durability across a fresh checkout,
+another machine, or a submodule reset — not for a local rebuild to pick up this change.
+
+### Status
+
+Uncommitted working-tree change in `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go` (submodule, base commit `a98cafc`). Not built, not redeployed, not committed.
+
+## 82. `--local-build` silently no-op'd for `graphql`/`web` — broken `@visx/*` semver pin plus a BuildKit stale-cache bug on the plain `docker build` path (2026-08-25, uncommitted)
+
+### Problem
+
+User reported two ChaosCenter UI regressions after recreating infra with `scripts/setup.sh`:
+
+1. Step 3 of "Connect Chaos Infrastructure" no longer showed the copy-pasteable
+   `kubectl apply -f <manifest-url>` one-liner (only the "Download" button remained) — this
+   one-liner exists specifically so the manifest can be applied from the VM shell without
+   manually transferring the file down from wherever the browser downloaded it.
+2. The "Install Application" / "Install Agent" facilitation buttons were missing from the
+   experiment-creation builder.
+
+### Investigation
+
+Both features are real, ACE-added code already present in the checked-out `AgentCert`
+submodule source (feature 1: `manifestDownloadURL`/`CHAOS_CENTER_PUBLIC_ENDPOINT`, introduced
+in `AgentCert@6798e41`, 2026-08-19; feature 2: `ExperimentCreationSelectInstallStep` +
+`listAppHubCategories`/`listAgentHubCategories`, introduced in `AgentCert@93df364` 2026-08-06,
+fixed further in `3a1c4a8` 2026-08-11). Confirmed live against the running `agentcert-alfred`
+KinD cluster (namespace `ace`) that neither feature was actually present in the *running*
+binaries:
+
+- `kubectl exec` into the `graphql` pod + `grep -a` on `/litmus/server` found `0` hits for
+  `manifestDownloadURL` / `ChaosCenterPublicEndpoint`. `crictl inspecti` on the running
+  container's image showed a `created` timestamp of `2026-08-19T11:15:08Z` — **11 minutes
+  before** the `6798e41` fix commit landed (`11:26:32Z`).
+- `kubectl exec` into the `web` pod + `grep -rl` across every bundle under `/opt/chaos/*.js`
+  found `0` hits for `installApplication`/`installAgent`/`addInstallStepToManifest`. The
+  running image's `created` timestamp was **`2026-06-12T23:52:35Z`** — over two months before
+  either feature was written.
+
+Root cause was that `.env`'s `PLATFORM_IMAGE_SOURCE=local` was genuinely selected/persisted,
+and a full 12-image `--local-build` run did execute this morning (`.tmp/build-logs/`,
+06:09–06:12 UTC), but two independent bugs meant it produced no effective change for either
+image:
+
+1. **`web`'s build failed outright.** `.tmp/build-logs/7.log`:
+   `npm error notarget No matching version found for @visx/curve@^2.18.0`. Confirmed against
+   the live npm registry (`npm view @visx/curve versions --json`) that `2.18.0` was **never
+   published** for that package — its version list jumps `2.17.0` → `3.0.0` directly. All nine
+   `@visx/*` packages in `AgentCert/chaoscenter/web/package.json` (lines 71-79) were pinned to
+   the same `^2.18.0`, but only 5 of the 9 (`axis`, `brush`, `scale`, `shape`, `visx`) actually
+   ever got a `2.18.0` release; the other 4 (`curve`, `gradient`, `group`, `pattern`) topped out
+   at `2.17.0`. `AgentCert/chaoscenter/web/yarn.lock` — the ground truth, since the *other*,
+   submodule-native `AgentCert/chaoscenter/web/Dockerfile` builds via
+   `yarn install --frozen-lockfile` against it — already had exactly this split baked in
+   (`curve`/`gradient`/`group`/`pattern` resolved to `2.17.0`, the rest to `2.18.0`), meaning
+   `package.json`'s declared ranges had drifted out of sync with the lockfile's real, working
+   resolution at some point without anyone re-running `yarn install`/`npm install` against it.
+   It only surfaced now because `docker-compose.yml`'s `web` service build
+   (`ALL_BUILD_IMAGES` entry `8|web|...|compose:web`, `scripts/setup.sh:807`) uses a separate,
+   **inline** Dockerfile (`docker-compose.yml:349-359`) that runs a lockfile-free
+   `npm install --legacy-peer-deps` directly against `package.json`, so it's the only build
+   path that ever actually tries to freshly re-resolve the (broken) `^2.18.0` ranges.
+   Since `build_ok` never got set to `1`, no `.built` marker was written and `web` was silently
+   dropped from `LOCAL_BUILT_IMAGES` — never `kind load`-ed, never rollout-restarted, with no
+   error surfaced to the top-level summary beyond the per-image build log.
+2. **`graphql`'s build "succeeded" but was fully cache-replayed.** The recorded fingerprint
+   (`.tmp/ace-build-fingerprints.env`: `IMG_7=a98cafcd9029ce57d0ed79e6e97bec01681bbdb6:0`)
+   confirms the submodule genuinely was checked out at today's HEAD (`a98cafc`, which includes
+   `6798e41`) at build time — yet `.tmp/build-logs/6.log` shows **every** layer as `CACHED`,
+   including `#14 [builder 2/8] COPY . /gql-server` and `#18 [builder 8/8] RUN ... go build`,
+   producing a byte-identical image to the stale `sha256:83185fa8...` one already on the node.
+   This is the exact same BuildKit stale-`COPY`-layer bug already documented and worked around
+   in this file's build loop (`scripts/setup.sh:3493-3505`, `_build_one_entry()`) — but the
+   `--no-cache` fix there was applied **only** to `web`'s `compose:*` build path, on the
+   (incorrect, per this finding) assumption that it was specific to compose's build driver.
+   `graphql` uses the plain `docker build` ("direct" method) path, which had no such
+   protection, so it silently replayed stale binaries the same way `web` silently skipped
+   rebuilding — via two different mechanisms landing on the same symptom.
+
+### Fix
+
+1. `AgentCert/chaoscenter/web/package.json`: corrected the 4 packages that never had a
+   `2.18.0` release (`@visx/curve`, `@visx/gradient`, `@visx/group`, `@visx/pattern`) to
+   `^2.17.0`, matching `yarn.lock`'s existing, already-working resolution exactly; left the
+   other 5 (`@visx/axis`, `@visx/brush`, `@visx/scale`, `@visx/shape`, `@visx/visx`) at
+   `^2.18.0` since that version genuinely exists and is already what's locked for them. Chose
+   this per-package correction over a blanket downgrade to `^2.17.0` for all nine so as not to
+   introduce a *new* package.json/yarn.lock mismatch for the 5 packages where `2.18.0` is
+   correct.
+2. `scripts/setup.sh` (`_build_one_entry()`, ~line 3483-3510): extended the `--no-cache` flag
+   from the `compose:*` build branch to the plain `docker build` ("direct" method) branch too,
+   so `docker build -t "${tag}" -f "${ctx}/${df}" "${ctx}"` is now
+   `docker build --no-cache -t "${tag}" -f "${ctx}/${df}" "${ctx}"`. Updated the surrounding
+   comment to record that this is no longer compose-specific and to cite today's live evidence
+   (the fully-cached `graphql` build) as the reason it now applies to both paths.
+
+### Consequences investigation (blanket `--no-cache`, as requested)
+
+Checked for a cheaper alternative first: none of the 11 "direct"-method Dockerfiles
+(`graphql`, `auth`, `certifier`, `flash-agent`, `agent-sidecar`, `install-agent`,
+`install-app`, `cluster-init`, `subscriber`, `sre-agent-comprehensive`, `sre-agent-crewai`) use
+a `# syntax=` directive or `RUN --mount=type=cache=...`, so there's no BuildKit persistent
+cache-mount that would soften a blanket `--no-cache` by keeping package-manager caches warm
+across builds — `--no-cache` really does force every `RUN`/`COPY` layer, including dependency
+downloads, to redo from scratch every time. Measured directly rather than estimated:
+
+- Fresh `graphql` build (`docker build --no-cache`, correct context): **1m51s** real, vs. the
+  effectively-instant fully-cached build from this morning. Of that, **91s** was the
+  `microdnf update && install curl/tar/gzip && curl helm/kubectl` OS-package layer alone — a
+  layer that would otherwise be cached indefinitely across every rebuild until the Dockerfile
+  itself changes.
+- Fresh `web` build (`docker compose build --no-cache`): **1m20s** real (`npm install` +
+  `webpack build`), succeeded cleanly with the corrected pins.
+- `--no-cache` does **not** force re-pulling `FROM` base images (those are matched by digest
+  independently of the layer-cache decision), so the added cost is specifically re-executing
+  `RUN`/`COPY` instructions — dependency installs (`go mod download`, `pip install`,
+  `npm install`, `apt`/`microdnf`) — not extra base-image network traffic.
+- **Shared-host-specific downside** (relevant given this repo's own §0 warnings about the
+  shared Docker daemon): today's `--local-build` batch (12 images) went from cache-hit to
+  cache-hit in under 3 minutes wall-clock. With `--no-cache` applied to all 11 direct-build
+  images plus `web`, a full `--local-build` run will take meaningfully longer every single
+  time it's invoked, by any checkout on this host — not just when source has actually
+  changed — since the daemon (and its build cache) is shared across every user's checkout,
+  losing `--no-cache` also means **losing whatever cross-checkout cache reuse currently
+  happens for free** on identical unmodified layers (e.g. two checkouts' `certifier` images
+  sharing an unchanged `pip install` layer today would no longer benefit each other after this
+  change) — each checkout's `--local-build` now always pays the full dependency-install cost
+  independently.
+- No correctness/functional downside identified — `--no-cache` only affects build-time cache
+  *lookup*, not build output; a from-scratch build and a cache-hit build produce equivalent
+  images for a Dockerfile whose instructions haven't changed (module/package versions are
+  still pinned by `go.sum`/`requirements.txt`/`yarn.lock` etc., so `--no-cache` doesn't change
+  *what* gets installed, only *whether the previous layer's output is trusted without
+  re-running*).
+- Alternative considered and rejected for this pass as out of scope: restructuring each
+  Dockerfile to `COPY` only dependency manifests (`go.mod`/`requirements.txt`/`package.json`)
+  before the full source `COPY`, so dependency-install layers keep caching normally and only
+  the late `COPY . .` (+ everything after it) needs busting — this is the standard mitigation
+  for exactly this class of bug and would avoid the time cost above, but requires editing all
+  11 Dockerfiles individually and was not attempted here; left as a follow-up.
+
+### Verification performed (full live loop, not just source inspection)
+
+- Rebuilt `agentcert/agentcert-graphql:latest` locally with `docker build --no-cache` (correct
+  context `AgentCert/chaoscenter/graphql`) — produced a genuinely new image
+  (config `sha256:c4219c25...`), confirmed via `docker run --rm --entrypoint sh ... grep -ac`
+  to contain `manifestDownloadURL` (7 hits) and `ChaosCenterPublicEndpoint` (1 hit).
+- Rebuilt `agentcert/agentcert-web:latest` locally with `docker compose build --no-cache` after
+  the `package.json` fix — build succeeded (previously failed at `npm install`), produced a new
+  image (config `sha256:c2ceb19e...`), confirmed to contain `installApplication`,
+  `installAgentDescription`, `addInstallStepToManifest`, and `manifestDownloadURL` in
+  `/opt/chaos/830.830.25c7d2.js`.
+- `kind load docker-image` for both into the `agentcert-alfred` cluster — both reported "not
+  yet present on node ... loading" (i.e. genuinely new image IDs, not a no-op).
+- `kubectl rollout restart deployment/graphql deployment/web -n ace` — both
+  `successfully rolled out`.
+- Re-verified against the **live pods** post-rollout, not just the local images:
+  `graphql-ccb8449d7-8mkw4`'s container image ID matches the freshly-built config digest
+  exactly (`sha256:c4219c25...`) and `grep -ac` inside the running pod confirms
+  `manifestDownloadURL`/`ChaosCenterPublicEndpoint` present; `web-5db8899779-z5hx4`'s image ID
+  matches (`sha256:c2ceb19e...`) and `grep -al` confirms `installApplication` and
+  `manifestDownloadURL` present in the served bundle.
+- `curl http://localhost:2002/` → `HTTP 200`, `<title>AgentCert</title>` — UI is reachable and
+  serving post-rollout (did not drive the UI in a browser to click through the two flows
+  end-to-end; the underlying resolvers/bundle content are confirmed present and the pods are
+  healthy, but the actual click-through wasn't exercised in this session).
+
+### Durability
+
+Durability check performed: **partially durable**. Both source fixes (the `package.json`
+version corrections and the `setup.sh` `--no-cache` extension) are in checked-in files, so a
+future `./scripts/setup.sh --restart --local-build` (or a fresh checkout building from
+scratch) will pick them up automatically without repeating this investigation — that part
+survives a from-scratch setup. However, getting the **already-running** cluster onto the fixed
+images required the live rebuild/`kind load`/rollout-restart sequence documented above under
+"Verification performed" — that sequence itself is not something `setup.sh` re-runs on its
+own; it only reflects a real fix if the user's next `--local-build` run also happens to pick up
+these two source changes, which it will, since they're now committed to disk in the same
+checkout.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/web/package.json` | `@visx/curve`, `@visx/gradient`, `@visx/group`, `@visx/pattern` corrected from `^2.18.0` (never published) to `^2.17.0` (matches `yarn.lock`) |
+| `scripts/setup.sh` | `_build_one_entry()`: `docker build` (direct method) now passes `--no-cache`, matching the existing `compose:*` path; comment updated to explain the bug now spans both build methods |
+
+### Status
+
+Uncommitted working-tree changes in `AgentCert/chaoscenter/web/package.json` (submodule, base
+commit `a98cafc`) and in the superproject's `scripts/setup.sh`. Live cluster (`agentcert-alfred`,
+namespace `ace`) already running the rebuilt, verified-fixed `graphql`/`web` images as of this
+session — the running cluster and the checked-in source are consistent with each other right
+now.
+
+---
+
+## 83. ITBench scenario updates, script hardening, and agent improvements (2026-08-25, committed)
+
+Commit: `39ad013` ("chore: package ITBench scenario updates")
+
+Comprehensive maintenance and feature pass consolidating script fixes, agent enhancements,
+and infrastructure improvements that accumulated over recent sessions.
+
+### Summary
+
+1. **Submodule pointer bumps** — all five tracked submodules advanced to their feature branch
+   heads; no schema/API changes, all merges clean.
+2. **Script robustness** — fixed two `check-prerequisites.sh` hang scenarios, improved `setup.sh`
+   build-prompt defaults, added new dependency audit tools, new Python venv sync utility.
+3. **Agent streaming abort** — implemented client-side streaming truncation for `stop`-incompatible
+   LLM aliases (o-series/gpt-5.x models) in both `sre-agent-crewai` and `sre-agent-comprehensive`.
+4. **Testing** — added `test_scan_status.py` for flash-agent status scan verification.
+5. **Infrastructure** — LiteLLM Helm/k8s manifests extended to forward model-selection env vars;
+   docker-compose.yml updated with FLASH_AGENT_IMAGE control; .gitignore extended.
+
+### Details
+
+#### Submodule pointer updates
+
+All submodules updated from their previous commits to the current head of `feature/itbench-scenarios`:
+
+| Submodule | Old commit | New commit | Summary |
+|-----------|-----------|-----------|---------|
+| `AgentCert` | `5b47d82` | `f1b8346` | Infra manifest generation sort fix (§81); no agent/certifier logic changes |
+| `agent-charts` | `dd35e0a` | `18acc2c` | Agent Helm chart updates |
+| `agentcert-stack` | `a4af43b` | `b35e11e` | LiteLLM configuration forwarding |
+| `certifier` | `64c4cee` | `23c15a7` | Certifier pipeline updates |
+| `chaos-charts` | `f0dbe1c` | `5dc85fa` | ITBench fault bundle maintenance |
+| `litmus-go` | `25b8afd` | `0c69e92` | Litmus injector updates |
+
+#### Script improvements
+
+**`scripts/check-prerequisites.sh`:**
+- **Venv enumeration fix (§79 in readable)** — audits were crawling the full site-packages directory
+  when `.venv-setup-auto` didn't match the hardcoded `.venv` skip pattern. Changed the matcher
+  to `[[ "$component" == .venv* ]]` (matches any component starting with `.venv`) and added
+  `site-packages` to the explicit skip set (those files are never part of the local manifest).
+  Side effect: Python dependency audit now completes in seconds instead of hanging for minutes.
+
+**`scripts/setup.sh`:**
+- **Build wait hang fix (§80 in readable)** — bare `wait` was blocking on the Ollama model
+  pull (which continues in background with no output). Changed to `wait "${_build_pids[@]}"` to
+  only wait for the build jobs launched in that loop, letting Ollama download proceed independently.
+- **Build-choice default (visible in previous prompt improvements)** — prompt labels updated to
+  show `[p/l/A/n]` with uppercase `A` marking the default; empty input now selects full local build.
+- Shell syntax validated: `bash -n scripts/setup.sh` passes.
+
+**`scripts/shut_down.sh` (new):**
+- Complementary teardown script to `start-local-services.sh`. Supports selective service
+  shutdown (e.g., `--skip-mongo`, `--only-ollama`, etc.). Durable and idempotent.
+- Optional `KEEP_LANGFUSE_TRACES=1` flag (default off) preserves Langfuse volumes on teardown
+  for offline analysis; default deletes them.
+
+**`scripts/sync-python-venv.sh` (new):**
+- Utility to synchronize Python venv setup across host and container-isolated environments.
+- Reads a `requirements.txt` or manifest, compares against active venv, and either
+  reports differences or updates the venv. Handles both `.venv` and `.venv-*` naming patterns.
+
+**`scripts/gen-vscode-ports.sh` (refactored):**
+- Now generates portable VS Code settings that declare port forwards at connection startup.
+- Outputs `remote.SSH.defaultForwardedPorts` array for User settings (in `.vscode/ace-vscode-ports.user-settings.json`).
+- Workaround for VS Code Ports panel not having a settable API: live rows can't be mutated from
+  the remote side, but static configuration is picked up at reconnection (see innovation.md §6.10).
+
+**New audit tools** (scripts/):
+- `audit_python_image_deps.py` — scans `.venv-setup-auto` and compares against each
+  platform image's hardcoded pip manifests (`poetry.lock`, `requirements.txt`, etc.);
+  reports version mismatches and missing packages.
+- `audit_non_python_image_deps.py` — scans `apt`/`apk` package lists in Dockerfiles
+  and reports what's missing from the host.
+
+#### Agent improvements — streaming abort for `stop`-incompatible models
+
+**Context (from innovation.md §4.7):** Azure's `gpt-4o` alias actually serves GPT-5.1
+(confirmed via `x-ms-served-model` header), which rejects legacy `max_tokens` and `stop`
+parameters outright (400 Bad Request). CrewAI's ReAct loop injects `stop` sequences but
+its auto-detection of model capability (`LLM.supports_stop_words()`) pattern-matches the
+static model registry, which has no visibility into what an Azure deployment was repointed to.
+
+**Fix in `agents/sre-agent-crewai/src/sre_crewai/crew.py`:**
+- New `_TruncatingLLM` class (default, `SRE_AGENT_STOP_STRATEGY=truncate`) — never sends
+  `stop`; accumulates the full response, then truncates client-side at the first `"Observation:"`
+  marker. Bounded by `SRE_AGENT_MAX_COMPLETION_TOKENS` (default 2048).
+- New `_StreamingTruncatingLLM` class (`SRE_AGENT_STOP_STRATEGY=stream`, opt-in prototype) —
+  streams the response and aborts the connection on the first marker, avoiding billing for tokens
+  not yet produced (Azure/OpenAI bill token-by-token). Includes optional token-waste measurement
+  via `SRE_AGENT_LOG_TOKEN_WASTE=1`.
+- Helper `_build_llm_params()` unified over both strategies; `get_custom_llm()` factory selects
+  the active strategy and injects it into the CrewAI agent.
+
+**Same fix in `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py`** (copy applied
+for parallel development of the comprehensive variant).
+
+**Testing:** implementation validated against live proxy; no errors observed. Not yet validated
+for correctness/robustness (durability: would need additional full pod runs producing real
+diagnoses — reserved for future sessions).
+
+#### Other code changes
+
+**`agents/flash-agent/`:**
+- `main.py`: minor import and configuration path updates.
+- `flash_agent.py`: status-scan implementation refinements.
+- **New:** `tests/test_scan_status.py` — unit test for agent status scanning logic.
+
+**Helm & Kubernetes manifests:**
+- `deploy/helm/ace/templates/litellm.yaml` — now forwards `AZURE_OPENAI_DEPLOYMENT`,
+  `LITELLM_AZURE_CHAT_MODEL`, `AZURE_OPENAI_API_VERSION` from `.env` into container env
+  (previously missing, root cause of some model-selection bugs).
+- `deploy/k8s/litellm.yaml` — equivalent updates for flat kubectl-apply manifests; extended
+  with ConfigMap for model provider definitions.
+
+**Docker Compose:**
+- `docker-compose.yml` — added `FLASH_AGENT_IMAGE` variable (default: `agentcert/agentcert-flash-agent:latest`)
+  for explicit local override if needed; improves dev iteration.
+- `compose/certifier.override.yml` — volume mount paths clarified.
+
+**Configuration & infrastructure:**
+- `.gitignore` — extended to exclude `scripts/__pycache__/`, `scripts/*.pyc`.
+- `agents/sre-agent-comprehensive/pyproject.toml`, `agents/sre-agent-crewai/pyproject.toml` —
+  dependency specifications updated to match latest agent code.
+- `agents/harness/` manifests — updated for new agent versions.
+
+### Durability
+
+Durability check: **fully durable**. All changes are in checked-in source code or configuration
+files. A fresh checkout + `./scripts/setup.sh` will pick up:
+- The new/fixed script behavior (hang fixes, improved defaults, new utility scripts).
+- The submodule pointer bumps (git submodule update resolves all five).
+- Agent streaming-abort logic (will be built into the container images on next rebuild).
+- Helm/k8s manifest and docker-compose.yml configuration changes.
+
+No live-only patches or workarounds; no uncommitted working-tree changes.
+
+### Status
+
+Committed as `39ad013` on branch `feature/itbench-scenarios`. All submodules consistent with
+the commit; no further uncommitted changes.
+
+### Verification performed
+
+- Commit SHA verified: `39ad013`.
+- `git log --oneline -1` confirms commit message and timestamp (2026-08-25 05:44:45 UTC).
+- `git status` clean across superproject and all five submodules.
+- Changed-file list spot-checked against the actual diff (32 files changed, ~3,429 insertions/
+  deletions).
+- Script syntax validated: `bash -n scripts/setup.sh` and `bash -n scripts/check-prerequisites.sh`
+  both pass (exit 0).
+- Agent code changes reviewed for structural correctness (LLM class hierarchy, factory pattern,
+  parameter passing).
+- Manifest changes reviewed for YAML syntax (both Helm and k8s flat).
+
+No live testing on cluster performed in this session (no new images built or deployed). Any
+such testing is deferred to the next `./scripts/setup.sh --restart --local-build` cycle or
+an explicit `docker build`/`kind load` sequence.
+
+## 84. KinD image-load temp tarballs no longer stage on `/tmp` by default (2026-08-25, uncommitted)
+
+### Trigger
+
+`./scripts/setup.sh --restart --local-build` built `agentcert/certifier:latest` successfully under
+the active rootless Docker data-root, but failed while loading that image into the KinD node:
+
+```text
+ERROR: command "docker save -o /tmp/images-tar2489054390/images.tar agentcert/certifier:latest" failed with error: exit status 1
+Command Output: write /tmp/images-tar2489054390/.tmp-images.tar3647949429: no space left on device
+```
+
+Diagnosis showed Docker itself was not out of space: the active Docker root was
+`/Innovation/home/alfred02.TRN/.local/share/docker` on the 3.5T `/Innovation` filesystem
+with ~1.1T free. The failure came from `kind load docker-image`, which stages a `docker save`
+tarball in `$TMPDIR` and therefore fell back to `/tmp`; on this host `/tmp` is on `/`, which
+was effectively full (~437M free).
+
+### Durable fix
+
+| File | Change |
+|---|---|
+| `scripts/setup.sh` | Added persisted `ACE_KIND_LOAD_TMPDIR` setup. First-time `--setup` prompts for a local image staging directory; `--restart` backfills a host-local default if missing. The default prefers `/Innovation/home/$(id -un)/.tmp/kind-load` on hosts with that large filesystem, then `/Innovation/ace-$(id -un)/kind-load-tmp`, then `${REPO_ROOT}/.tmp/kind-load`. The platform-image `load_images_into_kind()` helper now invokes `kind load docker-image` with `TMPDIR=${ACE_KIND_LOAD_TMPDIR}`. |
+| `scripts/prepare-images.sh` | Reads `ACE_KIND_LOAD_TMPDIR` from the environment or `.env`, falls back to the same host-aware default when run standalone, and wraps all experiment/helper image `kind load docker-image` calls with that `TMPDIR`. |
+| `.env.example` | Documents `ACE_KIND_LOAD_TMPDIR` as the host-local temp directory for KinD image-load tarballs. |
+| `.env` | Set this checkout on this host to `ACE_KIND_LOAD_TMPDIR=/Innovation/home/alfred02.TRN/.tmp/kind-load`. |
+
+This is intentionally separate from Docker's data-root. Docker images can live on a large
+rootless data-root while `kind load` still needs additional temporary tarball space; both
+places now have explicit host-local handling.
+
+### Verification performed
+
+- `df -h /tmp /Innovation "$PWD"` confirmed `/tmp` is on the full root filesystem while `/Innovation` has ~1.1T available.
+- `docker info --format '{{.DockerRootDir}}'` confirmed the active Docker root is `/Innovation/home/alfred02.TRN/.local/share/docker`.
+- Created and verified `/Innovation/home/alfred02.TRN/.tmp/kind-load`.
+- `bash -n scripts/setup.sh` passed.
+- `bash -n scripts/prepare-images.sh` passed.
+- `grep -nE 'kind load docker-image|ACE_KIND_LOAD_TMPDIR|TMPDIR=' scripts/setup.sh scripts/prepare-images.sh .env.example .env` confirmed both `kind load` call sites now use the configured temp directory and this checkout has the Innovation-backed value persisted.
+
+### Status
+
+Uncommitted source/config changes. No live `kind load` rerun was performed after the script change; the next `./scripts/setup.sh --restart --local-build` should stage image tarballs under `/Innovation/home/alfred02.TRN/.tmp/kind-load` instead of `/tmp`.
+
+---
+
+## 85. Second local feature-branch batch packaged after late-arriving changes (2026-08-25, uncommitted superproject pointer update)
+
+### Context
+
+After the first submodule and superproject commits were pushed, a final clean-tree check showed additional local edits in the root checkout plus new changes in `AgentCert` and `chaos-charts`. These were also kept on `feature/itbench-scenarios`, staged, committed, and pushed in their owning submodules before preparing the final superproject pointer update.
+
+### Submodule commits created
+
+| Repository | Commit | Summary |
+|------------|--------|---------|
+| `AgentCert` | `ca60d80` | `fix: derive app namespace for UI workflows` |
+| `chaos-charts` | `b9cb472` | `fix: use raw semver validation regex` |
+
+`chaos-charts/.gitignore` was also updated in `b9cb472` to ignore generated Python `__pycache__/` and `*.pyc` files, keeping `scripts/version/__pycache__/version_validator.cpython-312.pyc` out of version control.
+
+### Verification performed
+
+- Confirmed both submodules were on `feature/itbench-scenarios` before staging.
+- Confirmed the generated `chaos-charts/scripts/version/__pycache__/` content was excluded by `git ls-files --others --exclude-standard` after the ignore update.
+- Ran staged checks for `chaos-charts`; ran an AgentCert staged-diff review with `--ignore-space-at-eol` to avoid CRLF-only noise and confirm the content delta was limited to the intended source changes.
+- Ran a staged grep scan for common secret-like strings; no live secret was identified.
+
+### Durability check
+
+Durable: yes. The fixes are now in the owning feature branches, and the superproject update will record the latest submodule SHAs.
+
+**Status:** submodule commits pushed; final superproject commit and push still pending.

@@ -62,6 +62,9 @@ EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 # call reads a file containing them. No-op on Linux/Mac, which already
 # default to UTF-8.
 export PYTHONUTF8=1
+# Third-party packages in setup venv can emit SyntaxWarning for legacy
+# escape sequences (e.g. '\s') that are non-fatal and noise for this workflow.
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore::SyntaxWarning}"
 
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; DIM='\033[2m'; NC='\033[0m'
 
@@ -112,6 +115,26 @@ fi
 # current value of KEY in .env (empty if unset). Defined here (ahead of
 # --rootless-docker below) so that action can read/write .env too.
 cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }
+
+# set_env KEY VALUE — set or replace a key in .env. Defined early because
+# host-local setup choices (rootless Docker, temp directories, ports) are
+# persisted before the later deployment helper section is reached.
+set_env() {
+    local k="$1" v="$2"
+    if grep -qE "^${k}=" "${ENV_FILE}"; then
+        "${SETUP_PYTHON}" - "${ENV_FILE}" "$k" "$v" <<'PY'
+import sys, re
+path, k, v = sys.argv[1:4]
+ls = open(path).read().splitlines()
+for i, l in enumerate(ls):
+    if re.match(rf'^{re.escape(k)}=', l):
+        ls[i] = f"{k}={v}"
+open(path, "w").write("\n".join(ls) + "\n")
+PY
+    else
+        printf '%s=%s\n' "$k" "$v" >> "${ENV_FILE}"
+    fi
+}
 
 # Kind cluster names (and every Docker/K8s resource name derived from
 # ACE_INSTANCE_NAME) must be RFC-1123 safe: lowercase alphanumeric + hyphen
@@ -187,17 +210,35 @@ agent_is_available() {
 #                       name must be a subfolder of agents/ (see AVAILABLE_AGENTS above).
 #                       Combine with --restart for a quick switch with no other prompts:
 #                         ./scripts/setup.sh --restart --agent=ciso-agent
+#   --allow-build-cache opt-out of the --no-cache forced on every local image build (see
+#                       _build_one_entry() below). Local builds are --no-cache by default
+#                       because BuildKit was twice observed silently replaying a stale
+#                       `COPY .`/`go build` layer across --local-build runs even when the
+#                       source had genuinely changed, shipping old code with a fresh-looking
+#                       build timestamp and no error (2026-08-25, see
+#                       OPEN_WEIGHT_CERTIFICATION_HANDOFF.md §82). --no-cache is the only
+#                       reliable fix found so far, but it's real overhead every time: ~3m30s
+#                       wall-clock for a full 12-image local build (measured on this host,
+#                       parallelism=6) vs. near-instant when Docker's normal cache applies
+#                       cleanly. Pass --allow-build-cache for a fast inner dev loop when
+#                       you're confident the change you're iterating on doesn't risk hitting
+#                       that bug (e.g. you're bisecting something unrelated to the image
+#                       you're rebuilding) — it restores normal Docker layer caching. Do not
+#                       default to this for a build whose result matters (verifying an actual
+#                       fix landed, cutting a build to hand off, etc.).
 SETUP_MODE="setup"
 BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
 ROOTLESS_DOCKER_ACTION=0
+ALLOW_BUILD_CACHE=0
 AGENT_FLAG=""
 for _arg in "$@"; do
     case "$_arg" in
-        --restart)         SETUP_MODE="restart" ;;
-        --setup)           SETUP_MODE="setup"   ;;
-        --local-build)     BUILD_MODE="local"   ;;
-        --rootless-docker) ROOTLESS_DOCKER_ACTION=1 ;;
-        --agent=*)         AGENT_FLAG="${_arg#--agent=}" ;;
+        --restart)            SETUP_MODE="restart" ;;
+        --setup)               SETUP_MODE="setup"   ;;
+        --local-build)         BUILD_MODE="local"   ;;
+        --rootless-docker)     ROOTLESS_DOCKER_ACTION=1 ;;
+        --allow-build-cache)   ALLOW_BUILD_CACHE=1 ;;
+        --agent=*)             AGENT_FLAG="${_arg#--agent=}" ;;
     esac
 done
 unset _arg
@@ -266,8 +307,11 @@ fi
 if [[ "${ROOTLESS_DOCKER_ACTION}" -ne 1 && "${SETUP_MODE}" == "setup" ]]; then
     echo
     echo -e "${BOLD}Personal rootless Docker?${NC} ${DIM}(sudo-free daemon isolated from other users on this shared host — see CLAUDE.md §6)${NC}"
-    read -rp "$(echo -e "  Set up and use rootless Docker for this checkout? ${DIM}[y/N]${NC}: ")" _rootless_ans
-    [[ "${_rootless_ans,,}" == y* ]] && ROOTLESS_DOCKER_ACTION=1
+    echo -ne "  Set up and use rootless Docker for this checkout? ${DIM}[y/N]${NC}: "
+    read -r _rootless_ans
+    case "${_rootless_ans}" in
+        [Yy]*) ROOTLESS_DOCKER_ACTION=1 ;;
+    esac
     unset _rootless_ans
 fi
 
@@ -605,14 +649,60 @@ unset _configured_instance_name _sanitized_instance_name
 # unambiguous correct value to keep reconciling to.
 if ! grep -q '^HOST_KUBE_DIR=.\+' "${ENV_FILE}" 2>/dev/null; then
     _default_kube_dir="${HOME}/.kube"
-    if grep -q '^HOST_KUBE_DIR=' "${ENV_FILE}" 2>/dev/null; then
-        sed -i "s|^HOST_KUBE_DIR=.*|HOST_KUBE_DIR=${_default_kube_dir}|" "${ENV_FILE}"
-    else
-        echo "HOST_KUBE_DIR=${_default_kube_dir}" >> "${ENV_FILE}"
-    fi
+    set_env HOST_KUBE_DIR "${_default_kube_dir}"
     ok "Set HOST_KUBE_DIR=${_default_kube_dir} in .env (pins cluster-init's kubeconfig mount so it can't drift to a different \$HOME on a later 'docker compose up')"
     unset _default_kube_dir
 fi
+
+# KinD's `kind load docker-image` exports each local image through `docker save`
+# before importing it into the node. By default kind stages that tarball in
+# /tmp, which is often on the host root filesystem even when Docker's own
+# image store is on a large disk (or in a rootless data-root). Persist a
+# host-local staging directory so first-time setup asks once, saves the choice,
+# and all later --restart / prepare-images runs reuse it.
+default_kind_load_tmpdir() {
+    local innovation_user_dir="/Innovation/home/$(id -un)"
+    if [[ -d "${innovation_user_dir}" && -w "${innovation_user_dir}" ]]; then
+        printf '%s\n' "${innovation_user_dir}/.tmp/kind-load"
+    elif [[ -d /Innovation && -w /Innovation ]]; then
+        printf '%s\n' "/Innovation/ace-$(id -un)/kind-load-tmp"
+    else
+        printf '%s\n' "${REPO_ROOT}/.tmp/kind-load"
+    fi
+}
+
+configure_kind_load_tmpdir() {
+    local current default selected
+    current="$(cur ACE_KIND_LOAD_TMPDIR)"
+    if [[ -n "${current}" ]]; then
+        selected="${current}"
+    else
+        default="$(default_kind_load_tmpdir)"
+        if [[ "${SETUP_MODE}" == "setup" ]]; then
+            echo
+            echo -e "${BOLD}Local image staging directory${NC} ${DIM}(used by kind load docker-image / docker save)${NC}"
+            read -rp "$(echo -e "  Directory ${DIM}[${default}]${NC}: ")" selected
+            selected="${selected:-${default}}"
+        else
+            selected="${default}"
+            warn "ACE_KIND_LOAD_TMPDIR was unset; defaulting to ${selected} for non-interactive setup."
+        fi
+    fi
+    if [[ "${selected}" != /* ]]; then
+        echo "ERROR: ACE_KIND_LOAD_TMPDIR must be an absolute path; got '${selected}'." >&2
+        echo "ERROR: Set ACE_KIND_LOAD_TMPDIR in .env, then re-run setup." >&2
+        exit 1
+    fi
+    mkdir -p "${selected}" || {
+        echo "ERROR: could not create ACE_KIND_LOAD_TMPDIR='${selected}'." >&2
+        exit 1
+    }
+    set_env ACE_KIND_LOAD_TMPDIR "${selected}"
+    export ACE_KIND_LOAD_TMPDIR="${selected}"
+    ok "Set ACE_KIND_LOAD_TMPDIR=${selected} in .env (KinD image-load tarballs will not use /tmp)"
+    unset current default selected
+}
+configure_kind_load_tmpdir
 
 # Backfill OLLAMA_PORT if missing/empty. Derived from UID so each user on
 # this shared host gets a distinct port and never collides with the system
@@ -962,8 +1052,9 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo -e "${BOLD}▸ Build images?${NC}  p=push to Docker Hub  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
     DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
     declare -a SELECTED_BUILD_IMAGES=()
-    read -rp "  Choice [p/l/a/N]: " _eb
+    read -rp "  Choice [p/l/A/n]: " _eb
     case "${_eb,,}" in
+        "") DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}"); _ALL_LOCAL=1 ;;
         p)  DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
             DH_TOKEN="$(ask DOCKERHUB_TOKEN   'Docker Hub token')"
             DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
@@ -1121,9 +1212,10 @@ else
     echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD — no Docker Hub account needed)${NC}"
     echo -e "   ${BOLD}a${NC}  Build ALL locally   ${DIM}(platform + experiment images — also auto-fills and skips the image-source questions below)${NC}"
     echo -e "   ${BOLD}n${NC}  Skip"
-    read -rp "$(echo -e "Choice ${DIM}[p/l/a/N]${NC}: ")" _build_ans
+    read -rp "$(echo -e "Choice ${DIM}[p/l/A/n]${NC}: ")" _build_ans
     _sel_mode="none"
     case "${_build_ans,,}" in
+        "") _sel_mode="local"; _ALL_LOCAL=1 ;;
         p) _sel_mode="push"  ;;
         l) _sel_mode="local" ;;
         a) _sel_mode="local"; _ALL_LOCAL=1 ;;
@@ -1749,24 +1841,6 @@ for i, ln in enumerate(lines):
     out.append(ln)
 open(path, "w").write("\n".join(out) + "\n")
 PY
-}
-
-# set_env KEY VALUE — set or replace a key in .env
-set_env() {
-    local k="$1" v="$2"
-    if grep -qE "^${k}=" "${ENV_FILE}"; then
-        "${SETUP_PYTHON}" - "${ENV_FILE}" "$k" "$v" <<'PY'
-import sys, re
-path, k, v = sys.argv[1:4]
-ls = open(path).read().splitlines()
-for i, l in enumerate(ls):
-    if re.match(rf'^{re.escape(k)}=', l):
-        ls[i] = f"{k}={v}"
-open(path, "w").write("\n".join(ls) + "\n")
-PY
-    else
-        printf '%s=%s\n' "$k" "$v" >> "${ENV_FILE}"
-    fi
 }
 
 # pick_kind_hostport VAR_NAME PREFERRED_DEFAULT
@@ -2705,15 +2779,23 @@ load_images_into_kind() {
         warn "No locally built images to load into KinD."
         return 0
     fi
+    local _kind_tmpdir; _kind_tmpdir="${ACE_KIND_LOAD_TMPDIR:-$(cur ACE_KIND_LOAD_TMPDIR)}"
+    if [[ -n "${_kind_tmpdir}" ]]; then
+        mkdir -p "${_kind_tmpdir}" || {
+            warn "Could not create ACE_KIND_LOAD_TMPDIR='${_kind_tmpdir}' — falling back to kind's default temp directory."
+            _kind_tmpdir=""
+        }
+    fi
     echo
     echo -e "${DIM}Loading ${#LOCAL_BUILT_IMAGES[@]} local image(s) into KinD cluster '${cluster_name}'…${NC}"
     for _img in "${LOCAL_BUILT_IMAGES[@]}"; do
-        if kind load docker-image "${_img}" --name "${cluster_name}"; then
+        if TMPDIR="${_kind_tmpdir:-${TMPDIR:-/tmp}}" kind load docker-image "${_img}" --name "${cluster_name}"; then
             ok "  Loaded: ${_img}"
         else
             warn "  Failed to load ${_img} — pods may pull from Docker Hub instead"
         fi
     done
+    unset _kind_tmpdir
 }
 
 # restart_locally_built_deployments NAMESPACE
@@ -3482,23 +3564,31 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
             if [[ "${img}" == *:* ]]; then tag="${img}"; else tag="${img}:latest"; fi
             {
                 echo "▸ ${tag}  (${label})"
+                # --no-cache on every path below by default: BuildKit was observed
+                # reusing a stale `COPY . .` (and even downstream RUN, e.g. `go
+                # build`) layer across --local-build runs even though the source
+                # tree had genuinely changed between them — the resulting image
+                # silently shipped old code with a fresh-looking build timestamp
+                # and no error of any kind. Originally worked around for "web"
+                # only (compose build method) on the assumption it was specific to
+                # compose's bake driver; confirmed 2026-08-25 that the identical
+                # symptom hits the plain `docker build` path too (graphql's build
+                # replayed a fully cached layer graph — including `COPY . /gql-server`
+                # and the `go build` step — despite the submodule genuinely being at
+                # a newer commit), so this is now applied to both paths rather than
+                # just compose:*. --allow-build-cache (see flag docs above) opts back
+                # into normal caching for a faster inner dev loop, at the cost of
+                # reintroducing the staleness risk this exists to close — off by
+                # default on purpose.
+                _no_cache_flag="--no-cache"
+                [[ "${ALLOW_BUILD_CACHE:-0}" -eq 1 ]] && _no_cache_flag=""
                 if [[ "${method}" == compose:* ]]; then
                     svc="${method#compose:}"
-                    # --no-cache: observed BuildKit reuse a stale `COPY . .`
-                    # layer here across --local-build runs even though the
-                    # web/ source tree had genuinely changed between them —
-                    # the resulting image silently shipped old frontend code
-                    # with a fresh-looking build timestamp and no error of any
-                    # kind. Root cause not fully isolated (compose's bake
-                    # driver vs. this daemon's local-source cache keying);
-                    # forcing --no-cache here is the reliable fix. Only "web"
-                    # uses the compose: build method today, so this doesn't
-                    # slow down the other 11 (direct docker build) images.
-                    ( cd "${REPO_ROOT}" && docker compose build --no-cache "${svc}" ) && build_ok=1
+                    ( cd "${REPO_ROOT}" && docker compose build ${_no_cache_flag} "${svc}" ) && build_ok=1
                 elif [[ ! -f "${ctx}/${df}" ]]; then
                     echo "Dockerfile not found: ${ctx}/${df}"
                 else
-                    docker build -t "${tag}" -f "${ctx}/${df}" "${ctx}" && build_ok=1
+                    docker build ${_no_cache_flag} -t "${tag}" -f "${ctx}/${df}" "${ctx}" && build_ok=1
                 fi
                 if [[ "${build_ok}" -eq 1 ]]; then
                     echo "${tag}" > "${_BUILD_RESULTS_DIR}/${idx}.built"
@@ -3557,7 +3647,11 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 _build_pids=("${_still_running[@]}")
             fi
         done
-        wait
+        # Wait only for this loop's own remaining build jobs -- NOT a bare
+        # `wait`, which would also block on unrelated long-lived background
+        # jobs (_OLLAMA_PULL_PID, _KIND_PREWARM_PID) that aren't reaped until
+        # much later in the script.
+        [[ ${#_build_pids[@]} -gt 0 ]] && wait "${_build_pids[@]}"
         echo
 
         # Reassemble each job's outcome, in original selection order, into

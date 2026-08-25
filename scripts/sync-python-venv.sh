@@ -8,6 +8,7 @@ VENV_PATH="${REPO_ROOT}/.venv"
 DRY_RUN=0
 LOG_DIR="${REPO_ROOT}/.tmp/prereq"
 LOG_FILE="${LOG_DIR}/python-venv-sync.log"
+PY_WARNING_FILTER="${PYTHONWARNINGS:-ignore::SyntaxWarning}"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -76,7 +77,7 @@ run_quiet_step() {
         printf '\n'
     } >> "${LOG_FILE}"
 
-    if ! "${cmd[@]}" >> "${LOG_FILE}" 2>&1; then
+    if ! PYTHONWARNINGS="${PY_WARNING_FILTER}" "${cmd[@]}" >> "${LOG_FILE}" 2>&1; then
         local rc=$?
         finish_progress_line
         echo "ERROR: dependency install step failed: ${label}" >&2
@@ -95,7 +96,7 @@ REQ_FILES_TMP="$(mktemp)"
 PYPROJECT_DEPS_TMP="$(mktemp)"
 trap 'rm -f "${REQ_FILES_TMP}" "${PYPROJECT_DEPS_TMP}"' EXIT
 
-"${VENV_PYTHON}" - "${REPO_ROOT}" "${REQ_FILES_TMP}" "${PYPROJECT_DEPS_TMP}" <<'PY'
+PYTHONWARNINGS="${PY_WARNING_FILTER}" "${VENV_PYTHON}" - "${REPO_ROOT}" "${REQ_FILES_TMP}" "${PYPROJECT_DEPS_TMP}" <<'PY'
 from __future__ import annotations
 
 from pathlib import Path
@@ -159,8 +160,14 @@ done
 
 if [[ -s "${PYPROJECT_DEPS_TMP}" ]]; then
     CURRENT_STEP=$((CURRENT_STEP + 1))
+    # Pyproject dependency entries across the whole monorepo are often broad
+    # (un-pinned) and combine many unrelated stacks. Asking pip to resolve the
+    # full transitive closure in one shot can trigger "resolution-too-deep".
+    # Requirements manifests above already install transitive/runtime deps for
+    # the concrete app stacks; here we only ensure declared top-level packages
+    # are present in this setup venv.
     run_quiet_step "${CURRENT_STEP}" "${TOTAL_STEPS}" "pyproject.toml dependencies" \
-        "${VENV_PIP}" install --disable-pip-version-check --progress-bar off -r "${PYPROJECT_DEPS_TMP}"
+        "${VENV_PIP}" install --disable-pip-version-check --progress-bar off --no-deps -r "${PYPROJECT_DEPS_TMP}"
 fi
 
 finish_progress_line

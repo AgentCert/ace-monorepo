@@ -13,6 +13,7 @@
 #   JFROG_HOST, JFROG_REGISTRY_PATH, JFROG_USER, JFROG_TOKEN
 #   KIND_CLUSTER_NAME, ACE_INSTANCE_NAME
 #   APP_CHARTS_ROOT, AGENT_CHARTS_ROOT  (set by setup.sh to absolute paths)
+#   ACE_KIND_LOAD_TMPDIR                (set by setup.sh; temp dir for kind load tarballs)
 #
 # For "local":
 #   install-app / install-agent  — docker build from source + kind load
@@ -58,6 +59,18 @@ JFROG_TOKEN="$(cur JFROG_TOKEN)"
 
 APP_CHARTS_ROOT="$(cur APP_CHARTS_ROOT)"; APP_CHARTS_ROOT="${APP_CHARTS_ROOT:-${REPO_ROOT}/app-charts}"
 AGENT_CHARTS_ROOT="$(cur AGENT_CHARTS_ROOT)"; AGENT_CHARTS_ROOT="${AGENT_CHARTS_ROOT:-${REPO_ROOT}/agent-charts}"
+ACE_KIND_LOAD_TMPDIR="${ACE_KIND_LOAD_TMPDIR:-$(cur ACE_KIND_LOAD_TMPDIR)}"
+if [[ -z "${ACE_KIND_LOAD_TMPDIR}" ]]; then
+    if [[ -d "/Innovation/home/$(id -un)" && -w "/Innovation/home/$(id -un)" ]]; then
+        ACE_KIND_LOAD_TMPDIR="/Innovation/home/$(id -un)/.tmp/kind-load"
+    elif [[ -d /Innovation && -w /Innovation ]]; then
+        ACE_KIND_LOAD_TMPDIR="/Innovation/ace-$(id -un)/kind-load-tmp"
+    else
+        ACE_KIND_LOAD_TMPDIR="${REPO_ROOT}/.tmp/kind-load"
+    fi
+    warn "ACE_KIND_LOAD_TMPDIR is unset; using ${ACE_KIND_LOAD_TMPDIR}. Run scripts/setup.sh to persist a host-local choice."
+fi
+export ACE_KIND_LOAD_TMPDIR
 
 # Resolve KinD cluster name (mirrors logic in setup.sh / ensure_kind_cluster)
 KIND_CLUSTER_NAME="$(cur KIND_CLUSTER_NAME)"
@@ -91,7 +104,11 @@ image_already_built() {
 kind_load() {
     local img="$1"
     if kind get clusters 2>/dev/null | grep -qxF "${KIND_CLUSTER_NAME}"; then
-        if kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"; then
+        mkdir -p "${ACE_KIND_LOAD_TMPDIR}" || {
+            warn "Could not create ACE_KIND_LOAD_TMPDIR='${ACE_KIND_LOAD_TMPDIR}' — falling back to kind's default temp directory"
+            ACE_KIND_LOAD_TMPDIR=""
+        }
+        if TMPDIR="${ACE_KIND_LOAD_TMPDIR:-${TMPDIR:-/tmp}}" kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"; then
             ok "kind load: ${img} → cluster '${KIND_CLUSTER_NAME}'"
         else
             warn "kind load failed for ${img} — pods will pull from registry at runtime"

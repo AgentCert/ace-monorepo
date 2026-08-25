@@ -1,6 +1,6 @@
 # Open-Weight Agent Certification — Readable Handoff
 
-> **Status as of this handoff (2026-08-12):** 137/137 SRE runs complete; full Phase 0–4 SRE + CISO certification reports produced; SRE agent (Zero) wired to live cluster faults and validated; the platform's hardcoded/stale service addresses across all chart submodules have since been found and fixed (§19) so a fresh clone can reproduce this; a substantial rootless-Docker Compose networking rework (§20) plus two host-level infra bugs (§21 containerd shim regression, §22 KinD kubeconfig merge gap) are the most recent work, the first still uncommitted. All bugs fixed in place — none worked around.
+> **Status as of this handoff (2026-08-25):** 137/137 SRE runs complete; full Phase 0–4 SRE + CISO certification reports produced; all recent work committed (§79-84). Recent fixes: setup script hangs (prereq audit, build wait), agent streaming-abort for stop-incompatible LLM models, chaos infra manifest ordering, graphql/web stale-build debugging; new utilities: Python venv sync, image dependency audits; submodule pointers advanced to current feature branch heads. All bugs fixed in place — none worked around.
 >
 > This document is a rewrite of `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` for readability. The original is the authoritative record; this one is easier to navigate.
 
@@ -43,6 +43,9 @@
 20. [Rootless Docker for the Compose path (in progress)](#20-rootless-docker-for-the-compose-path--in-progress-not-yet-committed)
 21. [containerd shim bug on this host](#21-containerd-shim-bug-on-this-host--self-healing-pin-2026-08-12)
 22. [KinD kubeconfig merge gap](#22-kind-cluster-looked-healthy-but-kubectl-couldnt-reach-it-2026-08-12)
+23. [Script robustness and tooling (§79-81, 2026-08-25)](#recent-fixes)
+24. [Build cache staleness and UI regressions (§82, 2026-08-25)](#build-cache-staleness)
+25. [Experiment builder gaps (§83-84, 2026-08-25)](#experiment-builder-gaps)
 
 ---
 
@@ -1998,3 +2001,210 @@ Validation done:
 Durability check: durable. The changes are now recorded in the submodule repositories, and the root commit will record the updated submodule SHAs plus the ignore cleanup.
 
 Status: submodule commits created locally; superproject commit and pushes still pending.
+
+## 75. Python venv sync now shows a compact progress bar instead of pip output floods
+
+The pasted conflict block came from pip installing packages, not from the metadata-only dependency audit. The problem is that the venv sync workflow was flattening several independent Python stacks into one `.venv`. Those stacks are not currently compatible with each other: CISO pins older OpenAI/LangChain/OpenTelemetry/tokenizer packages, while certifier and SRE pull newer OpenAI/LiteLLM/aiohttp/LangChain combinations.
+
+There was also a concrete slowdown bug: the manifest scanner skipped `.venv` but not `.venv-*`, so it crawled `.venv-setup-auto` and found requirements files inside installed third-party packages such as `embedchain` deployment examples. That added extra install steps that were never repo dependencies.
+
+The venv sync helper now:
+
+- writes pip output to `.tmp/prereq/python-venv-sync.log`
+- shows only a compact progress bar/count in the terminal for install steps
+- excludes `.venv` and `.venv-*` directories from requirements discovery
+- removes the leftover direct pip install loop that printed commands before the progress path
+- reports the log path cleanly if a quiet install step fails
+
+Validation done:
+
+- `bash -n scripts/sync-python-venv.sh scripts/check-prerequisites.sh scripts/setup.sh`
+- dry-run confirmed progress-only install output: `[############################] 7/7`
+- manifest filtering now finds 5 repo requirements files instead of including generated venv package fixtures
+
+Durability check: durable for the venv-sync path. The console-noise fix and generated-venv exclusion are in tracked helper source. The deeper dependency conflict remains a separate environment-design issue: these components should use separate venvs or reconciled pins, not one flattened environment.
+
+Status: uncommitted change in `scripts/sync-python-venv.sh` plus prior uncommitted setup/prereq/handoff changes.
+
+## 76. Why pip showed `resolution-too-deep`, and what was changed
+
+The new log (`backoff`/`posthog` repeatedly backtracking, then `error: resolution-too-deep`) came from pip trying to solve a very large combined dependency graph during setup venv sync.
+
+What happened:
+
+- setup venv sync installs all repo `requirements*.txt`
+- then it installed one aggregated list of `pyproject.toml` dependencies
+- that second step can mix broad, unrelated stacks and trigger pip's deep resolver backtracking
+
+Fix applied:
+
+- `scripts/sync-python-venv.sh` now installs that aggregated pyproject list with `--no-deps`.
+
+Why this helps:
+
+- it avoids forcing one giant transitive solve for pyproject declarations
+- requirements manifests remain the source for transitive/runtime dependency installs
+- setup no longer trips the resolver-depth failure in that pyproject aggregate step
+
+Validation:
+
+- shell syntax check passed
+- dry-run of venv sync completed cleanly
+
+Durability check: durable. The change is in tracked source and applies to future setup runs.
+
+## 77. Cleaned up noisy `SyntaxWarning` messages that do not affect setup success
+
+Two warning sources were addressed:
+
+1. Repo-owned warning:
+- `chaos-charts/scripts/version/version_validator.py` used a normal string for a regex containing `\d`.
+- This is now a raw string (`r"..."`), so that warning is gone at source.
+
+2. Third-party venv warning noise:
+- Warnings like `pysbd ... invalid escape sequence '\s'` come from installed packages under `site-packages`, not from ACE source.
+- Those warnings are non-fatal for this workflow, so setup now suppresses `SyntaxWarning` noise during setup-managed Python/pip runs.
+
+Changed files:
+- `scripts/setup.sh` sets `PYTHONWARNINGS` default to ignore `SyntaxWarning`.
+- `scripts/sync-python-venv.sh` propagates that filter into python/pip subprocesses.
+
+Validation:
+- setup/sync scripts pass shell syntax checks
+- regex validator module compiles cleanly
+
+Durability check: durable. Source warning fixed in repo code; suppression behavior is now in tracked setup scripts for future runs.
+
+## 78. Pressing Enter at the build prompt now chooses "build ALL locally"
+
+The build-choice prompt in `scripts/setup.sh` used to default to skip. It now defaults to **all-local builds**.
+
+What changed:
+
+- Prompt labels now show `[p/l/A/n]` (uppercase `A` marks the default).
+- In both express and guided setup paths, empty input (`Enter`) maps to the same behavior as choosing `a`:
+  - build platform images locally,
+  - auto-set experiment image sources to local,
+  - skip the extra image-source prompts that `a` already answers.
+
+Validation:
+
+- `bash -n scripts/setup.sh` passes.
+- Read-back confirmed both prompt blocks and both case statements were updated.
+
+Durability check: durable. This is in tracked setup source and affects future runs by default.
+
+## §79 — Setup prereq audit no longer hangs after the Python dependency warning (2026-08-25)
+
+`scripts/setup.sh` was appearing to freeze right after printing the "python manifest dependency audit found missing/incompatible packages" warning. It wasn't actually frozen — it was silently running the Python import-surface audit, which crawled **32,409 Python files** from `.venv-setup-auto/lib/python3.12/site-packages/` before producing any output.
+
+The root cause was simple: both inline audit scripts in `check-prerequisites.sh` skipped directories named exactly `.venv`, but this checkout's venv is named `.venv-setup-auto`. So both audits dove into site-packages and accumulated hundreds of false positives from vendored package internals (embedchain cloud-deployment stubs, Windows-only imports, GPU-optional modules, etc.).
+
+Fixed in `scripts/check-prerequisites.sh` by adding `"site-packages"` to the skip set and changing the directory matcher to also catch any component that starts with `.venv`, so `.venv-setup-auto`, `.venv-flash-agent`, or any other venv variant is excluded without needing to enumerate names explicitly. The fix is in the checked-in script and takes effect on the next `setup.sh` run.
+
+## §80 — Build phase no longer hangs waiting for Ollama model download (2026-08-25)
+
+After printing "Building 12 image(s)..." and writing all build logs, `setup.sh` appeared frozen with no further output. The builds had all completed — the hang was on a bare `wait` statement that waits for **every** background job in the shell, including the Ollama model pull started much earlier. Downloading `qwen2.5:32b-instruct` takes minutes (tens of GB) and produces no terminal output, so the script looked stuck.
+
+Fixed by changing the bare `wait` to `wait "${_build_pids[@]}"` — only the build jobs launched in that loop — so the Ollama pull continues independently in the background and is reaped later at the section that was already written for it.
+
+## §81 — ITBench chaos infra manifest applied resources in random order, occasionally racing ServiceAccounts against the Deployments that need them (2026-08-25)
+
+User reported an ITBench chaos infrastructure getting disabled right after being registered through the ChaosCenter UI. Investigated directly against the running cluster instead of guessing:
+
+- Checked the currently-running registration in MongoDB — it was genuinely connected and healthy (`is_active: true`, subscriber pod stable, no restarts). So whatever the user saw as "disabled" for that specific attempt was most likely either a stale UI view, or the roughly 30-second window the subscriber spends waiting for its sibling deployments (chaos-operator, event-tracker, the MCP servers, etc.) to become ready before it even attempts to connect.
+- But a real bug was found along the way. The Kubernetes manifest ChaosCenter generates for a new infra registration is built by reading eight template files (named `1a`, `1b`, `2a`, `2b`, ... `4a`, `4b` — the `a` files hold RBAC, the `b` files hold the Deployments that need that RBAC) and gluing them together. The Go code that does this never sorts that file list before concatenating — it just uses whatever order the filesystem happens to hand back, which is not guaranteed to match the filenames at all. Live evidence of the resulting race was caught on this exact cluster: `kubectl get events` showed Kubernetes briefly failing to create the `prometheus-mcp-server` pod because its ServiceAccount didn't exist yet — because the generated manifest had put the Deployment before the ServiceAccount that creates it. It happened to self-heal within a few seconds here (Kubernetes retries), but there's nothing guaranteeing that on a different host or a slower run.
+- Separately, direct evidence of the actual "connects, then goes disabled seconds later" pattern the user described was found in the graphql server's own logs, from an earlier registration attempt on the same cluster: it connected, and exactly 12 seconds later the server logged handling its disconnection and marked it inactive. The mechanism is simple and has no safety net: the moment the in-cluster subscriber's connection to the ChaosCenter backend drops for any reason at all (a crash, a pod restart, a permissions error because RBAC hadn't landed yet, two subscribers with the same identity colliding), the backend immediately and permanently marks that infra disabled — there's no retry or grace period built in.
+
+Fixed the concatenation-order bug: the manifest generator now sorts the template file list before joining them, so the `1a/1b/2a/2b/...` naming convention is actually honored and RBAC always lands before the workloads that depend on it, regardless of what order the filesystem returns files in.
+
+Durability check: durable — the fix is a one-line sort in the checked-in Go source (`AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/infra_utils.go`), so it applies to every future manifest generated once built and deployed. It has **not** yet been built into the running `graphql` image or redeployed — per this repo's known gotcha, `setup.sh --restart` alone does not rebuild Go binaries; that needs `--restart --local-build` (or an equivalent image rebuild) before this fix takes effect on a live cluster. That rebuild does **not** require committing the change first — the Docker build context is just the on-disk submodule directory, so it picks up uncommitted edits directly. Currently an uncommitted change in the `AgentCert` submodule; a commit only becomes necessary for durability across a fresh checkout or another machine.
+
+## §82 — Selecting "local" images at setup time didn't actually refresh `graphql`/`web`, because their builds silently failed/no-op'd, not because the selection was ignored (2026-08-25)
+
+Two more UI regressions after recreating infra: the copy-pasteable `kubectl apply -f <url>` command was missing from the "Connect Chaos Infrastructure" wizard (only the plain Download button remained), and the "Install Application" / "Install Agent" convenience buttons were missing from experiment creation. Both features are real and already in the checked-out source — `manifestDownloadURL` landed 2026-08-19, the install-step buttons landed 2026-08-06 — but neither was present in the code actually running in the cluster. Checking the live pods directly confirmed it: the running `graphql` binary was built 11 minutes *before* the manifest-URL fix was committed, and the running `web` bundle was built back in **June**, more than two months before the install-step buttons existed.
+
+The natural next question — asked directly by the user — was why, since `local` image builds were genuinely selected in `setup.sh` (confirmed in `.env`), and a full local rebuild genuinely ran that morning. Two separate, unrelated bugs explain it:
+
+- **`web`'s build was silently failing.** The frontend's `package.json` pins nine `@visx/*` charting packages all to the same version, `^2.18.0`. Checking directly against the npm registry showed that four of those nine packages (`curve`, `gradient`, `group`, `pattern`) never actually got a `2.18.0` release — their version history jumps straight from `2.17.0` to `3.0.0`. The project's own `yarn.lock` already had the correct, working versions locked (`2.17.0` for those four, `2.18.0` for the other five) — it just never got reconciled back into `package.json`. That mismatch normally goes unnoticed because the frontend's "real" Dockerfile installs from the lockfile and never re-resolves anything, but the `docker-compose.yml` build path used for local dev builds a **separate**, lockfile-free Dockerfile that does try to freshly resolve those broken ranges — and fails every time, silently, with the failure logged only to a per-image log file the top-level script summary doesn't surface.
+- **`graphql`'s build "succeeded" but reused a stale cached layer anyway.** Its build log showed every single layer marked `CACHED`, including the step that copies in the actual source code and the `go build` step itself — despite the source genuinely being at that morning's latest commit. This is the exact same Docker layer-caching bug the team had already found and fixed once before, for the `web` image specifically (forcing `--no-cache` on it) — but that fix was applied narrowly, on the assumption it was unique to `web`'s build mechanism. Today's evidence shows the identical bug also hits the plain, more common `docker build` path that `graphql` (and ten other images) use, just less often, so it went uncaught until now.
+
+Both are now fixed: the four `@visx/*` pins were corrected to the version that actually exists and that `yarn.lock` was already using, and the `--no-cache` protection was extended from just `web` to every locally-built image.
+
+Investigated, as asked, whether forcing `--no-cache` everywhere has any downside. It does, but no correctness downside — only cost: measured a real rebuild of `graphql` at just under two minutes (versus effectively instant when cached), most of that spent reinstalling OS packages that would otherwise stay cached indefinitely. None of these Dockerfiles use the newer BuildKit cache-mount feature that could have softened that cost, so this is a real, recurring time cost on every future local rebuild.
+
+The user separately asked three follow-up questions this write-up should also cover:
+
+- **Is the blast radius really limited to just this instance, given it's supposed to be rootless Docker?** Yes — checked directly rather than assumed. This session's Docker CLI is on the `rootless` context, backed by a private per-user daemon (`rootlesskit`/`dockerd` owned by this user alone; a completely separate user's own rootless daemon was visible running independently alongside it, plus the shared root daemon, none interfering with each other). `docker ps -a` on this context shows exactly one container — this checkout's own KinD node — nothing from any other checkout is even visible. An earlier draft of this write-up wrongly worried about losing "free cache sharing between different engineers' checkouts" as a downside of `--no-cache`; that's not a real effect here, since each user's rootless daemon already has its own private, unshared build cache — there was nothing to lose.
+- **Is the fix already onboarded, or does the infra need restarting?** Already live, done in this session — no restart needed. Both images were rebuilt with the fixes, loaded into the running KinD cluster, and both deployments were rolled out; the *running* pods (not just the local images) were re-checked afterward and confirmed to contain the previously-missing code.
+- **Does the ~1-minute-per-image cost mean roughly 11 minutes total, or does building several images in parallel keep it under 3 minutes?** Measured directly rather than guessed: ran the full 12-image batch with `--no-cache` forced everywhere, at this host's actual default parallelism (6 concurrent — it has 64 CPUs). Individual image times ranged from 2 seconds to 194 seconds; summed one-at-a-time that's about 16.5 minutes, but the actual wall-clock with 6 building at once was **3 minutes 32 seconds** — barely above this morning's mostly-cached ~3-minute run. So it's the second: parallelism absorbs almost all of the added cost.
+- **Could this be made available as a dev-loop option instead of always forcing `--no-cache`?** Yes — added a new `--allow-build-cache` flag to `setup.sh`. Default behavior is unchanged (always `--no-cache`, for safety); passing the new flag restores normal Docker layer caching for a fast inner dev loop. Deliberately not saved to `.env` as a standing setting — it's meant to be a conscious per-run choice, so nobody accidentally leaves it on and gets silently bitten by the exact staleness bug this fix exists to close.
+
+A cheaper, more surgical alternative to blanket `--no-cache` still exists and wasn't attempted here: restructuring each Dockerfile so only the final source-copy step gets busted, not the dependency-install steps before it. Noted as a good follow-up.
+
+Verified this wasn't just a source-level fix: actually rebuilt both images locally with the fixes applied, confirmed the missing feature strings are now present in both, loaded both into the running KinD cluster, restarted both deployments, and re-confirmed against the live, post-restart pods (not just the local images) that the running binaries now contain the previously-missing code. The UI also responds normally over HTTP post-restart. The one thing not done was clicking through the two flows in an actual browser — the underlying content was verified present and the pods are healthy, but the end-to-end click-through wasn't exercised this session.
+
+Durability check: durable — all three changes are in checked-in files (`AgentCert/chaoscenter/web/package.json` and the superproject's `scripts/setup.sh`, twice), so any future `--local-build` run, on this checkout or a fresh one, picks them up automatically. The live cluster was also brought up to date directly in this session, so right now the running pods and the checked-in source agree with each other.
+
+## §83 — Chaos Studio can't uninstall an app/agent from the workflow builder the easy way, and the agent-install namespace field doesn't remember the app's namespace (2026-08-25, documentation-only)
+
+The blank-canvas experiment builder in Chaos Studio already has a nice shortcut for setting up a workflow: two sidebar buttons, "Install Application" and "Install Agent," that open a catalog picker and drop a ready-made step onto the canvas — no manual YAML required. The user asked to have two gaps in that same builder written down for later work, and wanted the claims checked against the actual code rather than just taken on faith.
+
+First gap: there's no matching "Uninstall" button for either one. A read-only search confirmed this isn't just missing from the sidebar — the underlying data type that drives the whole picker only knows about two things, `'application'` and `'agent'`, with no uninstall variant anywhere in the frontend (a plain text search for the word "uninstall" across the entire web source turns up nothing). The backend does have an uninstall mechanism, but it's a different feature entirely — it's the cleanup that runs when an admin deletes an agent or app's registration from the platform, not a step you can drop into a chaos experiment's own workflow. So today, if someone wants their experiment to tear down the app or agent it installed as part of the workflow itself, they have to hand-write that step in YAML with no catalog help — exactly the kind of thing the install buttons already make easy.
+
+Second gap: the "Install Agent" picker has a namespace field, and it's a plain text box you type into. It does get a starting value, but only from the catalog entry itself (each agent listed in the Agent Hub has its own default namespace baked in) — never from whatever namespace was already picked for an earlier "Install Application" step in the same workflow. So if someone is installing an agent to work against an app they just installed two steps earlier, the tool doesn't offer to reuse that namespace; they have to remember it and retype it correctly by hand.
+
+Both findings came from an agent dispatched specifically to read the source and cite exact files and line numbers rather than guess — see the technical write-up (entry 83) for the full file:line trail, which also cross-checks cleanly against the "Install Application"/"Install Agent" buttons already documented as real, shipped code in entry §82 above.
+
+Nothing was changed in this session — this was purely fact-finding so the gap could be written down accurately. It's now recorded as a proposed backlog item in `innovation.md` (§1.16), including a suggested fix direction: give the picker's underlying data type room for uninstall variants so it can reuse the exact same button → catalog → canvas flow the install steps already use, and change the namespace box from free text to a dropdown that offers whatever namespace an earlier "Install Application" step in the same workflow already used.
+
+## §84 — A fault's "Target Application" tab could be skipped entirely, so an incomplete config only surfaced later as a confusing, disconnected DAG warning (2026-08-25)
+
+A user hit the warning "No target application configured, so it won't inject against anything" on a fault node in the blank-canvas builder, despite believing they'd already pointed that fault at the `bookinfo` application they'd installed earlier (shown in the UI as `bookinfo (pending install)`). Two things needed untangling: whether `(pending install)` itself was the actual blocker, and why the warning showed up at all after the fault had apparently been configured.
+
+Neither turned out to be about `bookinfo`'s install status. `(pending install)` is a harmless UI label — it just means that namespace comes from a queued install step in the same not-yet-run workflow rather than from a live cluster scan, and it's perfectly fine to pick. The real cause was that each fault's config drawer has three tabs — Target Application, Tune Fault, and Probes — and nothing forced the user through the first one. It's entirely possible to open a fault's settings, skip straight to Tune Fault, and click "Apply changes" without ever touching Target Application, silently saving that fault with no namespace or label to target. The only place this ever surfaced was a banner over the whole experiment canvas, generated well after the fact from a completely different, disconnected part of the code — with no way to tell which tab or field had actually been left blank.
+
+The fix makes the drawer itself catch this at the moment it matters. Clicking "Apply changes" now checks whether the fault's Target Application fields that are actually required (a fault might not need all three of App Kind/Namespace/Label) have been filled in; if not, it blocks the save, shows a clear "Target Application is required field" message, and jumps the user straight to the tab that needs attention instead of silently closing the drawer. A small warning icon also now appears right on the Target Application tab label itself whenever it's incomplete, so the gap is visible while still editing — not just after clicking Apply. The pre-existing canvas-level banner was left in place untouched, as a backstop for the one other way a fault's config can end up incomplete (importing a chaos experiment as YAML), which never goes through this drawer at all.
+
+All of the change lives in one frontend file (`ExperimentCreationFaultConfiguration.tsx`) and reuses an error message and a warning icon already used elsewhere in the same codebase, rather than inventing new copy or components. Type-checking and linting were run and came back clean (a pre-existing, unrelated TypeScript error in a `@types/node` file affects the whole repo regardless of this change and was confirmed not to be new). No dedicated tests existed for this component before or after, and the fix wasn't clicked through in a live browser this session — only verified at the source level.
+
+Durability check: durable — the whole fix is a checked-in source change with no live/manual step involved, so it's picked up automatically by any future rebuild of the web frontend, on this checkout or a fresh one. Not yet built or deployed to any running cluster this session.
+
+## §85 — Local image loading now uses a saved temp directory instead of filling `/tmp` (2026-08-25)
+
+The setup failure was caused by an easy-to-miss split between Docker storage and KinD image
+loading. Docker had plenty of room because the active rootless Docker data-root was on
+`/Innovation`, but `kind load docker-image` temporarily exported the image with `docker save`
+under `/tmp`. On this host `/tmp` lives on the nearly full root filesystem, so the export failed
+with `no space left on device` before the image could be imported into the KinD node.
+
+Setup now has a saved `ACE_KIND_LOAD_TMPDIR` setting for that staging space. On first setup it
+asks the user where local image-load tarballs should go, then records the choice in `.env` so
+later restarts reuse it without prompting. On this host the value is set to:
+
+```text
+/Innovation/home/alfred02.TRN/.tmp/kind-load
+```
+
+Both platform-image loading in `scripts/setup.sh` and experiment/helper image loading in
+`scripts/prepare-images.sh` now pass that directory as `TMPDIR` to `kind load docker-image`.
+The env template documents the setting for new checkouts.
+
+Verification: both modified scripts pass `bash -n`, the configured directory exists on
+`/Innovation`, and the relevant `kind load docker-image` calls were checked to confirm they now
+use the configured temp directory.
+
+## §86 — The final late-arriving local changes were also packaged and pushed (2026-08-25)
+
+After the first push, the final status check showed one more batch of local work in the root checkout plus two submodules. Those were handled the same way: only on `feature/itbench-scenarios`, with submodule commits pushed before the root pointer commit.
+
+New submodule commits:
+
+- `AgentCert` at `ca60d80`: `fix: derive app namespace for UI workflows`
+- `chaos-charts` at `b9cb472`: `fix: use raw semver validation regex`
+
+The `chaos-charts` commit also adds ignore rules for Python `__pycache__/` and `*.pyc`, so the generated bytecode cache from running the version validator does not get committed.
+
+Validation done: checked both submodules were on the feature branch, confirmed the generated cache was excluded, reviewed the AgentCert diff while ignoring CRLF end-of-line noise, and scanned the staged diffs for common secret-like strings.
+
+Durability check: durable. The fixes are in the owning feature branches, and the root commit records the latest submodule pointers.

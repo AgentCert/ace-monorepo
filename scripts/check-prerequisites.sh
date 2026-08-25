@@ -252,11 +252,11 @@ from packaging.requirements import Requirement
 repo_root = Path(sys.argv[1])
 report_file = Path(sys.argv[2])
 env = default_environment()
-skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp"}
+skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp", "site-packages"}
 
 
 def skipped(path: Path) -> bool:
-    return any(part in skip_dirs for part in path.parts)
+    return any(part in skip_dirs or part.startswith(".venv") for part in path.parts)
 
 
 def requirement_specs(path: Path):
@@ -406,12 +406,12 @@ from pathlib import Path
 
 repo_root = Path(sys.argv[1])
 report_file = Path(sys.argv[2])
-skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp"}
+skip_dirs = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".tmp", "site-packages"}
 stdlib = set(getattr(sys, "stdlib_module_names", set()))
 
 
 def is_skipped(path: Path) -> bool:
-    return any(part in skip_dirs for part in path.parts)
+    return any(part in skip_dirs or part.startswith(".venv") for part in path.parts)
 
 
 local_module_names = set()

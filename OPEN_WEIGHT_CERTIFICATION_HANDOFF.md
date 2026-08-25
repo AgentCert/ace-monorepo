@@ -7105,3 +7105,106 @@ over:
 
 Uncommitted (`scripts/build-and-push.sh`). No image published, no `.env` change made — the
 `local`-only workflow requested is unchanged from §92.
+
+## 95. `install-app` and `install-agent` steps failed with "chart folder not found" because the KinD node was serving a stale cached image — auditing the rest of the workflow surfaced a second, silent bug: `kind load docker-image` fails for multi-arch litmus helper images (`go-runner`, `litmus-app-deployer`) but `prepare-images.sh` reported success anyway (2026-08-25, committed)
+
+### Symptom
+
+User's blank-canvas Chaos Studio experiment (book-info app) failed at the `install-application`
+step with console log `Configuration error: chart folder not found: /charts/bookinfo`. After the
+install-app fix, re-running the same experiment progressed further and then failed at
+`install-agent` with the same class of error. User asked to check every other step in the
+workflow for the same problem rather than fixing them one at a time as discovered.
+
+### Root cause
+
+`app-charts/charts/bookinfo` (and the corresponding chart set `install-agent` needs) genuinely
+exist in the checked-out source and in the locally-built `agentcert/agentcert-install-app:latest`
+/ `agentcert/agentcert-install-agent:latest` Docker images on the host (confirmed via
+`docker run --entrypoint sh ... ls /charts`). `INSTALL_APP_IMAGE_SOURCE`/
+`INSTALL_AGENT_IMAGE_SOURCE` are both `local` in this checkout's `.env`, meaning these images are
+meant to be rebuilt from source and `kind load`ed into the `agentcert-alfred` KinD cluster by
+`scripts/prepare-images.sh` — but the cluster's node was still serving an older cached image build
+from before the current chart set was added. Confirmed directly: the host's
+`agentcert/agentcert-install-app:latest` digest (`sha256:b8c6f74a...`) did not match what
+`crictl images --digests` reported loaded on `agentcert-alfred-control-plane`
+(`sha256:e55bb4a1745...`). The image had been rebuilt on the host at some point without a
+follow-up `kind load docker-image`, so the running cluster never picked up the change — not a bug
+in the Dockerfiles or chart layout, a stale-cache/deploy-step gap.
+
+### Fix (live cluster)
+
+- `kind load docker-image agentcert/agentcert-install-app:latest --name agentcert-alfred` —
+  unblocked `install-app` immediately.
+- Ran `./scripts/prepare-images.sh` end-to-end, which rebuilds every `local`-sourced image from
+  current source and `kind load`s it: `install-app`, `install-agent`, `sre-agent-comprehensive`,
+  `sre-agent-crewai`, `itbench-experiment`, plus pulls+loads the 6 litmus fault-injection helper
+  images. This brought every workflow-relevant image on the node back in sync with the host's
+  current source, not just the two that had already failed.
+
+### Second bug found during the audit
+
+While verifying every image actually landed on the node (not just trusting the script's own
+"Pulled + loaded" log lines), `litmuschaos/go-runner:latest` and
+`litmuschaos/litmus-app-deployer:latest` were confirmed absent from `crictl images` on the node
+despite the script reporting success for both. Root cause, two parts:
+
+1. Both are multi-arch manifest-list images (`docker manifest inspect` shows separate
+   `amd64`/`arm64`/attestation manifests). `docker pull` on this host only fetches the
+   `linux/amd64` content, but `kind load docker-image`'s internal
+   `ctr images import --all-platforms --digests` still tries to import every platform referenced
+   by the manifest index — including the `arm64` layer digest that was never pulled locally — and
+   fails with `content digest sha256:... not found`. This is a known `kind` limitation with
+   manifest-list images, not specific to this repo.
+2. `scripts/prepare-images.sh`'s `pull_and_load_litmus_images()` → `_pull_and_load_one()` only
+   checked `docker pull`'s exit status to decide `ok`/`failed`; `kind_load()` itself only logged a
+   `warn` on failure and its return status was never checked by the caller. So the load failure
+   for these two images was completely silent in the script's own reporting — exactly the kind of
+   masked failure this repo's own note ("`litmuschaos/go-runner:latest` must be present — verify
+   it is included in `prepare-images.sh`") warns about.
+
+### Fix (source, durable)
+
+| File | Change |
+|------|--------|
+| `scripts/prepare-images.sh` | `kind_load()` now returns a real exit status (0/1) instead of always succeeding implicitly. New `node_crictl_pull()` helper: iterates every node in the KinD cluster (`kind get nodes --name ...`) and runs `crictl pull <img>` directly on each via `docker exec`, bypassing the `docker save`/`ctr images import` round-trip that fails for manifest-list images entirely — this is the same path a pod's normal image pull already uses successfully. `_pull_and_load_one()` now tries `kind_load` first, falls back to `node_crictl_pull` on failure (also applied to the `litmuschaos.docker.scarf.sh` alias tag for `go-runner`), and only writes `ok` to its status file if one of the two actually got the image onto the node — a load failure that also fails the fallback is now honestly reported as `failed`, not silently swallowed. |
+
+### Verification performed
+
+- `bash -n scripts/prepare-images.sh` — clean.
+- Confirmed the stale-image root cause directly: compared `docker inspect --format '{{.Id}}'` on
+  the host against `crictl images --digests` on `agentcert-alfred-control-plane` for `install-app`
+  before any fix — digests didn't match.
+- After the live `kind load` + full `prepare-images.sh` run: exec'd into the node and ran each
+  locally-built image directly (`ctr -n k8s.io run --rm ... ls /charts`) to confirm chart
+  contents, not just that an image with the right tag existed — `install-app`'s image lists
+  `bookinfo`, `otel-demo`, `sock-shop`; `install-agent`'s lists `flash-agent`, `sre-agent`,
+  `sre-agent-comprehensive`, `sre-agent-crewai`, `k8s-agent`, `ciso-agent`.
+- To prove the `node_crictl_pull` fallback fix actually works (not just that the images happened
+  to already be present from an earlier manual pull): ran `crictl rmi` on the node to genuinely
+  remove `litmuschaos/go-runner:latest`, `litmuschaos/litmus-app-deployer:latest`, and the scarf
+  alias, then re-ran `scripts/prepare-images.sh` from that clean state. The script reported
+  `Pulled + loaded` for both, and this time `crictl images` on the node confirmed they were
+  genuinely present — the fallback path fired and succeeded.
+- Post-run: `kubectl get pods -A` showed no pods in any non-`Running`/`Completed` state; `graphql`
+  deployment (auto-restarted by the script since it detected image changes) came back
+  `1/1 Running`.
+- Did not re-run the actual bookinfo/agent experiment end-to-end from Chaos Studio to observe a
+  full successful run — the image-level verification above (chart contents present, no
+  ImagePullBackOff-shaped state anywhere) is what this entry confirms; the next actual experiment
+  run in Chaos Studio is the live end-to-end confirmation.
+
+### Durability
+
+Durability check performed: durable. Both fixes live entirely in `scripts/prepare-images.sh`
+(checked-in source) — `kind_load()`'s real return status and the `node_crictl_pull()` fallback run
+automatically on any future `./scripts/prepare-images.sh` or `./scripts/setup.sh` invocation on
+any checkout with `LITMUS_IMAGES_SOURCE=local`, with no manual step required. The underlying
+stale-node-cache issue that triggered this investigation isn't a script bug in itself (rebuilding
+an image on the host was always going to require a follow-up `kind load` — that's how KinD works),
+but the audit it prompted found and fixed a genuine, previously-silent script bug affecting every
+`local`-sourced litmus helper image pull, not just the two caught here by coincidence.
+
+### Status
+
+Committed together with this handoff entry.

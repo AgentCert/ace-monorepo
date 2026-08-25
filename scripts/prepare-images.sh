@@ -131,13 +131,48 @@ kind_load() {
         }
         if TMPDIR="${ACE_KIND_LOAD_TMPDIR:-${TMPDIR:-/tmp}}" kind load docker-image "${img}" --name "${KIND_CLUSTER_NAME}"; then
             ok "kind load: ${img} → cluster '${KIND_CLUSTER_NAME}'"
+            return 0
         else
             warn "kind load failed for ${img} — pods will pull from registry at runtime"
+            return 1
         fi
     else
         warn "KinD cluster '${KIND_CLUSTER_NAME}' not found — skipping kind load for ${img}"
         warn "Re-run this script after the cluster is created."
+        return 1
     fi
+}
+
+# Fallback for images `kind load docker-image` cannot transfer -- observed
+# with multi-arch manifest-list images (e.g. litmuschaos/go-runner,
+# litmuschaos/litmus-app-deployer): `docker pull` only fetches the host's
+# platform, but kind's underlying `ctr images import --all-platforms` still
+# tries to import every platform listed in the manifest index and fails with
+# "content digest ... not found" for the platforms never actually pulled.
+# Pulling directly on each node via containerd/crictl sidesteps the
+# export/import round-trip entirely -- crictl resolves only the node's own
+# platform, the same way a pod's normal image pull already would. Only
+# meaningful for registry-backed images (the litmus helpers); images that
+# exist solely as local docker builds (install-app, install-agent, the SRE
+# agents, itbench-experiment) have nowhere for this fallback to pull from.
+node_crictl_pull() {
+    local img="$1"
+    local nodes
+    nodes="$(kind get nodes --name "${KIND_CLUSTER_NAME}" 2>/dev/null)"
+    if [[ -z "${nodes}" ]]; then
+        return 1
+    fi
+    local node ok_all=0
+    while IFS= read -r node; do
+        [[ -z "${node}" ]] && continue
+        if docker exec "${node}" crictl pull "${img}" >/dev/null 2>&1; then
+            ok "node pull: ${img} → node '${node}' (kind load fallback)"
+        else
+            warn "node pull fallback also failed for ${img} on node '${node}'"
+            ok_all=1
+        fi
+    done <<< "${nodes}"
+    return "${ok_all}"
 }
 
 # Namespaces where LitmusChaos experiment workflows run.
@@ -264,13 +299,26 @@ pull_and_load_litmus_images() {
             echo "Pulling ${img} from Docker Hub …"
             if docker pull "${img}"; then
                 echo "Pulled ${img}"
-                kind_load "${img}"
+                local load_ok=1
+                if kind_load "${img}"; then
+                    load_ok=0
+                elif node_crictl_pull "${img}"; then
+                    echo "kind load failed for ${img} but node-side crictl pull fallback succeeded"
+                    load_ok=0
+                fi
                 if [[ "${img}" == "litmuschaos/go-runner:latest" ]]; then
                     local scarf="litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest"
                     docker tag "${img}" "${scarf}"
-                    kind_load "${scarf}"
+                    if ! kind_load "${scarf}"; then
+                        node_crictl_pull "${scarf}" || warn "could not get ${scarf} onto the cluster by any method"
+                    fi
                 fi
-                echo ok > "${results_dir}/${idx}.status"
+                if [[ "${load_ok}" -eq 0 ]]; then
+                    echo ok > "${results_dir}/${idx}.status"
+                else
+                    echo "Neither kind load nor node-side pull could get ${img} onto the cluster"
+                    echo failed > "${results_dir}/${idx}.status"
+                fi
             else
                 echo "Pull failed for ${img}"
                 echo failed > "${results_dir}/${idx}.status"

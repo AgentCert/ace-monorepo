@@ -155,7 +155,18 @@ if [[ "${LOCAL_ONLY}" == false ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Image definitions: (name, context_dir, dockerfile)
+# Image definitions: (name, context_dir, dockerfile, tag)
+#
+# `tag` is optional and defaults to "latest" when omitted (the 4th field is
+# simply absent from most entries below). itbench-experiment is the one
+# exception: every chaos-charts/faults/itbench/*/fault.yaml hardcodes the
+# image reference as "agentcert/itbench-experiment:dev" (not :latest), so it
+# must be built/pushed under that exact tag or nothing referencing it would
+# actually resolve. NOTE: this entry exists so the image *can* be published
+# on request, but ITBENCH_EXPERIMENT_IMAGE_SOURCE currently defaults to
+# `local` (scripts/prepare-images.sh) precisely because this has never
+# actually been pushed to Docker Hub — see OPEN_WEIGHT_CERTIFICATION_HANDOFF.md
+# for the exact steps to flip that over once it has been.
 # ---------------------------------------------------------------------------
 declare -a IMAGES=(
     "agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile"
@@ -166,6 +177,7 @@ declare -a IMAGES=(
     "agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile"
     "agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile"
     "agentcert/agentcert-web|${REPO_ROOT}/AgentCert/chaoscenter/web|Dockerfile"
+    "agentcert/itbench-experiment|${REPO_ROOT}/litmus-go|build/Dockerfile.itbench|dev"
 )
 
 # ---------------------------------------------------------------------------
@@ -187,7 +199,9 @@ FAILED=()
 RESTARTED_DEPLOYMENTS=()
 
 for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r img_name context_dir dockerfile <<< "$entry"
+    IFS='|' read -r img_name context_dir dockerfile tag <<< "$entry"
+    tag="${tag:-latest}"
+    full_ref="${img_name}:${tag}"
 
     if [[ ! -f "${context_dir}/${dockerfile}" ]]; then
         log_warn "Dockerfile not found: ${context_dir}/${dockerfile} — skipping ${img_name}"
@@ -195,9 +209,9 @@ for entry in "${IMAGES[@]}"; do
         continue
     fi
 
-    log_info "Building ${img_name}:latest ..."
-    if docker build -t "${img_name}:latest" -f "${context_dir}/${dockerfile}" "${context_dir}"; then
-        log_success "Built: ${img_name}:latest"
+    log_info "Building ${full_ref} ..."
+    if docker build -t "${full_ref}" -f "${context_dir}/${dockerfile}" "${context_dir}"; then
+        log_success "Built: ${full_ref}"
     else
         log_error "Build failed: ${img_name}"
         FAILED+=("${img_name} (build)")
@@ -205,9 +219,9 @@ for entry in "${IMAGES[@]}"; do
     fi
 
     if [[ "${KIND_LOAD}" == true ]]; then
-        log_info "Loading ${img_name}:latest into KinD cluster ${KIND_CLUSTER} ..."
-        if kind load docker-image "${img_name}:latest" --name "${KIND_CLUSTER}"; then
-            log_success "Loaded: ${img_name}:latest"
+        log_info "Loading ${full_ref} into KinD cluster ${KIND_CLUSTER} ..."
+        if kind load docker-image "${full_ref}" --name "${KIND_CLUSTER}"; then
+            log_success "Loaded: ${full_ref}"
             # Restart the matching deployment so running pods immediately use the
             # new image — kind load replaces the containerd cache entry but
             # IfNotPresent won't restart already-running pods on its own.
@@ -217,9 +231,9 @@ for entry in "${IMAGES[@]}"; do
             FAILED+=("${img_name} (kind-load)")
         fi
     elif [[ "${LOCAL_ONLY}" == false ]]; then
-        log_info "Pushing ${img_name}:latest ..."
-        if docker push "${img_name}:latest"; then
-            log_success "Pushed: ${img_name}:latest"
+        log_info "Pushing ${full_ref} ..."
+        if docker push "${full_ref}"; then
+            log_success "Pushed: ${full_ref}"
         else
             log_error "Push failed: ${img_name}"
             FAILED+=("${img_name} (push)")

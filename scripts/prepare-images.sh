@@ -6,10 +6,12 @@
 # Safe to run standalone at any time to rebuild / reload / re-create secrets.
 #
 # Reads from .env:
-#   INSTALL_APP_IMAGE_SOURCE    dockerhub | jfrog | local
-#   INSTALL_AGENT_IMAGE_SOURCE  dockerhub | jfrog | local
-#   LITMUS_IMAGES_SOURCE        dockerhub | local
-#   SRE_AGENTS_IMAGE_SOURCE     dockerhub | local
+#   INSTALL_APP_IMAGE_SOURCE       dockerhub | jfrog | local
+#   INSTALL_AGENT_IMAGE_SOURCE     dockerhub | jfrog | local
+#   LITMUS_IMAGES_SOURCE           dockerhub | local
+#   SRE_AGENTS_IMAGE_SOURCE        dockerhub | local
+#   ITBENCH_EXPERIMENT_IMAGE_SOURCE local (no dockerhub image is published for
+#                                    this one — see below)
 #   JFROG_HOST, JFROG_REGISTRY_PATH, JFROG_USER, JFROG_TOKEN
 #   KIND_CLUSTER_NAME, ACE_INSTANCE_NAME
 #   APP_CHARTS_ROOT, AGENT_CHARTS_ROOT  (set by setup.sh to absolute paths)
@@ -19,6 +21,10 @@
 #   install-app / install-agent  — docker build from source + kind load
 #   sre-agent-comprehensive / sre-agent-crewai — build from agents/ + kind load
 #   litmuschaos images           — docker pull from Docker Hub + kind load
+#   itbench-experiment           — docker build from litmus-go/ (Dockerfile.itbench) + kind load
+#                                   (single dispatcher binary shared by every fault under
+#                                   chaos-charts/faults/itbench/*/fault.yaml — see EXPERIMENT_NAME
+#                                   switch in litmus-go/bin/itbench-experiment/main.go)
 # For "jfrog":
 #   Creates a docker-registry Secret and patches the argo-chaos ServiceAccount
 #   in every experiment namespace that exists on the cluster.
@@ -40,17 +46,32 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     exit 1
 fi
 
-cur() { grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# Reads an optional key from .env, printing "" (not erroring) when the key is
+# absent. Under `set -eo pipefail`, `grep -E ... | tail -1 | cut ...` exits
+# non-zero when grep finds no match even though tail/cut both succeed — and
+# since every caller here is a bare `VAR="$(cur KEY)"` assignment, that
+# non-zero status kills the whole script via errexit the moment *any* key
+# that's legitimately allowed to be unset (falling back to a default below)
+# is actually unset in .env. Found live: SRE_AGENTS_IMAGE_SOURCE is absent
+# from a real checkout's .env and crashed the script here before it ever
+# reached its own `${SRE_AGENTS_SRC:-local}` fallback three lines down.
+cur() { grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 
 APP_SRC="$(cur INSTALL_APP_IMAGE_SOURCE)"
 AGENT_SRC="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
 LITMUS_SRC="$(cur LITMUS_IMAGES_SOURCE)"
 SRE_AGENTS_SRC="$(cur SRE_AGENTS_IMAGE_SOURCE)"
+ITBENCH_EXPERIMENT_SRC="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"
 
 APP_SRC="${APP_SRC:-dockerhub}"
 AGENT_SRC="${AGENT_SRC:-dockerhub}"
 LITMUS_SRC="${LITMUS_SRC:-dockerhub}"
 SRE_AGENTS_SRC="${SRE_AGENTS_SRC:-local}"
+# No dockerhub image has ever been published for this one (confirmed: Docker Hub API
+# 404s on agentcert/itbench-experiment) — local is the only source that can work today,
+# so it's the default regardless of what .env says, same as SRE_AGENTS_SRC's rationale.
+ITBENCH_EXPERIMENT_SRC="${ITBENCH_EXPERIMENT_SRC:-local}"
 
 JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
 JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
@@ -82,7 +103,7 @@ fi
 echo
 echo -e "${CYAN}=======================================================${NC}"
 echo -e "${CYAN}  Preparing experiment images${NC}"
-echo -e "${CYAN}  install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}${NC}"
+echo -e "${CYAN}  install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}   itbench-experiment: ${ITBENCH_EXPERIMENT_SRC}${NC}"
 echo -e "${CYAN}=======================================================${NC}"
 echo
 
@@ -131,7 +152,13 @@ experiment_namespaces() {
 
 build_and_load_install_app() {
     local dockerfile="${APP_CHARTS_ROOT}/install-app/Dockerfile"
-    local ctx="${APP_CHARTS_ROOT}/install-app"
+    # Context must be APP_CHARTS_ROOT (not .../install-app) -- the Dockerfile's
+    # `COPY install-app/go.mod ./` and `COPY charts/ /charts/` both resolve
+    # relative to the build context, and `charts/` is a sibling of
+    # `install-app/`, not nested inside it. build-and-push.sh already gets
+    # this right; this was previously a copy-paste-shifted-one-level-deep bug
+    # that made every "local" install-app build here fail outright.
+    local ctx="${APP_CHARTS_ROOT}"
     local img="agentcert/agentcert-install-app:latest"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
@@ -149,7 +176,9 @@ build_and_load_install_app() {
 
 build_and_load_install_agent() {
     local dockerfile="${AGENT_CHARTS_ROOT}/install-agent/Dockerfile"
-    local ctx="${AGENT_CHARTS_ROOT}/install-agent"
+    # Same context fix as build_and_load_install_app above -- charts/ is a
+    # sibling of install-agent/, not nested inside it.
+    local ctx="${AGENT_CHARTS_ROOT}"
     local img="agentcert/agentcert-install-agent:latest"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
@@ -180,6 +209,24 @@ build_and_load_sre_agent() {
     fi
     info "Building ${img} from ${ctx} …"
     docker build --network=host -t "${img}" -f "${dockerfile}" "${ctx}"
+    ok "Built ${img}"
+    kind_load "${img}"
+}
+
+build_and_load_itbench_experiment() {
+    local dockerfile="${REPO_ROOT}/litmus-go/build/Dockerfile.itbench"
+    local ctx="${REPO_ROOT}/litmus-go"
+    local img="agentcert/itbench-experiment:dev"
+    if image_already_built "${img}"; then
+        ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
+        return 0
+    fi
+    if [[ ! -f "${dockerfile}" ]]; then
+        warn "Dockerfile not found: ${dockerfile} — skipping itbench-experiment local build"
+        return 1
+    fi
+    info "Building ${img} from ${ctx} (Dockerfile.itbench) …"
+    docker build -t "${img}" -f "${dockerfile}" "${ctx}"
     ok "Built ${img}"
     kind_load "${img}"
 }
@@ -354,6 +401,18 @@ case "${SRE_AGENTS_SRC}" in
         ;;
     dockerhub)
         info "sre-agents: Docker Hub — no action needed (pulled at runtime)"
+        ;;
+esac
+
+case "${ITBENCH_EXPERIMENT_SRC}" in
+    local)
+        info "itbench-experiment: local build"
+        build_and_load_itbench_experiment && _did_something=1
+        ;;
+    dockerhub)
+        warn "itbench-experiment: dockerhub selected, but no image has ever been published to" \
+             "docker.io/agentcert/itbench-experiment — every ITBench fault under" \
+             "chaos-charts/faults/itbench/ will hit ImagePullBackOff. Use 'local' instead."
         ;;
 esac
 

@@ -66,6 +66,11 @@ def _count_issues_by_severity(analysis: Dict[str, Any]) -> Dict[str, int]:
     return counts
 
 
+def _scan_failed(analysis: Dict[str, Any]) -> bool:
+    """Check if the scan could not produce a real analysis (LLM/tooling failure)."""
+    return analysis.get("status") == "failed"
+
+
 def run_watch_mode(cfg: AgentConfig, agent: FlashAgent) -> None:
     """
     Watch mode: LLM selects tools once, then polls without LLM until deviation.
@@ -107,22 +112,34 @@ def run_watch_mode(cfg: AgentConfig, agent: FlashAgent) -> None:
     logger.info("Watch mode terminated")
 
 
-def run_scan_mode(cfg: AgentConfig, agent: FlashAgent) -> None:
+def run_scan_mode(cfg: AgentConfig, agent: FlashAgent) -> bool:
     """
     Scan mode: Original hindsight loop - scan, analyze, rescan if issues.
+
+    Returns:
+        True if the mode terminated normally (clean scan, remaining issues at
+        max iterations, or graceful shutdown). False if a scan cycle could not
+        produce a real analysis (LLM/MCP failure) — caller should exit non-zero.
     """
     iteration = 0
-    
+
     while not _shutdown and iteration < MAX_ITERATIONS:
         iteration += 1
         logger.info("═══ Hindsight iteration %d/%d ═══", iteration, MAX_ITERATIONS)
-        
+
         try:
             analysis = agent.scan(cfg.scan_query)
         except Exception as exc:
             logger.exception("Scan cycle failed: %s", exc)
-            break
-        
+            return False
+
+        if _scan_failed(analysis):
+            logger.error(
+                "✗ Scan could not complete (%s) — treating as unhealthy, NOT resolved",
+                analysis.get("status_reason", "unknown"),
+            )
+            return False
+
         if not _has_unresolved_issues(analysis):
             counts = _count_issues_by_severity(analysis)
             logger.info(
@@ -144,8 +161,9 @@ def run_scan_mode(cfg: AgentConfig, agent: FlashAgent) -> None:
     
     if iteration >= MAX_ITERATIONS and not _shutdown:
         logger.warning("Max iterations (%d) reached", MAX_ITERATIONS)
-    
+
     logger.info("Scan mode terminated | iterations=%d", iteration)
+    return True
 
 
 def main() -> None:
@@ -168,8 +186,10 @@ def main() -> None:
     if WATCH_MODE:
         run_watch_mode(cfg, agent)
     else:
-        run_scan_mode(cfg, agent)
-    
+        if not run_scan_mode(cfg, agent):
+            logger.error("Flash Agent scan mode failed — exiting non-zero")
+            raise SystemExit(1)
+
     logger.info("Flash Agent shut down cleanly")
 
 

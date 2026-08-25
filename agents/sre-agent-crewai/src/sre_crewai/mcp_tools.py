@@ -8,15 +8,42 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 from typing import Optional, Type
 
 from crewai.tools import BaseTool
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:
+    # mcp>=2.0 renamed this function; pyproject.toml pins "mcp>=1.9.0" with no
+    # upper bound, so whichever name the installed version exposes is used.
+    from mcp.client.streamable_http import streamablehttp_client
+except ImportError:
+    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
 from pydantic import BaseModel, Field
 
-K8S_URL = "http://127.0.0.1:18081/mcp"
-PROM_URL = "http://127.0.0.1:31085/mcp"
+# MCP_URLS is what the agent-charts Helm chart sets (the only live deployment
+# path — see agents/harness/sre-agent-crewai/bench.yaml): a comma-separated
+# "k8s_url,prometheus_url" pair using in-cluster DNS names. The 127.0.0.1
+# defaults below are host-mapped NodePorts, only reachable when this process
+# runs under the legacy standalone agent-harness.yaml script's --network=host.
+_MCP_URLS = [u.strip() for u in os.environ.get("MCP_URLS", "").split(",") if u.strip()]
+K8S_URL = _MCP_URLS[0] if len(_MCP_URLS) > 0 else "http://127.0.0.1:18081/mcp"
+PROM_URL = _MCP_URLS[1] if len(_MCP_URLS) > 1 else "http://127.0.0.1:31085/mcp"
+
+# AGENT_MODE reuses the same env var flash-agent (agents/flash-agent/.env.example)
+# and k8s-agent (agent-charts/charts/k8s-agent/values.yaml) already use, rather
+# than inventing a new one. It's also already being set on every real
+# ChaosCenter-driven install of THIS chart today — injectExperimentContextArgs()
+# in service.go applies `--set agent.config.AGENT_MODE=<value>` (default
+# "observe") generically to every agent chart's install-agent step, whether or
+# not that chart's ConfigMap references it. Wiring it through here (and in the
+# chart's configmap.yaml/deployment.yaml) is the only change needed — the value
+# was already flowing, just landing nowhere.
+#   "observe" (default) — read-only: delete_k8s_resource is not registered as
+#     a tool at all, not just discouraged by the goal/task prompt text.
+#   "active" — full toolset, including delete_k8s_resource.
+AGENT_MODE = os.environ.get("AGENT_MODE", "observe").strip().lower()
+CAN_MUTATE = AGENT_MODE == "active"
 
 
 # ---------------------------------------------------------------------------
@@ -233,13 +260,15 @@ class ExecutePromQLTool(BaseTool):
 # ---------------------------------------------------------------------------
 
 def get_all_tools() -> list:
-    return [
+    tools = [
         ListNamespacesTool(),
         ListPodsTool(),
         ListEventsTool(),
         ListResourcesTool(),
         GetResourceTool(),
-        DeleteResourceTool(),
         GetPodLogsTool(),
         ExecutePromQLTool(),
     ]
+    if CAN_MUTATE:
+        tools.append(DeleteResourceTool())
+    return tools

@@ -4645,3 +4645,957 @@ fresh checkout of `feature/itbench-scenarios` on any of the 8 repos now includes
 construction.
 
 ### Status: committed and pushed. Main repo and all 7 submodules confirmed at `origin/feature/itbench-scenarios` (verified `git fetch` + `git status --short --branch` showed no ahead/behind on any of them after the final push), except the two intentionally-excluded files above.
+
+---
+
+## 56. `setup.sh --local-build` was silently shipping a stale web frontend: BuildKit reused a cached `COPY . .` layer despite genuinely changed source (2026-08-19, uncommitted)
+
+### Context
+
+Following §53 (the Chaos Studio target-application warning/picker feature, by then already committed+pushed per §55), the user ran `./scripts/setup.sh --restart --local-build` and reported the new feature still didn't work in the live UI — specifically, `otel-demo` still wasn't selectable as the App Namespace even with an `install-application` step for it already present in the workflow.
+
+### Investigation
+
+Rather than assuming a logic bug in the new picker code, checked the actually-deployed artifact first (read-only `kubectl`/`docker` inspection against this checkout's own KinD cluster, `agentcert-alfred` — confirmed via `.env`'s `ACE_INSTANCE_NAME`/`KIND_CLUSTER_NAME` before touching anything, per this repo's shared-host rules): the live `web` pod's nginx content root is `/opt/chaos` (found via the ConfigMap-embedded `nginx.conf`, `root /opt/chaos;` — not `/usr/share/nginx/html`, which turned out to be unrelated stock nginx placeholder content, a red herring on the first pass). `grep`ing the deployed `/opt/chaos/*.js` for a string unique to §53's code (`faultsMissingTargetApplication`) found nothing, confirming the running pod predated that feature.
+
+First hypothesis (timing — the rebuild ran before the code was written) was checked and ruled out: the pod's bundle files and the source edits' mtimes were compared, then the user re-ran `--restart --local-build` a second time, well after the code existed — and the pod **still** didn't restart and **still** didn't contain the new code. This ruled out a one-off sequencing issue and pointed at the build/deploy pipeline itself.
+
+Traced `scripts/setup.sh`'s image-build table (`ALL_BUILD_IMAGES`): unlike the other 11 images (built via a direct `docker build -f <ctx>/<df> <ctx>`), the `web` entry is special-cased as `8|web|agentcert/agentcert-web|||compose:web` — built via `docker compose build web`, reading `docker-compose.yml`'s inline multi-stage Dockerfile (`context: AgentCert/chaoscenter/web`, `COPY . .` then `npm install`/`npm run build`). Inspected the actual per-image build log this run produced (`.tmp/build-logs/7.log`, written by `_build_one_entry`) and found the smoking gun directly in BuildKit's own step-by-step output:
+```
+#13 [builder 3/5] COPY . .
+#13 CACHED
+```
+Confirmed independently: the host Docker image (`agentcert/agentcert-web:latest`) genuinely had a fresh `CreatedAt` timestamp matching this run, but its image ID in the KinD node's containerd (checked via `docker exec <control-plane> crictl images`) still matched an older image ID than the one on the host — i.e. even the freshly-"built" (but cache-reused, content-identical) image hadn't actually propagated into the cluster, compounding the staleness. Root cause of *why* BuildKit's local-source cache key didn't invalidate on genuinely-changed files was not fully isolated in this session (`docker compose build`'s bake driver vs. this rootless daemon's cache keying is the leading suspect, but not confirmed against BuildKit's source the way §52 confirmed its VS Code finding) — the reliable, verified fix is simply to bypass the cache for this one build path.
+
+### Fix
+
+**Immediate/live unblock** (this checkout only, not durable on its own — see below): ran `docker compose build web --no-cache` directly, confirmed via `docker run --rm --entrypoint sh agentcert/agentcert-web:latest -c "grep -l faultsMissingTargetApplication /opt/chaos/*.js"` that the resulting image genuinely contains the new code, then `kind load docker-image agentcert/agentcert-web:latest --name agentcert-alfred` (kind itself reported the image wasn't yet present on the node, confirming the propagation gap above) and `kubectl rollout restart deployment/web -n ace`. Re-verified with the same `grep` against the live pod's `/opt/chaos/*.js` after rollout — now present.
+
+**Durable fix, landed in source:** `scripts/setup.sh`'s `_build_one_entry` function (the `compose:*` branch, currently only exercised by the `web` entry) now runs `docker compose build --no-cache "${svc}"` instead of the cacheable form, with an inline comment recording why. Scoped to only this one build method — the other 11 images use the "direct" `docker build` method and have shown no evidence of the same staleness, so they're left alone rather than paying a blanket `--no-cache` speed penalty across every `--local-build` run.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | `_build_one_entry`'s `compose:*` branch now passes `--no-cache` to `docker compose build`, with a comment explaining the observed staleness. |
+
+### Verification performed
+
+Reproduced the bug's *effect* directly against the live cluster (confirmed stale content being served, confirmed the propagation gap between host image and KinD node containerd). Confirmed the fix works end-to-end in this exact checkout: `--no-cache` build → grep confirms new code present in the built image → `kind load` (explicitly logged the image as new/absent-until-now on the node) → `kubectl rollout restart` → grep against the live pod's `/opt/chaos/*.js` confirms the new code is now actually being served. Did **not** re-run the full `./scripts/setup.sh --restart --local-build` end-to-end with the `setup.sh` edit itself in this session (the live unblock above was done with direct `docker`/`kind`/`kubectl` commands, not by re-invoking the now-patched script) — next `--local-build` run is the first real test of the durable fix.
+
+### Durability check
+
+Confirmed: the fix lands in checked-in source (`scripts/setup.sh`), unconditional for every future `--local-build` run regardless of host/checkout — no config or manual step needed. Not yet re-verified that invoking the patched script itself (rather than the equivalent manual commands used for the live unblock) produces the same result — worth a quick confirmation next time `--local-build` is run.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. The live cluster (`agentcert-alfred`) is already running the correct, up-to-date `web` image via the manual unblock steps above, independent of whether/when the `setup.sh` source fix itself gets committed.
+
+---
+
+## 57. Deeper dig into §56: confirmed the "direct" `docker build` method is not affected (tested 3 ways, including under concurrent load), so `--no-cache` was deliberately *not* extended to the other 11 images — genuine root cause of the compose-build staleness remains unreproduced (2026-08-19, uncommitted)
+
+### Context
+
+User asked two follow-ups on §56: (1) if `--no-cache` is a worthwhile resilience layer, apply it to the other 11 `ALL_BUILD_IMAGES` entries too, but check the blast radius first; (2) investigate the actual root cause in depth rather than stopping at "compose build path, mechanism unclear."
+
+### Investigation
+
+**Scope re-confirmed:** `grep -n "compose:"` against `scripts/setup.sh` confirms `web` is the *only* `ALL_BUILD_IMAGES` entry using the `compose:` method — all 11 others use the plain `docker build -t <tag> -f <ctx>/<df> <ctx>` form.
+
+**Root-cause attempts (three independent reproductions, all against the live rootless daemon this checkout actually uses):**
+1. *Minimal synthetic repro* — a throwaway 1-file Dockerfile+context in `/tmp`, built via both plain `docker build` and `docker compose build` (tried both a separate `Dockerfile` and a `dockerfile_inline`, matching the real service's style), with a genuine content change between builds. Both invocation styles correctly invalidated the cache every time — could not reproduce the bug in isolation.
+2. *Direct build against the real, full-size directory* — extracted the real inline Dockerfile to a temp file and ran plain `docker build -f <tmpfile> AgentCert/chaoscenter/web` (bypassing compose entirely) against the actual submodule directory, before and after a genuine content change to `faultApplicationCompatibility.ts`. `COPY . .`, `npm install`, and `npm run build` all correctly re-ran on the changed build — no false cache hit. This is the strongest single test: same filesystem, same real (large) content, only the invocation mechanism differed from the buggy run, and it was still correct.
+3. *`docker compose build web` under concurrent load* — since `setup.sh`'s build loop runs up to `_BUILD_PARALLELISM` (up to 6) builds simultaneously, hypothesized a BuildKit race under concurrent daemon load. Launched 6 other real-Dockerfile builds (flash-agent, agent-sidecar, auth, graphql, certifier, cluster-init — tagged `cache-test-load:*`, never touching the real `agentcert/*:latest` tags) in the background simultaneously with `docker compose build web` (no `--no-cache`) against genuinely-changed content. Still invalidated correctly — concurrency alone doesn't reproduce it either.
+4. Checked `docker-compose.yml`'s `web` service and the whole file for `cache_from`, `x-bake`, or any other explicit cache directive that could import stale layers from an external source (e.g. a stale registry cache) — none exist. Checked for `COMPOSE_BAKE`/`DOCKER_BUILDKIT`/`BUILDX_BUILDER` env vars in `.env` or the shell environment that might route compose through a different cache-keying path than plain `docker build` — none set. Checked `docker buildx ls` — both the `default` and `rootless` (active) builders use the `docker` driver (the daemon's own embedded BuildKit), so compose and plain `docker build` are provably hitting the *same* underlying cache store, not separate ones. Confirmed `scripts/setup.sh` has exactly one `docker compose build` call site (the one already fixed in §56) — no earlier invocation elsewhere in the script (or in `start-local-services.sh`, referenced only in comments, not actually called from this script) could have pre-seeded a stale cache entry that a later call then "correctly" matched against.
+
+**Root cause: not conclusively isolated.** Every mechanism that would normally explain compose-specific cache staleness (external cache import, differing builder/cache store, a second build call seeding a bad entry, a concurrency race) was checked and ruled out, and three independent attempts to reproduce the original failure — including one against the exact real directory that *did* fail originally — all came back with correct cache invalidation. The one-time failure captured in §56's `.tmp/build-logs/7.log` (`#13 [builder 3/5] COPY . . / #13 CACHED`) remains real and undisputed (that artifact still exists on disk), but its precise trigger condition could not be reconstructed. Left as an open question rather than a confirmed mechanism — worth revisiting if it recurs, ideally by capturing `docker buildx build --metadata-file` or BuildKit debug-level logs (`BUILDKIT_STEP_LOG_MAX_SIZE`/`--debug`) at the moment of failure, which wasn't captured the first time.
+
+**Blast radius of extending `--no-cache` to the other 11 images:** measured, not assumed. Pulled the real per-image build logs from the actual failing `--local-build` run (`.tmp/build-logs/{0..11}.log`, still on disk, untouched by this session's reproduction attempts) and checked the `DONE <n>s` timing on every step of every image: every single heaviest step (certifier's `pip install`+`playwright install chromium`, auth/graphql's `go build`, every other image's install/build step) completed in under 3 seconds — i.e. these were genuine, correct cache hits in that run, not full rebuilds (none of these 11 Dockerfiles use `RUN --mount=type=cache`, confirmed via grep, so there's no cache-mount trick keeping them fast independent of layer caching — the speed *is* the layer cache working as intended). Forcing `--no-cache` on all 11 would make every one of them pay their full, real build cost (real `pip install`/`playwright install chromium`/`go build`/etc., likely tens of seconds to a few minutes each depending on the image) on *every single* `--local-build` invocation from now on, even when that specific image's source hasn't changed at all — the overwhelmingly common case, since a typical local-build run touches one or two components, not all twelve.
+
+### Decision
+
+Did **not** extend `--no-cache` to the other 11 images. Per the user's own framing ("if no-cache adds a layer of resilience, add it") — it doesn't, for these: three independent, real reproduction attempts (including one under the same kind of load `setup.sh` itself generates) found zero evidence the "direct" `docker build` method has the same staleness risk, while the recurring time cost of blanket `--no-cache` there is real and measured. The §56 fix stays scoped to the one `compose:` entry where the bug was actually observed and where the resilience genuinely offsets a real, demonstrated risk.
+
+### Files changed
+
+None beyond §56's existing `scripts/setup.sh` change — this entry is investigation and a documented decision *not* to change further, not new code.
+
+### Verification performed
+
+All four investigation steps above were run for real against the live daemon/checkout, not reasoned about abstractly. All test images (`cache-repro-test`, `cache-repro-compose`, `direct-build-test`, `cache-test-load:*`) and scratch files were removed afterward; the one genuine, deliberate test edit to `faultApplicationCompatibility.ts` (an appended comment line, made and reverted three times across the three repro attempts) was reverted each time — `git status --porcelain` on that file confirmed clean after every revert, and the file's content was re-diffed against what §53 committed to confirm no residue.
+
+### Durability check
+
+N/A for new code (none written). The decision itself — not applying a blanket `--no-cache` — is recorded here so a future session doesn't have to re-derive the blast-radius math or re-run the same reproduction attempts from scratch.
+
+### Status: investigation only, no new source changes. The §56 `scripts/setup.sh` change remains uncommitted, unchanged by this entry.
+
+---
+
+## 58. Install-agent/install-application canvas nodes gave no indication of which agent/app was selected, and clicking them opened an empty, irrelevant panel (2026-08-19, uncommitted)
+
+### Context
+
+User report: after adding an "Install Agent" step to an experiment in Chaos Studio and picking a specific agent from the right-hand AgentHub drawer, there was no way to tell from the visual canvas which agent had actually been selected — and clicking the step node again gave no useful information either.
+
+### Investigation
+
+Dispatched a background research agent (read-only) to trace the full data flow rather than guessing. Findings, confirmed by direct reads afterward:
+
+1. `ExperimentCreationSelectInstallStepView` (`views/ExperimentCreationSelectInstallStep/ExperimentCreationSelectInstallStep.tsx`) lets the user pick an AgentHub/AppHub entry and calls `onSelect({ folder, namespace })`.
+2. `KubernetesYamlService.addInstallStepToManifest` (line ~190) persists this, but the selected `folder`/`namespace` are written **only** into the install step's `container.args` (`-folder=<folder>`, `-namespace=<namespace>`) — the DAG step itself is always pushed with a **fixed literal name**, `templateName = kind === 'application' ? 'install-application' : 'install-agent'` (line 205, 221). Contrast with real faults (`addFaultsToManifest`), whose step name/template is always the specific chosen fault's own unique name.
+3. `getFaultsFromExperimentManifest` (line ~901) builds the canvas's `PipelineGraphState[]` straight from `step[0]?.name` — for install steps this is always that same fixed literal, so the node label on the canvas (`ChaosExperimentNode.tsx` line ~178, `{props.name}`) always rendered `"install-agent"`/`"install-application"` regardless of which entry was chosen.
+4. Clicking any node (`ExperimentVisualBuilder.tsx`'s `DiagramEvent.ClickNode` handler, line ~172) unconditionally calls `getFaultData(manifest, event.data.id)` and opens the Tune Fault drawer (Target Application / Tune Fault / Probes tabs) — built to hydrate a `ChaosEngine` CR from `template.inputs.artifacts[0].raw.data`. The install-agent/install-application template is a plain `container` template with no `inputs.artifacts`, so `getFaultData` returns essentially `{ faultName: 'install-agent' }` and the drawer renders empty/meaningless tabs. This confirmed the user's exact complaint: nothing on the node, nothing on click.
+
+### Fix
+
+**1) Canvas label now shows the selection.** `KubernetesYamlService.ts`: added `installStepTemplateName()`/`parseInstallStepArgs()` helpers (parse `-folder=`/`-namespace=` back out of `container.args`) and a `displayName()` closure inside `getFaultsFromExperimentManifest` that, for install-agent/install-application nodes only, renders `"install-agent: <folder>"` instead of the bare literal. Real fault nodes are untouched (`displayName()` is a no-op passthrough for any other template name).
+
+**2) Clicking the step now shows (and lets you change) the selection**, instead of opening the empty Tune Fault drawer. Added `KubernetesYamlService.getInstallStepSelection(manifest, kind)` (+ abstract declaration in `ExperimentYamlService.ts`) to read back the current `{folder, namespace}` for a given kind. `ExperimentVisualBuilder.tsx`'s `ClickNode` handler now special-cases `event.data.id === 'install-agent' | 'install-application'`: instead of calling `getFaultData`/opening the Tune Fault drawer, it fetches the current selection and re-opens the same `ExperimentCreationSelectInstallStepController`/View used to add the step in the first place (now `installStepDrawer` state carries an optional `initialSelection`), pre-highlighting the currently-installed entry and pre-filling its namespace. The drawer title now also shows a `"Currently selected: <displayName>"` subtitle (new `currentlySelected` i18n string) that falls back to the raw folder name before the AgentHub/AppHub list finishes loading, so the selection is visible immediately on click rather than only after scanning the highlighted list entry. Re-selecting and clicking "Add" overwrites the existing template in place (already-existing `existingTemplate` upsert branch in `addInstallStepToManifest` — no change needed there), so this doubles as an edit flow, not just a view.
+
+Both changes only fire for the two fixed install-step template names — real fault nodes and their existing click→Tune-Fault-drawer flow are completely unaffected.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/web/src/services/experiment/KubernetesYamlService.ts` | New `installStepTemplateName`/`parseInstallStepArgs` helpers; `displayName()` in `getFaultsFromExperimentManifest` surfaces the selected folder on the canvas label; new `getInstallStepSelection()` method. |
+| `AgentCert/chaoscenter/web/src/services/experiment/ExperimentYamlService.ts` | New abstract `getInstallStepSelection()` declaration. |
+| `AgentCert/chaoscenter/web/src/views/ExperimentVisualBuilder/ExperimentVisualBuilder.tsx` | `ClickNode` handler special-cases install-agent/install-application nodes to re-open the select-install-step drawer (pre-filled) instead of the Tune Fault drawer; `installStepDrawer` state gained `initialSelection`. |
+| `AgentCert/chaoscenter/web/src/controllers/ExperimentCreationSelectInstallStep/ExperimentCreationSelectInstallStep.tsx` | Threads new `initialSelection` prop through to the view. |
+| `AgentCert/chaoscenter/web/src/views/ExperimentCreationSelectInstallStep/ExperimentCreationSelectInstallStep.tsx` | Accepts `initialSelection`, seeds `selectedFolder`/`namespace` state from it, shows a "Currently selected" subtitle in the drawer title. |
+| `AgentCert/chaoscenter/web/src/strings/strings.en.yaml`, `strings/types.ts` | New `currentlySelected` string (manually added to the generated `types.ts`, same as §53 — this checkout has no `yarn strings` regeneration script). |
+
+### Verification performed
+
+`yarn typecheck` (`tsc`): zero errors in any file this change touched or anywhere outside `node_modules` — the only errors are pre-existing `node_modules/@types/node/ffi.d.ts` parse failures (same pre-existing `@types/node`/TS version skew noted in §53), confirmed via `grep -v node_modules` on the output returning nothing. `eslint` scoped to all 5 touched `.ts`/`.tsx` files: 1 error + 2 warnings, all confirmed via `git diff` to sit on pre-existing lines (604, 887 of `KubernetesYamlService.ts`) entirely outside this change's diff hunks — zero lint issues on any added/edited line. Also confirmed via `git status`/`git diff --stat` that two other modified files in this checkout (`ExperimentCreationFaultConfiguration.tsx`, `TargetApplication.tsx`) were pre-existing uncommitted changes from before this session, not touched by this fix. **Not run against a live ChaosCenter UI in this session** (no running instance in this environment) — visual/interaction verification (label renders correctly, click opens pre-filled drawer, re-selecting overwrites correctly) still needed from the user.
+
+### Durability check
+
+Confirmed: all changes land in checked-in frontend source under `AgentCert/chaoscenter/web/src/` — a fresh checkout/build picks them up automatically, no config or manual step needed.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. **Not yet verified in a live ChaosCenter UI.**
+
+---
+
+## 59. flash-agent's scan mode silently reported "✓ All issues resolved!" and exited 0 when the ReAct loop could not produce any analysis at all — masking total LLM/MCP outages as a clean bill of health (2026-08-20, uncommitted)
+
+### Context
+
+Investigating the `flash-agent-6df859d745-wr5lw` pod's `CrashLoopBackOff` in `otel-demo` on the `agentcert-alfred` KinD cluster (this checkout, host-shared). Root infra cause: the `ollama` Service in the `ace` namespace is a manually-bound Endpoints object pointing at the KinD docker-bridge gateway (`172.18.0.1:12468`, this checkout's `OLLAMA_PORT`), but no `ollama-alfred02-trn` (or any) container backing that port exists on the rootless daemon that actually hosts this cluster — confirmed via `docker --context rootless ps -a`, `ss -ltnp`, and a live throwaway diagnostic pod (`curl` from inside `ace`, self-deleted) reproducing `Connection refused`. The model volume `ollama-models-alfred02-trn` still exists, so Ollama ran here before and was later removed (not just stopped), most likely during this checkout's recent rootless-Docker migration work (§ recent commits on bridge networking / CDI / Mongo replica-set host). That infra gap is not fixed by this entry — it needs a container restart (`./scripts/start-local-services.sh --only-ollama`), which was intentionally left for the user to run since it starts a (possibly GPU-attached) container on a shared host.
+
+This entry covers a separate, application-level bug found while diagnosing the above: even once the infra is fixed, the *symptom* the user would have seen (`CrashLoopBackOff` with the container repeatedly exiting `0`) was itself misleading, because a total analysis failure was being reported as success.
+
+### Investigation
+
+Pod logs for the crash-looping container showed:
+```
+2026-08-20 04:21:20,876 [ERROR] flash-agent - LLM call failed: Error code: 500 - {...litellm.APIConnectionError: Ollama_chatException...}
+2026-08-20 04:21:20,876 [ERROR] flash-agent - ReAct loop ended without valid analysis
+2026-08-20 04:21:20,876 [INFO] flash-agent - ✓ All issues resolved! critical=0 warning=0 info=0
+2026-08-20 04:21:20,876 [INFO] flash-agent - Scan mode terminated | iterations=1
+2026-08-20 04:21:20,876 [INFO] flash-agent - Flash Agent shut down cleanly
+```
+Traced the full path in `agents/flash-agent/` (the only copy in this checkout — no separate top-level `flash-agent/` submodule directory here):
+
+- `flash_agent.py`'s `_execute_scan_steps` (ReAct loop) has two failure-sentinel return sites: one when no MCP tools can be discovered (~line 492-494, now ~502), one when the loop exhausts `MAX_TOOL_ITERATIONS` (10) without ever parsing a valid analysis (~line 629-631, now ~648). Both returned `{"health": {"overall_health_score": -1}, "issues": []}` — shape-identical to a genuine "no issues found" result.
+- `main.py`'s `_has_unresolved_issues()`/`_count_issues_by_severity()` only ever inspect `analysis["issues"]`; nothing anywhere checked `overall_health_score`. So the `-1` sentinel was completely inert — `issues: []` alone made `run_scan_mode` take the "✓ All issues resolved!" branch and `break` out of the retry loop on the very first iteration, matching the observed `iterations=1`.
+- `main.py`'s `main()` unconditionally logged "Flash Agent shut down cleanly" and fell through to Python's default exit code `0` after `run_scan_mode()` returned, for every outcome — clean scan, issues-remaining-at-max-iterations, a caught-and-swallowed `Scan cycle failed` exception (`break`, not re-raised), or total analysis failure. The only `raise SystemExit(1)` calls anywhere in the file were in `run_watch_mode` (config-validation failure, baseline-establishment failure) and in top-level config validation — `run_scan_mode`'s path had zero exit-code differentiation, despite the existing `run_watch_mode` precedent showing the pattern was already in use elsewhere in the same file.
+- Secondary bug found in the same investigation: the failure-sentinel `return` in `_execute_scan_steps` happens *before* the existing history-recording code (`self._add_to_history("assistant", ...)`), but an unconditional `self._add_to_history("user", f"Query: {scan_query}", ...)` runs at the top of every scan (~line 487) regardless of outcome. So a failed scan left an orphaned `"user"` history entry with no matching `"assistant"` reply. `_detect_warning_patterns()` (~line 882-901, the actually-wired-in gate for hindsight injection) scans the last 3 history entries' text for keywords `["error","failed","warning","critical","timeout"]` — the orphaned entry (`"Query: ..."`) contains none of them, so repeated total-failures were invisible to the hindsight mechanism too, separate from the exit-code bug. (Confirmed `should_generate_hindsight()` in `llm/hindsight.py`, ~line 215-263, already checks `health_score < 80` correctly — `-1 < 80` → `True` — but it's dead code, never called anywhere in the repo; left untouched, out of scope.)
+- Confirmed via grep: no dataclass/enum/`success`-style field distinguishing "no issues" vs "issues found" vs "analysis failed" existed anywhere in the codebase before this fix. The nearest near-miss, `status_reasoning.determined_status` (an LLM-self-reported field in the system prompt's output schema, ~line 66-67), is never read by any Python code.
+- No test directory existed for flash-agent at all before this fix.
+
+### Fix
+
+Added a plain `status` string key (`"completed"` | `"failed"`) to the dict `_execute_scan_steps`/`scan()` returns — no new dataclass/enum, consistent with the existing dict-threaded style throughout this file:
+
+- `flash_agent.py`, no-MCP-tools sentinel: now also sets `"status": "failed", "status_reason": "no_mcp_tools_discovered"`, and records a `self._add_to_history("assistant", "SCAN FAILED: no MCP tools discovered ...", ...)` entry (fixes the orphaned-history bug for this site).
+- `flash_agent.py`, ReAct-loop-exhausted sentinel: same pattern, `"status_reason": "react_loop_no_analysis"`, history entry `"SCAN FAILED: ReAct loop ended without valid analysis after N iteration(s) ..."`. The literal word `FAILED` (lowercased by `_detect_warning_patterns`) guarantees the keyword match, so two consecutive failed scans now correctly trigger hindsight injection on the next cycle.
+- `flash_agent.py`, success path (right after the existing `analysis["_metadata"] = {...}` assignment): now also sets `analysis["status"] = "completed"`.
+- `main.py`: new helper `_scan_failed(analysis) -> bool` (`analysis.get("status") == "failed"`), added next to the existing `_has_unresolved_issues`/`_count_issues_by_severity` (both left untouched — they stay pure "does `issues` contain problems" checks, orthogonal to this new signal).
+- `main.py`'s `run_scan_mode`: return type changed from `None` to `bool` (`True` = terminated normally — clean scan, issues-remaining-at-max-iterations [pre-existing behavior, unchanged], or graceful shutdown; `False` = a scan genuinely could not run). Checks `_scan_failed(analysis)` *before* the existing `_has_unresolved_issues` branch, so the `✓ All issues resolved!` log line is now structurally unreachable on a failed scan — replaced on that path with `logger.error("✗ Scan could not complete (%s) — treating as unhealthy, NOT resolved", analysis.get("status_reason", "unknown"))`. The previously-swallowed `except Exception as exc: logger.exception(...); break` now `return False`s instead, so an uncaught scan-cycle exception also propagates as failure rather than silently reading as a normal loop exit.
+- `main.py`'s `main()`: now checks `run_scan_mode`'s return value and calls `raise SystemExit(1)` on failure, mirroring the exact pattern already used twice in `run_watch_mode` in the same file — before this, `run_scan_mode`'s outcome had zero effect on the process exit code.
+
+Explicitly left out of scope (per the plan agreed with the user): `should_generate_hindsight()` dead code in `llm/hindsight.py` (not load-bearing for this bug); `run_watch_mode` (already correct); the underlying Ollama-container infra gap (separate, needs a live container start the user should trigger).
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agents/flash-agent/flash_agent.py` | Both failure-sentinel return sites in `_execute_scan_steps` now set `status`/`status_reason` and record a paired history entry; success path now sets `status: "completed"`. |
+| `agents/flash-agent/main.py` | New `_scan_failed()` helper; `run_scan_mode` now returns `bool` and checks `_scan_failed` before the "resolved" branch, propagating exceptions as failure instead of swallowing them; `main()` calls `raise SystemExit(1)` when `run_scan_mode` returns `False`. |
+| `agents/flash-agent/tests/test_scan_status.py` (new) | Stdlib `unittest` (no `pytest` dependency exists anywhere in `agents/*/requirements.txt` — deliberately avoided adding one). 6 tests covering `_scan_failed` (failed/completed/missing-key-back-compat) and `_has_unresolved_issues` (empty/critical/info-only). |
+
+### Verification performed
+
+All performed against a scratch venv (`/tmp/.../scratchpad/flash-agent-test-venv`, not part of the repo) with `agents/flash-agent/requirements.txt` installed, run from `agents/flash-agent/`:
+
+1. **Unit tests**: `python -m unittest tests.test_scan_status -v` → 6/6 pass.
+2. **Live Site A repro** (real `python main.py` process, not mocked): `OPENAI_BASE_URL`/`MCP_URLS` both pointed at `http://127.0.0.1:1` (nothing listens there), `MAX_ITERATIONS=1`. Output showed `No MCP tools discovered – cannot proceed` → `✗ Scan could not complete (no_mcp_tools_discovered) — treating as unhealthy, NOT resolved` → `Flash Agent scan mode failed — exiting non-zero`. `echo $?` → `1`. `✓ All issues resolved!` did not appear anywhere in the output.
+3. **Site B repro** (matches the actual production incident: MCP discovery succeeds, every LLM call fails) via a throwaway script that monkeypatches `FlashAgent._discover_mcp_tools` to return one fake tool and `_create_openai_client` to return a client whose `chat.completions.create` always raises, then calls `agent.scan()` directly. Confirmed the returned dict is exactly `{"health": {"overall_health_score": -1}, "issues": [], "status": "failed", "status_reason": "react_loop_no_analysis"}`, confirmed `agent.history[-2:]` is a matched `user`/`assistant` pair with `"SCAN FAILED"` in the assistant entry (orphaned-history bug fixed), and confirmed `main._scan_failed(result) is True`.
+4. **Regression/success-path check**: same monkeypatch style but with a client returning a valid analysis JSON (`health.overall_health_score: 100, issues: []`). Confirmed `result["status"] == "completed"`, and confirmed `main.run_scan_mode(cfg, agent)` still returns `True` and still logs `✓ All issues resolved! critical=0 warning=0 info=0` exactly as before — i.e. the fix does not change behavior on a genuine clean scan.
+
+Scratch verification scripts and venv were left in the session scratchpad directory (outside the repo), not committed.
+
+### Durability check
+
+Confirmed durable: both changes land in checked-in Python source (`agents/flash-agent/flash_agent.py`, `agents/flash-agent/main.py`) with no config/env/deploy-time dependency — a fresh checkout or a rebuilt `agentcert/agentcert-flash-agent` image picks up the fix automatically, no manual step needed. This is a pure application-logic fix; it does not touch `agent-charts/`, the `Dockerfile`, or any deploy manifest, since none of those needed to change for this bug class.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. The underlying Ollama-container infra gap that originally triggered the crash loop is still unresolved and separate from this entry — the user was given the exact remediation command (`./scripts/start-local-services.sh --only-ollama`) and asked to confirm before it's run, since it starts a container on a shared host.
+
+---
+
+## 60. sre-agent-crewai never actually reached the LLM or either MCP server when deployed via its only live path — every experiment run for this agent silently produced no telemetry and (very likely) no real diagnosis (2026-08-20, uncommitted)
+
+### Context
+
+User asked to look up the Langfuse log for the `sre-sre-crewai-std-pod-network-loss` experiment run (2026-08-14, trace id `ad4097eb-da0d-4749-bedd-a3946df70cfe`, `experiment_run_id` `8af29f00-caef-47b9-b0b7-057d81dd1e71`) and check it was as expected. The ChaosCenter-side orchestration trace looked clean (`install-application` → `install-agent` → `install-chaos-experiments` → `fault: pod-network-loss` (~6 min) → `delete-agent` → `delete-application` → `uninstall-all`, no `ERROR`-level spans, `finalStatus: PASS`), but `GET /api/public/observations?traceId=...&type=GENERATION` returned zero results — no `litellm-acompletion` spans anywhere in the trace, despite the fault window lasting ~6 minutes during which the CrewAI agent should have been running its 8-step investigation. Checked 4 more traces from the same Aug-14 batch (`pod-delete`, `pod-cpu-hog`, `pod-memory-hog`, `pod-http-latency`) — same result, 0 generations each. By contrast a `flash-agent-5scenario` trace from Aug 19-20 in the same Langfuse project had thousands of `litellm-acompletion` generations, confirming the sidecar→LiteLLM→Langfuse path works in general and this is specific to sre-agent-crewai.
+
+### Investigation
+
+`agents/harness/sre-agent-crewai/bench.yaml` states this agent "is now orchestrated exclusively via the LitmusChaos Argo Workflow" (the standalone `agents/harness/sre-agent-crewai/agent-harness.yaml` script, which shells `docker run --network=host`, is legacy/retired for this agent). The live path is: ChaosCenter's `install-agent` Argo step runs `helm install` against `agent-charts/charts/sre-agent-crewai`, with `--set` values injected generically for every agent chart by `injectExperimentContextArgs()` in `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` (~line 2440-2485) — including `agent.config.NOTIFY_ID`, `agent.config.WORKFLOW_NAME`, `agent.config.MCP_URLS`, `agent.config.OPENAI_BASE_URL`. That wiring itself checked out fine via `git log -p -L`: `NOTIFY_ID` has been correct since commit `0219677` (2026-04-28), `WORKFLOW_NAME` since `7e50685` (2026-05-01) — both well before the 2026-08-14 run, so stale-binary theories don't explain the gap.
+
+The actual bug is two env-var/hardcoded-value mismatches between what the Helm chart's `ConfigMap` (`agent-charts/charts/sre-agent-crewai/templates/configmap.yaml`) sets on the pod and what the agent's own Python code (`agents/sre-agent-crewai/src/sre_crewai/`) reads — both mismatches trace back to the agent code having been written/tested against the old standalone `--network=host` harness invocation and never updated for the Helm/K8s deployment path that `bench.yaml` says is now the *only* one in use:
+
+1. **LLM connectivity** (`crew.py:29-30`): read `LITELLM_BASE_URL` / `SRE_AGENT_LITELLM_API_KEY` — env vars the legacy `agent-harness.yaml` script sets (`agent-harness.yaml:70-71`), but that the Helm chart's `deployment.yaml`/`configmap.yaml` never set at all (it sets `OPENAI_BASE_URL`/`OPENAI_API_KEY` instead — `configmap.yaml:30,32` and `deployment.yaml:30-41`). Neither var being present meant `crew.py` always fell back to its hardcoded default `http://127.0.0.1:14000` — inside the agent's own K8s pod, nothing listens on that address (the sidecar container in the same pod binds port 4001, not 14000; there is no `--network=host` in this deployment mode). Every LLM call the CrewAI agent made would fail to connect. This alone fully explains the zero-GENERATION-observations finding: the sidecar (`agent-sidecar/proxy.py`) never even received a request to inject `trace_id`/`experiment_run_id` metadata into, because the agent's LLM client never reached it.
+2. **MCP connectivity** (`mcp_tools.py:18-19`, module-level constants): hardcoded `K8S_URL = "http://127.0.0.1:18081/mcp"` and `PROM_URL = "http://127.0.0.1:31085/mcp"` — host-mapped KinD NodePorts only reachable via `--network=host` (per `agents/sre-agent-crewai`'s own doc comment in CLAUDE.md §4.3: "Runs with `--network=host` to reach sidecar LLM proxy, K8s MCP, Prometheus MCP simultaneously"). The Helm chart sets `MCP_URLS` on the ConfigMap (in-cluster DNS names, e.g. `http://kubernetes-mcp-server.otel-demo.svc.cluster.local:8081/mcp,http://prometheus-mcp-server.otel-demo.svc.cluster.local:8083/mcp` — `values.yaml`), but `mcp_tools.py` never read that env var at all, `grep`-confirmed (no `os.environ`/`os.getenv` reference anywhere in the file before this fix). So even with (1) fixed, every K8s/Prometheus MCP tool call the agent made would also fail to connect from inside a regular (non-host-networked) pod.
+
+Net effect: for every sre-agent-crewai run launched via the only currently-supported orchestration path, the agent could reach neither the LLM nor either MCP server. It could not have produced a real diagnosis, and its own `agent_output.json` (if written at all) would reflect that total connectivity failure rather than any actual investigation — separate from, and more severe than, the missing-Langfuse-telemetry symptom that surfaced it. This was not checked directly against a live pod in this session (the Aug-14 run's workspace/pod logs no longer exist to inspect), but is a direct, high-confidence consequence of both hardcoded/mismatched addresses being genuinely unreachable from inside a Helm-deployed pod's own network namespace.
+
+### Fix (initial pass)
+
+Both fixes prefer the Helm-chart-set names (used exclusively by the current live path) and fall back to the old standalone-harness names (in case `agent-harness.yaml` is still invoked anywhere outside this repo's own orchestration) — not a new abstraction, just checking both real, still-extant naming conventions used by the two different callers of this same code:
+
+- `agents/sre-agent-crewai/src/sre_crewai/crew.py`: `base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:14000")`; `api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("SRE_AGENT_LITELLM_API_KEY", "ollama")`.
+- `agents/sre-agent-crewai/src/sre_crewai/mcp_tools.py`: `K8S_URL`/`PROM_URL` are now derived from `MCP_URLS` (comma-separated, k8s-url-first — matching the exact order `service.go`'s `injectExperimentContextArgs()` builds it in: `mcpURLs := k8sMCPURL + "," + promMCPURL`), falling back to the old hardcoded `127.0.0.1` NodePort addresses only when `MCP_URLS` is unset.
+
+### Follow-up: user asked to rebuild the image and verify live — three more bugs surfaced, all blocking the pod from ever reaching the point where the above two fixes would even matter
+
+Rebuilding `agentcert/sre-agent-crewai:latest` (`docker build --network=host` from `agents/sre-agent-crewai/Dockerfile`) and `kind load`-ing it into this checkout's own cluster (`agentcert-alfred`, ownership verified via `docker volume inspect ace-kind-owner-agentcert-alfred` before touching anything, per this file's §0) surfaced a chain of additional bugs, each hiding the next:
+
+1. **`agent-charts/charts/sre-agent-crewai`'s Deployment never passes `--goal` (or any CLI args) to the container, and `sre_crewai/__main__.py`'s `--goal` argparse arg was `required=True` with no env fallback.** The chart's `values.yaml` even defines `agent.config.GOAL`, but neither `configmap.yaml` nor `deployment.yaml` ever wired it through — dead config. Every pod deployed via this chart (the *only* live path) crash-looped immediately on `error: the following arguments are required: --goal`, before `build_crew()` — and therefore before either of the two fixes above — ever ran. Root cause: this chart is a copy of the flash-agent chart (whose own entrypoint is `AgentConfig.from_env()`-only, no CLI args needed) adapted for sre-agent-crewai without reconciling that `sre_crewai/__main__.py` requires explicit CLI args, mirroring the old `agent-harness.yaml` script's invocation instead.
+   - Fixed: `__main__.py`'s `--goal` now defaults to `os.environ.get("GOAL", "Diagnose and remediate all faults in the Kubernetes cluster.")` (same text as the chart's existing default) instead of being required; `--model` now checks `MODEL_ALIAS` (the chart's actual ConfigMap key) before `MODEL` (a second, smaller instance of the same class of bug — nothing ever set `MODEL`).
+   - Fixed: `agent-charts/charts/sre-agent-crewai/templates/configmap.yaml` now emits `GOAL: {{ .Values.agent.config.GOAL | quote }}` (guarded, matching the file's existing style); `templates/deployment.yaml` now sources a `GOAL` env var from that ConfigMap key (same `configMapKeyRef` pattern already used for `MODEL_ALIAS`). Verified rendering with `helm template ... --set agent.config.GOAL="test goal"` before any live deploy.
+2. **`mcp_tools.py` imported `streamablehttp_client` from `mcp.client.streamable_http`, but the installed `mcp` package (pinned only as `mcp>=1.9.0`, no upper bound — `pyproject.toml`) resolved to `2.0.0` at build time, which renamed that function to `streamable_http_client`.** `ImportError` at module import, crashing before any of the above mattered either. Fixed with a `try`/`except ImportError` fallback importing the new name under the old alias — durable across either package generation without pinning (and without silently masking a real future rename, since a *third* name would still raise `ImportError` cleanly).
+3. **`crew.py` hardcoded `max_tokens=2048` on the CrewAI `LLM(...)` call.** Once (1) and (2) were fixed and the pod finally reached a real LLM call for the first time ever, this environment's shared LiteLLM proxy's `gpt-4o` alias turned out to route to a reasoning-class Azure deployment that rejects `max_tokens` outright (`"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead"`). Tried `litellm.modify_params = True` client-side first — had no effect, because that setting lives in this agent's own local `litellm` library instance, while the actual param validation/rejection happens server-side inside the *shared* LiteLLM proxy (a separate process in the `ace` namespace) that our client only ever talks to as a generic OpenAI-compatible passthrough with no model-specific knowledge. Fixed by simply not sending `max_tokens` at all, letting the model use its own default output cap.
+
+### Remaining, out-of-scope blocker found during live verification (not fixed)
+
+After all five fixes above, the pod stayed up and the LLM call chain worked end-to-end for the first time ever (see Verification below) — but CrewAI's own ReAct executor (`crewai/agents/crew_agent_executor.py`) injects a `stop` sequence at call time (needed for its own Thought/Action/Observation parsing), and the same reasoning-class Azure deployment behind this environment's `gpt-4o` alias rejects `stop` too (`"Unsupported parameter: 'stop' is not supported with this model"`). Unlike `max_tokens`, this isn't a param `crew.py` sets — it's injected internally by CrewAI's executor — so fixing it would mean patching CrewAI's own internals, which is out of scope for this entry. **This means no CrewAI-based agent (not just sre-agent-crewai) can currently complete a real run against this environment's `gpt-4o` LiteLLM alias** — a pre-existing characteristic of whichever Azure deployment that alias currently points to, unrelated to and outside the scope of the bugs fixed here. Left unfixed and unreported further than this entry; flagged to the user.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agents/sre-agent-crewai/src/sre_crewai/crew.py` | `build_crew()` reads `OPENAI_BASE_URL`/`OPENAI_API_KEY` before falling back to `LITELLM_BASE_URL`/`SRE_AGENT_LITELLM_API_KEY`; dropped the hardcoded `max_tokens=2048`. |
+| `agents/sre-agent-crewai/src/sre_crewai/mcp_tools.py` | `K8S_URL`/`PROM_URL` parsed from `MCP_URLS` env var when set; `streamablehttp_client` import now falls back to the `mcp>=2.0` name `streamable_http_client`. |
+| `agents/sre-agent-crewai/src/sre_crewai/__main__.py` | `--goal` no longer `required=True` — defaults from `GOAL` env var; `--model` now checks `MODEL_ALIAS` (the chart's real ConfigMap key) before `MODEL`. |
+| `agent-charts/charts/sre-agent-crewai/templates/configmap.yaml` | Added `GOAL` key, sourced from `.Values.agent.config.GOAL` (already defined in `values.yaml` but previously never wired anywhere). |
+| `agent-charts/charts/sre-agent-crewai/templates/deployment.yaml` | Added `GOAL` env var on the agent container, sourced from the ConfigMap key above. |
+
+### Verification performed
+
+Live, on this checkout's own KinD cluster (`agentcert-alfred` — ownership verified via the `ace-kind-owner-*` volume label before any action, per this file's §0). User was asked first (`AskUserQuestion`) to scope the live test given this agent's toolset includes a real `resources_delete` MCP call and the chart's default goal is real remediation, not read-only — user chose: target `otel-demo` (already deployed, healthy, 23h uptime) with a goal explicitly overridden to read-only investigation only (no deletes).
+
+1. `docker build --network=host -t agentcert/sre-agent-crewai:latest ...` + `kind load docker-image ... --name agentcert-alfred` after each fix iteration (5 build/load/redeploy cycles total, one per bug found above).
+2. `helm install sre-crewai-fixtest agent-charts/charts/sre-agent-crewai -n otel-demo -f <values override: pullPolicy=Never, test NOTIFY_ID/WORKFLOW_NAME, read-only GOAL>`. Confirmed via `helm template` dry-run first that the new `GOAL` wiring rendered correctly before any live install.
+3. **Bug 1 fix confirmed**: pod reached `Running`/`2/2` with **zero restarts** on the first successful build (previously: immediate `CrashLoopBackOff` on argparse's required `--goal`).
+4. **Bug 2 fix confirmed**: `kubectl logs -c agent` showed no more `ImportError`; the process reached `crew.kickoff()`.
+5. **Bug 3 (max_tokens) fix confirmed**: after removing the param, the `400 Unsupported parameter: 'max_tokens'` error disappeared from subsequent attempts, replaced by the (separate, unfixed) `stop` rejection — i.e. execution progressed further each time, confirming each fix individually.
+6. **Core bug (this entry's original subject — zero Langfuse telemetry) conclusively confirmed fixed**: `GET /api/public/traces?name=test-fix-verify-sre-crewai` on the live Langfuse instance (`localhost:4003`) returned a real trace correctly correlated to the test `NOTIFY_ID`, containing **112 `GENERATION` observations** — versus **0** for the original 2026-08-14 production run (`ad4097eb-da0d-4749-bedd-a3946df70cfe`) that started this whole investigation. `kubectl logs -c agent-sidecar` showed 16+ real `POST /v1/chat/completions` requests proxied through. All 100 sampled generations show `level: ERROR` with the `stop`-param message (the known, unfixed, out-of-scope blocker above) rather than a successful diagnosis — but they are real, correctly-tagged round trips to the actual Azure backend through the full production path (agent → sidecar → shared LiteLLM proxy → Azure), which is the exact thing that was completely unreachable before any of these fixes.
+7. Cleanup: `helm uninstall sre-crewai-fixtest -n otel-demo` — confirmed pod terminated, no other otel-demo workloads touched.
+
+Not verified: a full successful diagnosis run (blocked by the separate `stop`-param environment issue above, out of scope); the legacy standalone `agent-harness.yaml` path (not touched, chart-side `GOAL` wiring is additive and doesn't affect it).
+
+### Durability check
+
+Confirmed durable: all five fixes land in checked-in source — three in `agents/sre-agent-crewai/src/sre_crewai/` (Python, picked up by any future image rebuild) and two in `agent-charts/charts/sre-agent-crewai/templates/` (Helm chart, picked up by any future `helm install`/`upgrade` of this chart, no manual step). The rebuilt-and-kind-loaded image used for live verification (`agentcert/sre-agent-crewai:latest`, this checkout's `agentcert-alfred` cluster only) is a local build artifact for verification purposes, not itself the durable fix — the durable fix is the five files above, which any fresh checkout or CI rebuild picks up automatically via the existing `scripts/prepare-images.sh` / Docker Hub build-and-push path.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. Live-verified via the KinD cluster in this checkout as described above. Remaining, explicitly out-of-scope: the `stop`-param rejection blocking any CrewAI-based agent from completing a full run against this environment's current `gpt-4o` LiteLLM alias.
+
+---
+
+## 61. Resolved §60's remaining out-of-scope blocker (the `stop`/`max_tokens` rejection), added a permanent read-only/mutating toggle for sre-agent-crewai, and identified GPT-5.1 as the real model behind the `gpt-4o` alias (2026-08-20, uncommitted)
+
+### Context
+
+Direct continuation of §60, driven by follow-up user questions: what model is actually behind `gpt-4o`, can a client choose it, what exactly does the proposed `_StopSequenceUnsupportedLLM` fix do, can the token waste from client-side truncation be limited/measured, and finally — a separate, explicit ask — a **permanent** way to choose between read-only and mutating tool access for sre-agent-crewai (not the ad-hoc goal-text override used for §60's live tests).
+
+### Part A: identifying the real model behind `gpt-4o`
+
+Cross-referenced the LiteLLM proxy's `/model/info` (`litellm_params.model: azure/gpt4o`, `api_base: https://azureft.openai.azure.com/`) against the cluster's live `ace-env` secret: `AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME=gpt4o` and `AZURE_OPENAI_GPT5_ENDPOINT=https://azureft.openai.azure.com/` — the exact same deployment name and endpoint this repo's **own certifier config** already designates as its reasoning-class model (`AZURE_OPENAI_GPT5_*`, per `CLAUDE.md` §8). Confirmed definitively (not just by correlation) via a raw call through the proxy: Azure attaches an `x-ms-served-model` header to every completion response, passed through by litellm as `llm_provider-x-ms-served-model`, which read `gpt-5.1-2025-11-13`. So `gpt-4o` is silently GPT-5.1 underneath. This same header-reading technique is documented in `innovation.md` §4.7 as a general, reusable way to identify a served model with no control-plane/management-API access — just read it off the response headers.
+
+Also answered: no, a client cannot choose a different real model while still requesting the `gpt-4o` alias — the alias→deployment mapping is entirely server-side (the shared LiteLLM proxy's `model_list` config), invisible and non-negotiable from any caller. The only other configured aliases (`gemini-*`, `auto-free`, `qwen2.5-*`) are all currently non-functional in this environment: `GEMINI_API_KEY`/`OPENROUTER_API_KEY` are empty in the live secret, and Ollama isn't running (same pre-existing gap as §59's flash-agent crash-loop finding).
+
+### Part B: the `stop`/`max_tokens` fix
+
+Root cause (from §60, now fully understood): CrewAI's `LLM.supports_stop_words()` calls litellm's `get_supported_openai_params(model=self.model)` — a static, model-*name*-keyed lookup with no knowledge of what a given Azure deployment was actually repointed to. It reports `stop`/`max_tokens` as supported regardless of provider-prefix used (`openai/gpt-4o`, `azure/gpt4o` — both checked, both wrong), so CrewAI's own auto-detection can never self-correct here. Worse: `CrewAgentExecutor.__init__` unconditionally sets `self.llm.stop = stop_words` (crew_agent_executor.py ~L84-87) regardless of what `supports_stop_words()` returns, and base `LLM.call()` sends whatever's in `self.stop` on every request — so a naive 3-line subclass overriding only `supports_stop_words()` (my first proposal to the user) would **not** actually have stopped `stop` from being sent; `call()` itself had to be overridden. Also found while doing this: base `LLM.call()` builds `"max_tokens": self.max_tokens or self.max_completion_tokens` — i.e. it collapses `max_completion_tokens` onto the legacy `max_tokens` wire key regardless of which attribute is set, meaning simply setting `max_completion_tokens=N` on the LLM object (the "obvious" fix) would have hit the exact same rejection again.
+
+Implemented in `agents/sre-agent-crewai/src/sre_crewai/crew.py`, selected via `SRE_AGENT_STOP_STRATEGY` (default `"truncate"`):
+- **`_TruncatingLLM`** (default) — full `call()` override: never sends `stop`; sends the length cap as `max_completion_tokens` (not `max_tokens`); lets the model generate its full response and cuts it client-side at the first `"Observation:"` marker — the same effect as CrewAI's own dormant fallback path (`crew_agent_executor.py`'s `if not self.use_stop_words:` branch), just reached directly instead of depending on its wrong auto-detection. Bounded by `SRE_AGENT_MAX_COMPLETION_TOKENS` (default 2048, matching the original hardcoded value this file used before learning it needed the correct wire key).
+- **`_StreamingTruncatingLLM`** (opt-in, `SRE_AGENT_STOP_STRATEGY=stream`) — streams and aborts the connection the instant the marker appears mid-stream, closer to native `stop`'s actual token cost. Coded as a working prototype (verified against the live proxy — no errors), not the default; open questions (stream-connection cleanup semantics, exact provider billing behavior on early abort, no `usage` block on an aborted stream) documented in `innovation.md` §4.7 rather than resolved here, per explicit user instruction ("document the stream one ... for further research").
+- **Waste measurement** — `litellm.token_counter()` diffs billed `completion_tokens` against the retained (post-truncation) text's token count, logged via `print()` (not `logging.info()` — tried that first, discovered it silently produces no output with no handler configured in this process, switched to `print()` to match `__main__.py`'s existing `[sre-crewai]` convention). Off by default per explicit user request ("make this waste measurement an option, I don't want to have to handle it just now") — gated behind `SRE_AGENT_LOG_TOKEN_WASTE=1/true/yes`.
+
+**Live-verified** (3 more rebuild/kind-load/redeploy cycles in `otel-demo`, same pattern as §60): the agent completed a **full real investigation** for the first time ever — multiple ReAct tool-call cycles (list_pods, list_k8s_events, list_k8s_resources, execute_promql_query), correctly respected the read-only goal (no `delete_k8s_resource` calls), and wrote a genuine, well-reasoned JSON diagnosis to `agent_output.json`. Confirmed the waste-measurement toggle actually prints once enabled (`stop-word workaround: 10/82 completion tokens discarded after truncation (12% waste)`) and stays silent by default. No tracebacks, no `BadRequestError`, on any of the verification runs.
+
+### Part C: permanent read-only/mutating toggle (`AGENT_MODE`)
+
+User's explicit ask, distinct from the ad-hoc goal-text override §60's live tests used: a durable way to choose between read-only and mutating tool access. Rather than inventing a new env var, reused `AGENT_MODE` — the same one `agents/flash-agent/.env.example` and `agent-charts/charts/k8s-agent/values.yaml` already use, with values `"observe"`/`"active"`. Checking `service.go`'s `injectExperimentContextArgs()` (the generic, chart-agnostic function that appends `--set` flags to every install-agent workflow step) confirmed it **already** unconditionally sets `--set agent.config.AGENT_MODE=%s` (defaulting to `"observe"` when unset) on every real ChaosCenter-driven install of sre-agent-crewai too — the chart's `configmap.yaml`/`deployment.yaml` just never referenced that key, so the value was already flowing and landing nowhere, exactly the same class of bug as §60's `GOAL` finding.
+
+Implemented:
+- `agents/sre-agent-crewai/src/sre_crewai/mcp_tools.py`: reads `AGENT_MODE` (default `"observe"`), sets `CAN_MUTATE = (AGENT_MODE == "active")`. `get_all_tools()` only appends `DeleteResourceTool()` when `CAN_MUTATE` — the tool is not registered at all in observe mode, not just discouraged by prompt text (the enforcement §60 noted was missing).
+- `agents/sre-agent-crewai/src/sre_crewai/crew.py`: imports `CAN_MUTATE`; the hardcoded 8-step investigation task description now only includes the two delete/re-verify steps when `CAN_MUTATE`, and prepends an explicit "You are running in READ-ONLY (observe) mode" notice when not — keeping the model's instructions in lockstep with its actual available tools rather than ever telling it to call a tool it doesn't have.
+- `agent-charts/charts/sre-agent-crewai/templates/configmap.yaml` / `templates/deployment.yaml`: `AGENT_MODE` ConfigMap key (`| default "observe"`) and container env var, same `configMapKeyRef` pattern as the existing `GOAL`/`MODEL_ALIAS` keys.
+- `agent-charts/charts/sre-agent-crewai/values.yaml`: `agent.config.AGENT_MODE: "observe"` default, so a bare `helm install` with no ChaosCenter involvement also defaults safely to read-only (matching `service.go`'s own default).
+
+**Live-verified**: Python-level check inside the built image confirmed `get_all_tools()` returns 7 tools (no delete) under `AGENT_MODE=observe`/unset and 8 tools (delete included) under `AGENT_MODE=active`. Full live pod run at the chart's own new default (`AGENT_MODE=observe`, no manual override needed this time) confirmed the "READ-ONLY (observe) mode" notice appears in the task text, the run completes to a real diagnosis, and no delete call is attempted. `helm template` dry-run confirmed correct rendering for both `AGENT_MODE=observe` (default) and `--set agent.config.AGENT_MODE=active` before any live install.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agents/sre-agent-crewai/src/sre_crewai/crew.py` | Added `_build_llm_params()`, `_log_waste()`, `_TruncatingLLM`, `_StreamingTruncatingLLM`, `_build_llm()` (strategy selection); `build_crew()` now uses `_build_llm()` instead of raw `LLM(...)`; investigation task steps and a read-only notice are now conditional on `CAN_MUTATE` (imported from `mcp_tools`). |
+| `agents/sre-agent-crewai/src/sre_crewai/mcp_tools.py` | Added `AGENT_MODE`/`CAN_MUTATE`; `get_all_tools()` only includes `DeleteResourceTool()` when `CAN_MUTATE`. |
+| `agent-charts/charts/sre-agent-crewai/templates/configmap.yaml` | Added `AGENT_MODE` key. |
+| `agent-charts/charts/sre-agent-crewai/templates/deployment.yaml` | Added `AGENT_MODE` env var (`configMapKeyRef`). |
+| `agent-charts/charts/sre-agent-crewai/values.yaml` | Added `agent.config.AGENT_MODE: "observe"` default. |
+| `innovation.md` | New §4.7 documenting the `x-ms-served-model` header technique, the "truncate" fix in full, and the "stream" prototype's open questions for further research; summary table row added. |
+
+### Verification performed
+
+Syntax-checked every Python edit (`ast.parse`). `helm template` dry-run for both `AGENT_MODE` values before any live install. Direct in-image Python check of `get_all_tools()` under both `AGENT_MODE` values (no cluster needed). Three full rebuild → `kind load` → `helm install` (`otel-demo`, same ownership-verified cluster as §60) → live-run → `helm uninstall` cycles: (1) confirmed the stop/max_tokens fix produces a complete real diagnosis with zero errors, (2) confirmed the waste-measurement `print()` fix actually produces visible output once enabled, (3) confirmed the permanent `AGENT_MODE=observe` default produces the read-only notice, a complete diagnosis, and zero delete attempts — all without any manual goal-text override this time, unlike every prior test in §60.
+
+### Durability check
+
+Confirmed durable: all six changed files are checked-in source (three Python, two Helm chart templates, one Helm values default) — the `AGENT_MODE` wiring in particular requires no ChaosCenter/Go-side change at all, since `service.go` was already sending the value on every real install; a fresh checkout or chart redeploy picks all of this up automatically. As with §60, the rebuilt-and-kind-loaded image used for live verification is a local artifact for testing only — the durable fix is the source files themselves.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. Live-verified via the KinD cluster in this checkout as described above. The `"stream"` strategy remains an unvalidated prototype by design (see `innovation.md` §4.7) — not a gap in this entry's own scope, since the user explicitly asked for it to be documented for further research rather than hardened now.
+
+---
+
+## 62. Applied §60's sre-agent-crewai fix pattern to sre-agent-comprehensive (same two bug classes present), live-verified via the real ACE experiment workflow and a direct Helm deploy, then root-caused and fixed an intermittent LiteLLM v1.82 connection-pool bug discovered along the way (2026-08-20, uncommitted)
+
+### Context
+
+Direct continuation of the §60/§61 sre-agent-crewai investigation. User asked whether sre-agent-comprehensive (`agents/sre-agent-comprehensive/src/sre_comprehensive/`) — a separate CrewAI-based agent with its own nearly-identically-structured `crew.py`/`mcp_tools.py`/`__main__.py` — had the same zero-LLM-calls problem, then asked to fix it using §60/§61 as a template.
+
+### Part A: static comparison against §60/§61
+
+Confirmed sre-agent-comprehensive shares exactly two of the five original sre-agent-crewai bugs, and is clean on the other three:
+
+**Present (fixed here):**
+- `mcp_tools.py:27` had the unguarded `from mcp.client.streamable_http import streamablehttp_client` — no `try/except` fallback for the `mcp>=2.0` rename to `streamable_http_client`. Confirmed via `docker build` output that the installed package resolves to `mcp-2.0.0` (same unbounded `mcp>=1.9.0` pin as sre-agent-crewai). Since `crew.py:16` does `from .mcp_tools import get_all_tools` at module scope and `__main__.py` imports `crew` before `main()` runs, this `ImportError` would crash the process before any LLM call — the direct explanation for the zero-`GENERATION`-observations finding from the prior conversation turn (all 20 sre-agent-comprehensive/crewai runs from the 2026-08-14 batch, verified via Langfuse ClickHouse: 0 `GENERATION` spans in that whole 5-hour window while a concurrent flash-agent run in the same window had 190).
+- `crew.py` hardcoded `max_tokens=4096` on its `LLM(...)` construction — same class as crewai's original `max_tokens=2048` bug, rejected by the reasoning-class Azure deployment (GPT-5.1) behind the `gpt-4o` alias.
+
+**Not present (already correct, unlike crewai's original state):**
+- `AGENT_GOAL` is already correctly wired end-to-end: chart `values.yaml` → `configmap.yaml` → `deployment.yaml`, with a real default goal text — no crash-loop from a missing CLI arg.
+- `crew.py`'s `base_url`/`api_key` resolution already checks `OPENAI_BASE_URL`/`OPENAI_API_KEY` (the names the chart actually sets) before falling back to legacy names — no dead `127.0.0.1:14000`.
+- `mcp_tools.py` already parses `MCP_URLS` from env instead of hardcoding NodePort addresses.
+
+### Part B: fixes applied (mirroring §60's import-guard fix and §61's `_TruncatingLLM` fix)
+
+1. `agents/sre-agent-comprehensive/src/sre_comprehensive/mcp_tools.py`: same `try`/`except ImportError` fallback as sre-agent-crewai's `mcp_tools.py`.
+2. `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py`: ported the full `_TruncatingLLM`/`_StreamingTruncatingLLM`/`_build_llm_params`/`_log_waste`/`_build_llm` machinery from `agents/sre-agent-crewai/src/sre_crewai/crew.py` verbatim (same `SRE_AGENT_STOP_STRATEGY`/`SRE_AGENT_MAX_COMPLETION_TOKENS`/`SRE_AGENT_LOG_TOKEN_WASTE` env vars, same `_STOP_MARKER = "\nObservation:"`). `build_crew()` now calls `_build_llm(prefixed_model, base_url, api_key)` instead of raw `LLM(...)`, and the hardcoded `max_tokens=4096` is gone. Did **not** port §61's `AGENT_MODE`/`CAN_MUTATE` read-only toggle — that was flagged to the user as a separate, larger scope (this agent's task template has no read-only branch at all; its 9-phase protocol unconditionally instructs remediation regardless of goal text) and not requested.
+
+Both edits syntax-checked (`ast.parse`) and confirmed inside the rebuilt image before any live deploy: `mcp_tools.streamablehttp_client` resolves to the real `streamable_http_client` function (not an ImportError), and `crew._build_llm(...)` returns a `_TruncatingLLM` instance with `supports_stop_words() == False`.
+
+### Part C: live verification — three attempts, two blocked by unrelated infra, one fully successful
+
+1. **Attempt 1 — isolated fresh namespace via the real Argo Workflow** (per explicit user instruction to test "inside an actual experiment, isolating it as it is supposed to be in ace monorepo workflow"): copied one of the 2026-08-14 batch's saved workflow manifests (`06-sre-comprehensive-std-pod-delete.yaml`), retargeted every `otel-demo` namespace reference (5 occurrences: `appNamespace` param, `install-application`'s `-namespace` arg, the embedded ChaosEngine's `appns`, `delete-application`'s `-n` flag — leaving the chart-folder-name occurrences alone) to a fresh `otel-demo-smoke` namespace so the workflow's own `helm uninstall otel-demo -n otel-demo` teardown step couldn't touch the real, already-live `otel-demo` (a 27h-old deployment left over from §60/§61's own live verification). Submitted via `kubectl create`. **Failed** at `install-application` — 5 of ~20 app pods hit `OCI runtime create failed: ... unable to create session key: disk quota exceeded`. Root-caused via `/proc/key-users`: this checkout's rootless-Docker UID (1028) was at `200/200` on `kernel.keys.maxkeys` (the host's default per-user session-keyring quota) — unrelated to the agent code, a pre-existing host resource-exhaustion condition (very likely from a `flash-agent` Helm release left crash-looping in `otel-demo` for 28h/339 restarts, discovered during this investigation — user explicitly said to leave it running rather than stop it). Cleaned up the throwaway namespace (`kubectl delete ns otel-demo-smoke`); quota recovered to `155/200` afterward.
+2. **Attempt 2 — direct `helm install` against the live `otel-demo`** (per explicit user instruction after Attempt 1's blocker, with explicit confirmation to keep everything on the personal rootless Docker daemon — verified via `docker context show` → `rootless`, endpoint `unix:///run/user/1028/docker.sock`, before and after this whole investigation): `helm install sre-comprehensive-smoketest agent-charts/charts/sre-agent-comprehensive -n otel-demo --set agent.containerImage.pullPolicy=Never ...` using the locally rebuilt-and-`kind load`-ed fixed image. **Succeeded**: pod reached `2/2 Running`, agent completed a full CrewAI run and printed a clean `Final Answer` (`{"entities": [], "propagation_chain": []}` — correct, no fault was injected against this healthy namespace), sidecar logs showed 12 real `POST /v1/chat/completions` round-trips, and Langfuse/ClickHouse confirmed 24 correctly-correlated `GENERATION` observations under this run's `notify_id` (vs. 0 for every original 2026-08-14 production run). `helm uninstall` cleaned up successfully afterward.
+
+**Between Attempt 2 and reporting results, discovered (not caused by any command run in this session) that the entire KinD cluster (`agentcert-alfred-control-plane`) had been recreated from scratch** — Docker container `CreatedAt` reset, every `ace` namespace PVC bound to a fresh volume ID (~25 min old), `otel-demo`/`book-info`/the whole `itbench` ChaosEngine/Workflow history gone. Timeline rules out this session as the cause: `helm install`/`helm uninstall` for Attempt 2 both printed success against the *original* long-lived cluster (an uninstall success message requires the release to have actually existed), and no `kind delete`/`kind create` or equivalent was ever run here. Root cause undetermined — no `cluster-init` container was present on this daemon to check logs from (this cluster was brought up via `setup.sh`'s direct host-side `kind create cluster` path, not docker-compose), and the prior container's own logs are gone now that it's been replaced. Flagged to the user; not investigated further as out of scope for this entry.
+
+3. **Attempt 3 — re-verification against the (now necessarily rebuilt) cluster**, driven by the user's follow-up question about *why* 12 of the 24 generations in Attempt 2 were `level=ERROR` with `litellm.APIConnectionError: Ollama_chatException - Cannot connect to host ollama.ace.svc.cluster.local:11434` despite the correct API key/model always being sent. Re-installed the real `otel-demo` app via the `agentcert/agentcert-install-app:latest` image directly (bypassing a since-discovered, separate, unrelated bug: the redeployed `itbench` Argo `workflow-controller` was not reconciling *any* `Workflow` object at all — confirmed correct RBAC, confirmed via a pod restart that a fresh full relist still didn't pick up an already-created `Workflow` — flagged as a known-broken tangent, not chased further, not part of this entry's fix scope). Redeployed the agent with `kubectl logs -n ace deploy/litellm -f` streaming throughout. Reproduced 2 (not 12) `APIConnectionError`s this run — confirming the bug is real, non-deterministic, and load-dependent, not a static routing misconfiguration (a raw single-call reproduction against the proxy was always clean: `Router.py` logs showed `initial list of deployments` / `healthy_deployments` correctly resolving to exactly the one Azure `gpt-4o` entry every time — no Ollama entry ever shares that alias).
+
+### Part D: root cause of the LiteLLM `APIConnectionError`s, and the fix
+
+Root-caused directly against the deployed `litellm/litellm:v1.82.0-stable` image's own source (via `kubectl exec ... cat/grep` on `/app/litellm/proxy/route_llm_request.py`, `/app/litellm/proxy/proxy_server.py`, `/app/litellm/constants.py`): v1.82 added a **proxy-wide singleton aiohttp `ClientSession`**, created once at proxy startup (`_initialize_shared_aiohttp_session()`) and reused for the *entire pod lifetime* by every request from every agent — confirmed via `grep`: 8 requests across three separate test runs all logged the identical session `id()`. The connector's only staleness-related knob is `keepalive_timeout` (default 120s, env-overridable via `AIOHTTP_KEEPALIVE_TIMEOUT`) — a static duration, not adaptive to backend response time, and aiohttp's `TCPConnector` (verified: `inspect.signature` on the actual deployed aiohttp 3.13.3) has no "verify connection still alive before reuse" option at all — a real, industry-wide limitation of HTTP/1.1 keep-alive pooling, not a litellm-specific gap. If a backend closes an idle pooled connection server-side before the 120s client-side window expires, the next reuse gets a bare `litellm.APIConnectionError`. The specific `Ollama_chatException` wording in the original 2026-08-14 investigation is consistent with this session having, at some earlier point, been used by some other caller on this same shared proxy to reach Ollama, with the resulting stale/wrong pooled connection later reused for what should have been an Azure-bound request — plausible given the connector pools by (host, port) but the whole thing is one shared object across every provider and every agent in the cluster.
+
+Also checked whether `router_settings.retry_policy` (litellm's typed per-exception retry-count config) could target `APIConnectionError` specifically, since that was the originally proposed second fix. **It cannot**: read `litellm.types.router.RetryPolicy`'s fields directly from the installed package — only `BadRequestErrorRetries`/`AuthenticationErrorRetries`/`TimeoutErrorRetries`/`RateLimitErrorRetries`/`ContentPolicyViolationErrorRetries`/`InternalServerErrorRetries` exist; confirmed `litellm.APIConnectionError.__mro__` doesn't subclass any of the types `get_retry_from_policy.py`'s `isinstance()` checks cover, so a `retry_policy` entry for it would be silently ignored, never firing (traced the actual call site in `router.py` — when `get_num_retries_from_retry_policy()` returns `None` it falls through to the router's general `num_retries` instead, which already does cover this exception type as a blanket, non-typed setting).
+
+**Fix applied** (all durable, checked-in source; the SAME canonical `agentcert-stack/litellm-setup/litellm_config.yaml` file backs both the Helm and docker-compose deploy paths per `scripts/setup.sh`'s `generate_helm_values_env()` and `patch_litellm_configmap()`, and is bind-mounted directly by `docker-compose.yml` — so one content edit covers all three):
+- `agentcert-stack/litellm-setup/litellm_config.yaml`: `litellm_settings.num_retries` raised `3` → `5` (the only retry lever that actually covers `APIConnectionError`, per the above), with a comment explaining the `RetryPolicy` schema limitation so a future session doesn't re-propose the same (non-functional) typed-retry-policy approach.
+- `deploy/helm/ace/templates/litellm.yaml`, `deploy/k8s/litellm.yaml`, `docker-compose.yml`: added `AIOHTTP_KEEPALIVE_TIMEOUT: "45"` to the `litellm` container/service env, matching each file's existing `LANGFUSE_HOST` hardcoded-env-var pattern (not made `.env`-configurable — no established need for per-deployment variance on this value, matching this repo's existing convention of hardcoding non-secret proxy-tuning constants directly in the manifest, same as `LANGFUSE_HOST`). `deploy/k8s/litellm.yaml`'s embedded ConfigMap copy of the config content was also updated to match (`num_retries: 5` + comment), since that file is a static fallback for anyone who `kubectl apply -f deploy/k8s/` without ever running `setup.sh`'s patch step.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agents/sre-agent-comprehensive/src/sre_comprehensive/mcp_tools.py` | `streamablehttp_client` import now falls back to the `mcp>=2.0` name `streamable_http_client`. |
+| `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py` | Ported `_build_llm_params()`/`_log_waste()`/`_TruncatingLLM`/`_StreamingTruncatingLLM`/`_build_llm()` from sre-agent-crewai's `crew.py`; `build_crew()` now uses `_build_llm()` instead of raw `LLM(...)` with a hardcoded `max_tokens=4096`. |
+| `agentcert-stack/litellm-setup/litellm_config.yaml` | `litellm_settings.num_retries: 3 → 5`, with explanation of why a typed `retry_policy` entry for `APIConnectionError` isn't possible in this litellm version. |
+| `deploy/helm/ace/templates/litellm.yaml` | Added `AIOHTTP_KEEPALIVE_TIMEOUT: "45"` container env var. |
+| `deploy/k8s/litellm.yaml` | Same env var; embedded config copy updated to match `num_retries: 5`. |
+| `docker-compose.yml` | Same env var on the `litellm` service. |
+| `deploy/helm/ace/values-env.yaml` | Regenerated from the edited `litellm_config.yaml` (gitignored, not part of the durable fix itself — `scripts/setup.sh`'s `generate_helm_values_env()` regenerates this automatically on any future run; done manually here only to live-verify without invoking the full interactive wizard). |
+
+### Verification performed
+
+`ast.parse` on both Python edits. `yaml.safe_load_all` on both edited YAML files. `helm template` dry-run confirmed `AIOHTTP_KEEPALIVE_TIMEOUT` renders correctly. `docker compose config --services` confirmed the compose file still parses. Live: `helm upgrade ace deploy/helm/ace -n ace -f values.yaml -f values-env.yaml` applied to this checkout's own `agentcert-alfred` cluster (ownership pre-verified, rootless-only per user instruction — re-confirmed via `docker context show` immediately before this final change); new `litellm` pod confirmed `1/1 Running`; `kubectl exec ... printenv AIOHTTP_KEEPALIVE_TIMEOUT` → `45`; `kubectl exec ... grep num_retries /app/config.yaml` → `5`; a live completion request through the proxy still returns a correct `200` response afterward.
+
+Not verified: whether the `AIOHTTP_KEEPALIVE_TIMEOUT` change measurably reduces the `APIConnectionError` rate specifically (the bug is non-deterministic/load-dependent, so a single before/after run isn't statistically meaningful — would need a repeated-run comparison, not done here). The `sre-agent-comprehensive` fixes themselves ARE conclusively verified end-to-end (Part C, Attempt 2): real LLM round-trips, a clean structured diagnosis, correctly-correlated Langfuse telemetry.
+
+### Durability check
+
+Confirmed durable: all fixes land in checked-in source. The two agent-code fixes are picked up by any future `docker build` of `agentcert/sre-agent-comprehensive`. The LiteLLM fix's env vars are picked up by any future `helm install`/`docker compose up` with no manual step; the `num_retries` change is picked up automatically by `scripts/setup.sh`'s existing `generate_helm_values_env()`/`patch_litellm_configmap()` functions on their next run (both already read from `agentcert-stack/litellm-setup/litellm_config.yaml`, which is the file edited here) — the manually-regenerated `values-env.yaml` used for live-verification in this session is not itself the durable artifact, just how the change was tested without running the full wizard.
+
+### Status: uncommitted, on `feature/itbench-scenarios`. Not committed or pushed — user has not asked for that yet. Open items, both flagged to the user and left for a future session: (1) the unexplained full KinD cluster rebuild between Attempts 2 and 3 — cause unknown, ruled out this session as the trigger; (2) the `itbench` `workflow-controller` not reconciling any `Workflow` object post-rebuild, even after a pod restart — bypassed via a direct one-off `agentcert/agentcert-install-app` pod rather than fixed.
+
+---
+
+## 63. Resolved §62's open item: the "itbench workflow-controller not reconciling" problem was investigator error, not a platform bug (2026-08-20, uncommitted)
+
+### Context
+
+User asked to investigate the item §62 left open: the `itbench` Argo `workflow-controller` appeared to never reconcile any `Workflow` object after the unexplained cluster rebuild between that entry's Attempts 2 and 3, even surviving a pod restart (which forces a full relist).
+
+### Root cause
+
+Not a bug. Argo's workflow-controller filters which `Workflow` objects it will reconcile by an exact-match label, `workflows.argoproj.io/controller-instanceid`, against its own configured `instanceID` (read from the `workflow-controller-configmap` ConfigMap in its namespace — confirmed directly in this controller's startup log: `"Configuration:...instanceID: 99fdffee-a936-4fce-bfe8-7acfc425d494..."`). Any `Workflow` submitted with a missing or mismatched value for that label is silently ignored forever — no error, no event, permanently empty `.status` — exactly the symptom reported in §62.
+
+§62's Attempt 3 workflow used `workflows.argoproj.io/controller-instanceid: 2ef0cc54-a0fe-4ca4-b2ef-1437387d79cd` — which *was* the correct value, but only for the ChaosInfrastructure registration that existed *before* the cluster rebuild (verified earlier in that same investigation via `db.chaosInfrastructures.find({is_active:true})`). After the rebuild, a new ChaosInfrastructure auto-registered with a new `infra_id` (confirmed: `99fdffee-a936-4fce-bfe8-7acfc425d494`, which — by this platform's own design — is provisioned to exactly match the freshly-deployed Argo controller's own `instanceID`, i.e. each connected ChaosInfrastructure gets its own dedicated controller instance filtering by that ID). §62 reused the stale pre-rebuild value instead of re-querying it post-rebuild, so every workflow submitted in that entry's Attempt 3 (and the controller pod restart performed while debugging it) was submitted with a controller-instanceid the *new* controller was never going to match.
+
+### Verification
+
+Submitted a minimal test `Workflow` in `itbench` with `workflows.argoproj.io/controller-instanceid: 99fdffee-a936-4fce-bfe8-7acfc425d494` (read from the current `workflow-controller-configmap`) — reconciled within seconds (`Running`), versus a control workflow submitted with no instanceid label at all in the same test, which sat with empty `.status` indefinitely, exactly reproducing §62's original symptom on demand. This conclusively confirms the mechanism and rules out any actual controller malfunction. (The test workflow itself ended in a trivial, unrelated `Error` — it used the `default` ServiceAccount instead of `argo-chaos`, so it lacked RBAC to get pods; not a reconciliation issue.) Both test workflows deleted after verification.
+
+### Fix / follow-up
+
+No code or config fix needed — this is correct, working, by-design behavior. The only actionable takeaway: **any future manual `Workflow` submission bypassing the GraphQL `runChaosExperiment` mutation (i.e. not going through the normal ChaosCenter UI/API path) must read the current `controller-instanceid` fresh from `kubectl get cm -n itbench workflow-controller-configmap` — or equivalently the currently-active `chaosInfrastructures` doc in the `litmus` Mongo database — at submission time, not reuse a previously-observed value**, since it changes across cluster rebuilds/re-registrations. This is exactly the kind of value the real orchestration path (`register_experiment.py` / the GraphQL `runChaosExperiment` mutation) already resolves correctly on every call — the failure mode only exists for hand-constructed manifests used for ad hoc debugging, as in §62.
+
+### Status: this closes §62's open item; no further action needed. Uncommitted (no source files changed by this entry — purely investigative/corrective).
+
+---
+
+## 63. Closed the gap in §62's `num_retries` fix: a single-deployment alias gets fully blackballed by cooldown before retries can exhaust, independent of `num_retries` (2026-08-20, uncommitted)
+
+### Context
+
+User asked to verify the §62 claim that "the general `num_retries` is the only lever that actually covers `APIConnectionError`". Re-checked directly against the deployed `litellm/litellm:v1.82.0-stable` source. The claim was correct as far as it went (no typed `retry_policy` entry exists for `APIConnectionError` — confirmed again by also checking `AllowedFailsPolicy`, which has the identical 6-exception-type set as `RetryPolicy` and likewise no `APIConnectionError` field), but incomplete: `num_retries` sets a ceiling that doesn't necessarily get reached.
+
+### The actual gap
+
+Traced `router.py`'s exception handler: before every retry attempt, `should_retry_this_error()` is called with the current `healthy_deployments` count for the model group (computed via `_async_get_healthy_deployments()` → `_async_get_cooldown_deployments()`), and **raises immediately — aborting the retry loop outright — if that count is zero**, regardless of how many retries `num_retries` allows. `router_settings.allowed_fails: 3` / `window_size: 10` means 3 failures within any 10-second window puts a deployment into `cooldown_time: 60`s cooldown. The `gpt-4o` alias had exactly **one** deployment (Azure) at that point, so a burst of the §62 connection-pool `APIConnectionError`s dense enough to trip that threshold would blackball the *only* route to Azure, and every retry attempt during the following 60s would short-circuit before `num_retries` ever got a chance to matter — a real candidate for explaining the original 12-of-24-failure run.
+
+Checked for a targeted, per-model-group or per-exception way to raise this threshold instead of a global change — none exists (`AllowedFailsPolicy` doesn't cover `APIConnectionError` either). The only global levers (`allowed_fails`, `disable_cooldowns`) would trade away genuine down-backend protection proxy-wide, for every model group, not just this one — user asked for a way to solve the gap without that tradeoff.
+
+### Fix: a second, independently-tracked deployment entry for the same backend
+
+litellm's Router already supports (and this same config file already uses, for the two `qwen2.5-32b-instruct` Ollama entries) multiple `model_list` entries sharing one `model_name` alias. Cooldown state is tracked per deployment id — a hash of `model_name + litellm_params` (`router.py:_generate_model_id`) — not per physical backend. Added a **second Azure `gpt-4o` deployment entry, pointing at the identical real backend**, to `agentcert-stack/litellm-setup/litellm_config.yaml` (and mirrored in `deploy/k8s/litellm.yaml`'s embedded copy). Now if one deployment id accumulates 3 failures and gets cooled down, the other is a distinct id and stays "healthy" — `_num_healthy_deployments` never hits zero for this alias, so `num_retries` (raised to 5 in §62) actually gets to run instead of being cut short. Scoped narrowly to the one alias that showed the problem; not applied preemptively to the other single-deployment aliases (Gemini, OpenRouter) since they haven't shown the same symptom — flagged as a candidate for the same treatment if they ever do.
+
+**Getting a genuinely distinct id, not an accidental duplicate:** a byte-identical second entry would hash to the *same* id and collapse back into one — verified `_generate_model_id` hashes `model_group` + the full `litellm_params` dict. Gave the second entry an explicit `timeout: 600` in its `litellm_params` (the second entry differs from the first, which inherits the timeout from `router_settings.timeout` and so has no explicit key) — a real, harmless, self-documenting difference (not a fake/inert field) that's otherwise a no-op since 600 already matches the router-level default.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `agentcert-stack/litellm-setup/litellm_config.yaml` | Added a second `model_name: os.environ/AZURE_OPENAI_DEPLOYMENT` entry, identical backend, `timeout: 600` set explicitly to force a distinct deployment id. |
+| `deploy/k8s/litellm.yaml` | Same addition, mirrored in the embedded ConfigMap copy. |
+| `deploy/helm/ace/values-env.yaml` | Regenerated (gitignored, not the durable artifact — see §62). |
+
+### Verification performed
+
+`yaml.safe_load_all` on both edited files. Live: `helm upgrade`d this checkout's own cluster, new `litellm` pod confirmed `1/1 Running`. `GET /v1/model/info` confirmed **two distinct `model_info.id` values** under `model_name: gpt-4o` (`a466...89d`, unchanged from before — the original entry's identity is preserved; `b5a8...c79`, the new one, `timeout: 600.0`). Three sequential completion calls through the proxy all returned `200` with correct content, confirming the added redundancy doesn't disrupt normal routing.
+
+Not verified: an actual reproduction of the cooldown-blackball scenario itself (would require deliberately forcing ≥3 near-simultaneous connection failures within a 10s window against the live Azure backend, not attempted here) — the fix is verified structurally (two independently-tracked ids exist, normal traffic unaffected) but not by directly observing a blackball-avoidance in action.
+
+### Durability check
+
+Confirmed durable: both edits land in checked-in source (`agentcert-stack/litellm-setup/litellm_config.yaml` is the canonical file both the Helm and docker-compose paths read from, per §62's durability notes). A fresh `setup.sh` run or `docker compose up` picks this up automatically; no manual step required beyond what §62 already established.
+
+### Status: uncommitted, on `feature/itbench-scenarios`, live-verified via `agentcert-alfred` (this checkout's own rootless-Docker cluster, re-confirmed still on the `rootless` context throughout).
+
+---
+
+## 64. Full litmus-go SDK conversion of all 29 ITBench custom faults, replacing the raw-shell-script implementation that never wrote a `ChaosResult` — dedicated per-fault RBAC, a new shared Go framework, and 29/29 live-verified via the real chaos-operator pipeline (2026-08-20/21, uncommitted, spans `litmus-go` + `chaos-charts` submodules)
+
+### Context
+
+Investigating "check the logs of the experiment that ran against sre-agent-comprehensive" led to discovering that every one of the 27 (later confirmed 29) custom ITBench fault definitions under `chaos-charts/faults/itbench/*/fault.yaml` is a raw `/bin/sh -c` shell script on image `litmuschaos/k8s:latest` — not a real `litmus-go` SDK experiment binary. This has a real, previously-undiagnosed consequence: none of these scripts ever create or patch a `ChaosResult` CR, so the chaos-operator's own `ChaosEngine.status.experiments[].verdict` field can never leave `"Awaited"`, and the subscriber (`AgentCert/chaoscenter/subscriber/pkg/events/util.go`) forces this to `"Fail"` once the engine reports `completed` — confirmed live against ~100 real runs of an unrelated, concurrently-running benchmark (`flash-agent-5scenario`): `kubectl get chaosresults -A` returned zero objects cluster-wide despite 100+ completed fault injections. User asked for the full conversion to real `litmus-go` SDK binaries (not the cheaper "just patch `ChaosResult` via kubectl" fix originally proposed), plus a live smoke test of every fault.
+
+### RBAC: dedicated per-fault ServiceAccount, not the shared `litmus-admin`
+
+Initial approach widened the shared `litmus-admin-role` (the base RBAC every chaos experiment in this namespace runs as, imported from upstream LitmusChaos 2025-11-27 — 7.5 months before the ITBench fault catalog existed, confirmed via `git log --follow --diff-filter=A`) to cover the ~11 resource types (`nodes`, `horizontalpodautoscalers`, `resourcequotas`, `configmaps`, `secrets`, `persistentvolumeclaims`, `priorityclasses`, `pods/ephemeralcontainers`, `serviceaccounts`, `roles`/`rolebindings`) the ITBench faults need beyond what upstream's own built-in experiment library ever touches. User then asked to revert this in favor of dedicated per-fault identities instead, on discovering that each fault's own `engine.yaml` sample already names one (`chaosServiceAccount: <fault>-sa`) — the *intended* design — but no corresponding `ServiceAccount`/`Role`/`RoleBinding` was ever actually provisioned for any of the 29, so every real run had been silently falling back to the shared `litmus-admin` identity all along. **Reverted the widening in full** (both `AgentCert/chaoscenter/graphql/server/manifests/namespace/2a_litmus_admin_rbac.yaml` and `.../cluster/2b_litmus_admin_rbac.yaml`, source and live) and built the 29 dedicated bundles instead.
+
+Each fault's `chaos-charts/faults/itbench/<fault>/rbac.yaml` (new file, generated by a script since deleted from the scratchpad — the 29 output files are the durable artifact) provisions:
+- A **namespaced `Role`** for the "chaos-runner" baseline every fault needs regardless of what it mutates: `pods`/`pods/log` (create/monitor the actual experiment Job+pod), `jobs` (create/monitor), `chaosengines` (get/list/**update** — see bug below), `chaosexperiments` (get/list), `chaosresults` (full CRUD), `events` (create/patch). Scoped to the `itbench` admin namespace only, since that's where the runner/experiment pods and `ChaosEngine`/`ChaosResult` objects themselves live.
+- A **`ClusterRole`** (not `Role`) for the fault's actual target mutation (e.g. `deployments`/`statefulsets` patch, `secrets` CRUD, `nodes` patch) — see bug below for why this has to be cluster-scoped.
+
+Two RBAC bugs found and fixed live before the design was right, both now baked into every one of the 29 bundles:
+1. **Missing chaos-runner baseline.** First attempt scoped each `Role` to only what the *experiment binary itself* needs (`pkg/result`/`pkg/events`/`common.GetValuesFromChaosEngine`). Live 403: `"cannot update resource chaosengines"` — there's a separate "chaos-runner" pod (the operator's own intermediate orchestrator that creates the actual experiment Job and patches `ChaosEngine` status) running under the *same* `chaosServiceAccount`, needing its own broader `pods`/`jobs`/`chaosengines:update` baseline that has nothing to do with what the fault itself mutates.
+2. **`Role` vs `ClusterRole`.** First attempt made everything a namespaced `Role` in `itbench`. Live 403: `"cannot list resource deployments in the namespace otel-demo"` — targets live in arbitrary application namespaces (`otel-demo`, `book-info`, ...), determined at `ChaosEngine`-submission time via `TARGETS`, not fixed at RBAC-authoring time; a `Role` only ever grants access within its own namespace. Split into a namespaced `Role` (chaos-runner baseline, itbench-scoped) + a `ClusterRole` (target-mutation rules, cluster-scoped) bound to the same `ServiceAccount`.
+
+Two more RBAC gaps found during live smoke testing, fixed per-fault:
+3. `chaos-mesh-http-abort-replacement`'s actual Go implementation discovers the target's container ports via a live pod list (matching what the original shell script did), not via the `Deployment` spec as first assumed — needed `pods: get,list` added.
+4. `kubernetes-api-server-request-surge` hit Kubernetes' own self-privilege-escalation guard: creating a `Role` that grants `pods: get,list` to its scanner sub-workload requires the *creating* `ServiceAccount` to already hold that same permission itself, not just create/list/delete rights on `Role` objects.
+
+### Go framework (`litmus-go/pkg/itbench/common/`, new)
+
+- **`orchestrator.go`** — `Run(ctx, cs, InjectFunc)`: the full litmus-go experiment lifecycle (env parsing via `types.InitialiseChaosVariables`, SOT/EOT `ChaosResult` create+patch, pre/post-chaos probes, the abort-watcher goroutine, `ChaosEngine`/`ChaosResult` events), mirroring `experiments/generic/pod-delete`'s own orchestration exactly but parameterized by a per-fault `InjectFunc` so it's shared by all 29 instead of copy-pasted. Also `ResolveTarget`/`ResolveTargets` (target resolution via `chaosDetails.AppDetail`, itself derived by the SDK from the `TARGETS` env var — confirmed live the chaos-operator does populate this correctly from `ChaosEngine.spec.appinfo`, contradicting an earlier, now-corrected claim in this conversation that neither `TARGETS` nor `APP_NAMESPACE`/`APP_LABEL`/`APP_KIND` were real mechanisms; `APP_NAMESPACE`/`APP_LABEL`/`APP_KIND` are the vestigial ones, `TARGETS` is real and is exactly what `types.GetTargets` in the SDK itself consumes).
+- **`fieldpatch.go`** / **`containerpatch.go`** — the generic capture/inject/hold/revert engine covering the ~24 faults that reduce to "patch one field, revert to the captured original (or remove if it was absent)": `PatchField`/`PatchWorkloadField`/`PatchContainerField` (single field, whole-value replace), their `...Fields` plural variants (multiple fields patched/reverted atomically, e.g. command+args together), `MergeField`/`MergeContainerMapField`/`MergeWorkloadMapField` (merge one key into a map field, preserving siblings — e.g. `resources.limits.memory` without clobbering `resources.limits.cpu`), `RemoveContainerField` (injection itself is a deletion), `AppendAndRemoveInitContainer`/`AppendAndRemoveWorkloadArrayItems` (append array item(s), remove by landed index on revert).
+
+Two real Go bugs found and fixed during live smoke testing:
+5. **Array-index navigation.** `AppendAndRemoveWorkloadArrayItems` (used by the PVC-mount fault, appending to `containers/<idx>/volumeMounts`) originally called `unstructured.NestedSlice(target.Object, spec.Path...)` — that helper (and all of `k8s.io/apimachinery/.../unstructured`'s `Nested*` family) only navigates `map[string]interface{}` at every path segment and errors out the moment it hits a numeric array-index segment. Live error: `"...containers.0 accessor error: ... is of the type []interface {}, expected map[string]interface{}"`. Fixed by switching to this package's own `readNested` (already written for exactly this — it type-switches on `map[string]interface{}` vs `[]interface{}` per segment).
+6. **Revert logic trusted pre-inject "found" instead of re-checking current state.** The shared revert engine (`applyFieldPatch`, `applyMultiFieldPatch`) blindly emitted a JSON-Patch `"remove"` for any field that was absent *before* injection. Kubernetes' API server round-trips through its own typed schema on write, and an empty slice/map we explicitly `"add"`ed (e.g. `args: []`) can come back out the other side as `omitempty`-dropped — i.e. genuinely absent again — even though our patch nominally succeeded. RFC 6902 `"remove"` requires the target path to currently exist, so the blind remove then 400s. Live error (`invalid-kubernetes-workload-container-command`, reverting `command`+`args`): `"the server rejected our request due to an error in our request"`. Fixed with a new `buildRevertOp` helper: restoring a real captured value always uses `"add"` (idempotent regardless of current presence); restoring "absent" re-fetches the object and only emits `"remove"` if the field is actually present right now, otherwise skips that op entirely.
+
+### Dockerfile / dispatcher
+
+`litmus-go/build/Dockerfile.itbench` (new) — deliberately not based on the upstream `build/Dockerfile` (which installs `stress-ng`/`tc`/`iptables`/`toxiproxy`/etc. for helper-pod-based faults): all 29 itbench faults are pure Kubernetes-API mutations via `client-go`'s dynamic client (confirmed per-fault during the earlier research phase — even the one ephemeral-container fault creates the ephemeral container via the API, it doesn't itself need a shell), so a static binary (`CGO_ENABLED=0`) on `gcr.io/distroless/static-debian12:nonroot` is sufficient. `litmus-go/bin/itbench-experiment/main.go` (new) — a second dispatcher alongside upstream's `bin/experiment/experiment.go`, same `-name`-flag/switch pattern, one `case` per fault (29 total, verified against the 29 fault directory names via `grep -c 'case "'`). Image built as `agentcert/itbench-experiment:dev` and `kind load docker-image`ed into `agentcert-alfred` — **local-only, not pushed to Docker Hub, see Durability below.**
+
+### Fault-name-length bug (independent of the conversion, pre-existing)
+
+5 of 29 fault directory names are long enough (59–60 chars for 3, 56 chars — right at the boundary — for 2 more) that the chaos-operator's own Job/container naming (`<ChaosExperiment-name>-<6-hex-suffix>`) exceeds Kubernetes' 63-character limit for label values and container names. Live error (from the runner pod's own log, not from `litmus-go`): `Job.batch "misconfigured-kubernetes-workload-container-readiness-probe-467ebe" is invalid: spec.template.labels: must be no more than 63 bytes, spec.template.spec.containers[0].name: must be no more than 63 characters`. This happens at Job-admission time, entirely independent of whether the container image runs a shell script or a Go binary — **the original raw-shell-script versions of these same 5 faults would have hit this identically**, it was simply never discovered before this smoke-testing pass. Fixed by shortening the `ChaosExperiment` object's own identity only:
+
+| Fault directory (kept as-is — dispatcher `-name` arg, docs, discoverability) | `ChaosExperiment` name (shortened) |
+|---|---|
+| `unsupported-architecture-kubernetes-workload-container-image` | `unsupported-architecture-container-image` |
+| `modified-kubernetes-workload-container-environment-variable` | `modified-container-environment-variable` |
+| `misconfigured-kubernetes-workload-container-readiness-probe` | `misconfigured-container-readiness-probe` |
+| `unschedulable-kubernetes-workload-pod-anti-affinity-rule` | `unschedulable-pod-anti-affinity-rule` |
+| `unassigned-kubernetes-workload-container-resource-limits` | `unassigned-container-resource-limits` |
+
+Updated in each fault's `fault.yaml` (`metadata.name`, `metadata.labels.name`, `spec.definition.labels.name`) and `engine.yaml` (`spec.experiments[].name`, must match exactly for the operator to resolve it). Deliberately did **not** touch: the fault directory name, the `-name` argument passed to the dispatcher binary (independent CLI routing key, unrelated to the K8s object name), or the `rbac.yaml` `ServiceAccount` name (`<directory-name>-sa`, not subject to this constraint — SA names allow up to 253 chars).
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/graphql/server/manifests/namespace/2a_litmus_admin_rbac.yaml` | Widened then fully reverted to original upstream scope — net no-op, left exactly as found. |
+| `AgentCert/chaoscenter/graphql/server/manifests/cluster/2b_litmus_admin_rbac.yaml` | Same — widened then reverted. |
+| `chaos-charts/faults/itbench/*/rbac.yaml` | **New**, all 29: dedicated `ServiceAccount` + namespaced `Role` (chaos-runner baseline) + `ClusterRole`/`ClusterRoleBinding` (target mutation), scoped per-fault. |
+| `chaos-charts/faults/itbench/*/fault.yaml` | All 29: `image`/`imagePullPolicy`/`command`/`args` rewritten from the raw shell script to `agentcert/itbench-experiment:dev` + `-name <fault>`; vestigial `APP_NAMESPACE`/`APP_LABEL`/`APP_KIND` env defaults stripped (not read by the SDK; `TARGETS` is). 5 of the 29 also got shortened `metadata.name`/labels (see above). |
+| `chaos-charts/faults/itbench/{5 faults}/engine.yaml` | `spec.experiments[].name` updated to match the shortened `ChaosExperiment` name. |
+| `litmus-go/pkg/itbench/common/orchestrator.go`, `fieldpatch.go`, `containerpatch.go` | **New** — shared framework, see above. |
+| `litmus-go/experiments/itbench/<fault>/experiment/experiment.go` | **New**, all 29 — one small (`~20`–`120` line) file per fault, each just an `InjectFunc` built from the shared framework's helpers (or, for the 4 structurally distinct faults — `chaos-mesh-pod-failure-replacement`'s ephemeral container, `chaos-mesh-http-body-tamper-replacement`'s synthetic-traffic pod, `kubernetes-api-server-request-surge`'s scanner workload, `priority-kubernetes-workload-priority-preemption`'s decoy Deployment — bespoke logic using the same underlying `client-go` dynamic client). |
+| `litmus-go/bin/itbench-experiment/main.go` | **New** — dispatcher, 29 cases. |
+| `litmus-go/build/Dockerfile.itbench` | **New** — slim distroless build. |
+| `.tmp/sre-agent-experiments/batch-scripts/create_sre_manifests.py` | Added `ITBENCH_SCENARIO_TO_FAULT_DIR` mapping + a `chaosServiceAccount` substitution so the 5 ITBench-scenario faults this generator uses get their dedicated `-sa` instead of the hardcoded `litmus-admin` it previously emitted (inherited from an even earlier flash-agent source manifest). **Gitignored path — see Durability.** |
+
+### Verification performed
+
+**29/29 faults live-verified** via the real chaos-operator pipeline — dedicated `ServiceAccount` → runner pod → Job → real Go binary container → real `ChaosResult` (`phase: Completed, verdict: Pass, probeSuccessPercentage: 100`) correctly mirrored into `ChaosEngine.status.experiments[].verdict`, target correctly resolved via `TARGETS`. Run as two full batches (first batch: 22/29 clean, surfaced bugs 1–6 above; second batch after fixes: 24/29, remaining 5 all traced to the fault-name-length issue, confirmed independently reproducible with a deliberately short `ChaosEngine` name — ruling out the engine name and pinning it on the `ChaosExperiment` name) plus a final targeted rerun of the 5 renamed faults (all `Pass`). Two of the 29 also showed a false failure caused by orphaned objects (a stray `PersistentVolumeClaim` and `ServiceAccount`) left behind by the *first* batch's since-fixed bugs erroring out before their own cleanup step ran — deleted, then re-verified clean. Cluster left in a clean state afterward (checked: no leftover `smoke-*`/`retest-*` `ChaosEngine`/`ChaosResult`/pods, `quote`/`valkey-cart` deployments healthy, `smoke-hpa-target` HPA removed).
+
+### Durability
+
+- **Confirmed durable**: all `chaos-charts/` and `litmus-go/` changes land in their respective submodule's checked-in source. A fresh clone + `setup.sh` would pick up the RBAC bundles and the converted `fault.yaml`s.
+- **Not yet durable — the image.** `agentcert/itbench-experiment:dev` exists only as a locally-built image `kind load`ed into this one checkout's `agentcert-alfred` cluster. It is not pushed to Docker Hub and has no entry in `scripts/prepare-images.sh`'s `LITMUS_IMAGES_SOURCE` handling. On a fresh checkout or a different host, every one of the 29 `fault.yaml`s would reference an image that doesn't exist. Follow-up needed: either push a real tagged release via the `build-and-push.sh` pattern and update all 29 `fault.yaml`s' `image:`/`imagePullPolicy:`, or wire a `local`-source build+`kind load` step into `prepare-images.sh` alongside the existing `LITMUS_IMAGES_SOURCE=local` path for upstream litmus images.
+- **Not yet durable — `create_sre_manifests.py`'s fix.** Lives under `.tmp/`, which is gitignored/ephemeral per this repo's own convention (§13 of `CLAUDE.md`) — the fix is real and on disk in this checkout, but won't survive being treated as source the way the submodule changes will, and isn't reachable by a fresh clone at all.
+- **Neither submodule has been committed.** `litmus-go` has real untracked new files (`bin/itbench-experiment/`, `pkg/itbench/`, `experiments/itbench/`, `build/Dockerfile.itbench`) against `origin` (`https://github.com/AgentCert/litmus-go.git`, confirmed AgentCert-org per `CLAUDE.md`'s submodule-URL rule, not a personal fork). `chaos-charts` likewise has the 29 `rbac.yaml` additions + 29 `fault.yaml` rewrites + 5 `engine.yaml` edits uncommitted. Both need a commit+push in-submodule and a pointer-bump commit in the parent repo before this is durable beyond this local checkout.
+
+### Status: uncommitted, spans the `litmus-go` and `chaos-charts` submodules plus one gitignored script. Live-verified 29/29 on `agentcert-alfred`. Image is local-only — see Durability above before relying on this from any other checkout or a rebuilt cluster.
+
+---
+
+## 65. Full end-to-end check of `sre-agent-comprehensive` + all 29 ITBench faults triggered via the real GraphQL/UI path (not hand-built `kubectl apply`) — found and fixed a cluster-wide LiteLLM-connectivity outage, two real server-side validation/behavior gaps, and a host-level image-load reliability bug; ultimately found the agent produces an empty diagnosis on 29/29 real fault runs despite the LLM now being reachable (2026-08-21, uncommitted)
+
+### Context
+
+User asked for a complete check of `sre-agent-comprehensive` together with the ITBench fault catalog (§64's litmus-go conversion), explicitly requiring the trigger path to be the **real one the ChaosCenter web UI itself uses** — `saveChaosExperiment`/`runChaosExperiment` GraphQL mutations building a real Argo `Workflow`, delivered to the in-cluster subscriber over its live GraphQL subscription — not the hand-built `ChaosEngine` + `kubectl apply` smoke tests §64 used, which never exercise agent registration, server-side manifest validation, or the subscriber/workflow-controller pipeline at all. Scope, confirmed with the user up front: all 29 faults, `sre-agent-comprehensive` only, including an explicit re-check of whether the agent produces real LLM `GENERATION` spans in Langfuse per run — a still-open question from earlier in this engagement (the original 2026-08-14 batch showed zero LLM activity for this agent).
+
+### Part A: getting one fault through the real path — four infra bugs found and fixed along the way
+
+Before attempting all 29, one fault (`scaled-to-zero-kubernetes-workload`) was pushed through the real trigger path repeatedly until clean, surfacing four distinct, previously-undetected bugs — none of which any prior `kubectl apply`-based smoke test in this engagement could have hit:
+
+1. **Cluster-wide kube-proxy failure had silently broken all ClusterIP Service routing.** `kubectl logs -n kube-system <kube-proxy-pod>` showed continuous `"Failed to execute iptables-restore" err="... sendmsg() failed: Message too long"` / `"Sync failed"` retries. A pod-to-pod test confirmed the symptom precisely: direct-IP traffic to `valkey-cart` worked, but the same request via the ClusterIP Service (`nc -z -v valkey-cart 6379`) timed out — and the same was true for `litellm.ace.svc.cluster.local:14000`. This is almost certainly the real explanation for the original 2026-08-14 "zero LLM `GENERATION` spans" finding: the agent's sidecar/LLM client reaches LiteLLM by Service DNS, so if ClusterIP routing was broken then too, every LLM call would have failed silently at the network layer, with no application-level clue. Fix: `kubectl delete pod -n kube-system -l k8s-app=kube-proxy` — the DaemonSet recreated it and it rebuilt its iptables-nft ruleset cleanly (58 `KUBE-SVC-*` chains, 386 rules, no further sync errors). This is **not a durable fix** — it corrects a runtime fault on the live node, not a config bug in this repo's source; if the underlying corruption recurs (root cause not fully isolated — likely accumulated iptables-nft/legacy interaction from many earlier chaos experiments manipulating iptables directly on this KinD node), the same recovery step applies.
+2. **`saveChaosExperiment` hard-rejects any `ChaosEngine` with an empty probe list**, an error only the real GraphQL path enforces: `"no probes specified in chaosengine - <name>"` (`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` ~L1010). None of the 29 `engine.yaml` reference samples ship a probe (that's normally added interactively via the UI's probe-builder), so every ChaosEngine built by `.tmp/sre-agent-experiments/batch-scripts/create_sre_manifests.py` needed one synthesized. Two follow-on findings while getting this right (both empirically confirmed, not assumed):
+   - The probe must live under `spec.experiments[0].spec.probe`, **not** top-level `spec.probe` — confirmed by reading `service.go`'s actual check (`workflowManifest.Spec.Experiments[0].Spec.Probe`).
+   - **Probe field values are frozen at `saveChaosExperiment` time, before Argo ever runs.** `service.go`'s save handler parses the embedded probe, calls `probeService.AddProbe()` to persist it as a standalone, reusable probe object, and rewrites the ChaosEngine to reference it via a `probeRef` annotation — Argo's `{{workflow.parameters.*}}` substitution never gets a chance to run on probe fields specifically (confirmed empirically: a probe field set to `"{{workflow.parameters.adminModeNamespace}}"` came back in the *applied* `ChaosEngine` as the literal string `workflow.parameters.adminModeNamespace`, braces stripped, causing a `K8S_PROBE_ERROR`). `appns`/`TOTAL_CHAOS_DURATION` elsewhere in the same YAML blob substitute correctly, since those aren't probe fields and go through Argo's normal per-run manifest apply. Fix: since `adminModeNamespace` is always the literal constant `"itbench"` (never actually variable across faults), the probe now uses that literal directly instead of the placeholder.
+3. **An unset probe `labelSelector` silently defaults to the ChaosEngine's own `spec.appinfo.applabel`** (Litmus/chaos-operator behavior, not Argo) — so a probe checking for any `pods` present in the *runner's own* `itbench` namespace, with no explicit `labelSelector`, actually searched `itbench` for pods labeled e.g. `opentelemetry.io/name=quote` (the *fault's* target app label) and always found zero, regardless of the fault outcome (`ChaosResult` `phase: Completed_With_Probe_Failure`, `probeSuccessPercentage: 0`, `verdict: Fail` on an otherwise-correct run). Fix: explicit `labelSelector: app.kubernetes.io/name=litmus`, matching the always-Running chaos-operator pod — a real, RBAC-compatible, always-true presence check with no per-fault coupling.
+4. **This host's `kind load docker-image` unreliably transfers stale image content to the KinD node.** Reproduced 3× in a row: `docker image inspect <tag> --format '{{.Id}}'` on the host correctly showed a freshly-rebuilt image (confirmed via `docker run` — chart present), yet `docker save <tag>` — even pinned to that exact digest — exported a manifest whose Config blob digest didn't match, and `kind load docker-image` (which shells out to an equivalent save/transfer) deposited that stale content on the node every time, causing `install-agent` to fail instantly with `"Configuration error: chart folder not found: /charts/sre-agent-comprehensive"` (the chart genuinely didn't exist in whatever content actually landed on the node). `docker cp` was separately found to be unreliable under this host's rootless-Docker context: it reported exit code 0 while the destination file provably didn't exist in the target container (confirmed via `docker exec ... ls`). This host's Docker daemon runs the `containerd-snapshotter` storage driver (`docker info` → `driver-type: io.containerd.snapshotter.v1`); root cause not fully isolated beyond that, but the failure mode is consistent with a stale containerd content-store entry surviving under the same repo:tag across rebuilds. **Fix, verified working end-to-end 4× in a row**: replace both `kind load docker-image` and `docker cp` with `docker save <img> -o tar` → piped `docker exec -i <node> sh -c 'cat > /tmp/x.tar'` (not `docker cp`) → `docker exec <node> ctr -n k8s.io images import /tmp/x.tar`. Landed in `.tmp/sre-agent-experiments/batch-scripts/launch_all_sre.py`'s `ensure_images_fresh()`, which already runs before every single one of the 29 triggers (so a fresh, correct image is guaranteed immediately before each `install-agent` step, closing the gap even though the underlying host bug isn't fixed).
+
+Two more things learned while chasing (4), neither a bug in this repo but both real operational gotchas worth recording:
+- **The GraphQL server unconditionally overrides `install-agent`'s image regardless of what the client submits.** `applyInstallAgentTemplateOverridesFallback` (`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` ~L1715) forces any template named `install-agent` (or whose image contains `agentcert-install-agent`) to `utils.Config.InstallAgentImage` (env `INSTALL_AGENT_IMAGE`, unset on this deployment) falling back to the hardcoded `agentcert/agentcert-install-agent:latest` — a client-submitted image tag for that specific step is silently discarded. (`install-app`/`install-application` is not matched by this override — its image is honored as submitted.) A session-scoped attempt to route around bug (4) by loading images under a unique tag (`itbenchval1`) was therefore pointless specifically for `install-agent`, and was reverted once this was found; the real fix had to be "keep `:latest` correct on the node right before every trigger," which `ensure_images_fresh()` now does.
+- **A stuck/abandoned `Workflow` object backlogs the subscriber's apply queue for other, unrelated experiments.** After leaving one `Pending`/`ErrImageNeverPull` workflow undeleted while debugging, a *subsequent, independent* `runChaosExperiment` call for a different manifest sat with the subscriber acking receipt every ~10s but not actually applying the new `Workflow` object for **11+ minutes**, until the stuck one was deleted — confirmed via `kubectl logs -n itbench -l app=subscriber` showing a real gap between the last "UPDATE" ack and the next "ADD"/"Applying request" line. `launch_all_sre.py`'s existing sequential design (always waits for a terminal phase before triggering the next fault) already avoids this in normal operation; it only bit during this session's manual, out-of-band retry loop.
+
+### Part B: all 29 faults, real trigger path — clean
+
+With the above fixed, `launch_all_sre.py` (`CC_JWT=<jwt> python3 .tmp/sre-agent-experiments/batch-scripts/launch_all_sre.py`) ran all 29 faults sequentially and unattended, ~8–9 minutes each, ~4h wall-clock total. **29/29 Argo Workflows `Succeeded`, 29/29 `ChaosResult`s `verdict: Pass` / `probeSuccessPercentage: 100`** (30 `ChaosResult`s total in the namespace — 29 from the batch plus the one earlier single-fault validation run). This includes the structurally distinct HPA fault (`misconfigured-kubernetes-horizontal-pod-autoscaler`, which needs its own `create-hpa-target`/`delete-hpa-target` workflow steps since every run does a full app reinstall — spot-checked separately: `Pass`, `100%`) and every fault-name-length-shortened fault from §64.
+
+**LLM connectivity is fixed, confirmed across all 29, not just one sample**: queried Langfuse (`/api/public/observations?traceId=<run_notify_id>`) for every one of the 29 runs — **all 29 show real `GENERATION` observations** (12–14 each, `litellm-acompletion` / `azure/gpt4o`, real token usage) — zero runs with no LLM activity. This directly resolves the original 2026-08-14 open finding; Part A's kube-proxy fix is the most likely root cause given the timing and mechanism (Service-DNS-dependent LLM path).
+
+### Part C: a new, more important finding — the agent produces an empty diagnosis on all 29/29 real fault runs
+
+Spot-checking three runs' actual `output.content` (the CrewAI agent's final structured answer) showed `{"entities": [], "propagation_chain": []}` for all three — an empty diagnosis, i.e. "no fault found," despite a real fault being injected and the `ChaosResult` confirming injection succeeded. Checked systematically: **all 29/29 runs produced this same empty result.**
+
+Drilling into the observation sequence for one run (`deleted-kubernetes-service`, 12 `GENERATION`s): every single one, without exception, goes straight to `Thought: I now can give a great answer\nFinal Answer: {"entities": [], "propagation_chain": []}` — the agent **never successfully executes a single tool call** across any of its ~6 scan iterations (12 generations ≈ 2 LLM calls per iteration). The trace input confirms why: each generation's final input message is CrewAI's own built-in format-retry fallback — `"I did it wrong. Invalid Format: I missed the 'Action:' after 'Thought:'. ... If you don't need to use any more tools, you must give your best complete final answer"` — meaning the model's very first raw attempt at CrewAI's strict `Thought:/Action:/Action Input:` ReAct format fails to parse on every single iteration, every single run, and the framework's one-retry fallback (not something this repo wrote — this is `crewai`/`langchain`'s own built-in behavior) forces an immediate, tool-free "final answer" instead of a second real attempt.
+
+This contradicts §62's Part C Attempt 2, which recorded a real, successful ReAct loop for this same agent (non-empty tool use, correct empty-diagnosis-because-no-fault-was-actually-present result) — but that was a single manual `helm install` against a healthy namespace with no fault injected and no real Argo workflow involved, not a repeated sample under the real fault-injection path. Given today's result is 29/29 with zero variance, this reads as a systematic incompatibility between GPT-4o's (really GPT-5.1's, per §61) actual ReAct-format output and CrewAI's parser under these conditions, not one-off flakiness — but the discrepancy with §62 means it isn't fully characterized yet: unclear whether it's caused by something specific to the multi-fault production system prompt (visible in the trace: a long 9-phase investigation protocol, materially longer/more complex than whatever prompt §62's manual test used), model non-determinism, or something else entirely. **Not root-caused or fixed in this session** — flagging as the primary actionable finding of this check: the fault-injection and platform-trigger pipeline is now fully verified working end-to-end, but the agent itself is not currently producing usable diagnoses under real conditions, for a different reason than the original zero-LLM-activity bug.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `.tmp/sre-agent-experiments/batch-scripts/register_experiment.py` | `PROJECT_ID`/`INFRA_ID` refreshed to current live values (both previously stale, confirmed dead against Mongo). `register_and_run()` accepts an optional `experiment_id` to update-in-place on retry instead of hitting the duplicate-name check. |
+| `.tmp/sre-agent-experiments/batch-scripts/create_sre_manifests.py` | Rewritten to source all 29 faults' current (post-§64) `fault.yaml`/`engine.yaml` directly from `chaos-charts/`, target `sre-agent-comprehensive` only. Added the required `k8sProbe` (Part A.2/A.3), real target `applabel`s (engine.yaml samples ship these blank), and the HPA fault's `create-hpa-target`/`delete-hpa-target` step injection. |
+| `.tmp/sre-agent-experiments/batch-scripts/launch_all_sre.py` | `REQUIRED_IMAGES` updated to this session's scope (`sre-agent-comprehensive`, dropped `sre-agent-crewai`; added `agentcert/itbench-experiment:dev`). `ensure_images_fresh()` replaced `kind load docker-image` with the verified `docker save` → piped `docker exec` → `ctr images import` sequence (Part A.4). |
+
+All three are gitignored (`.tmp/`) — not durable beyond this checkout, matching the pattern already established for `create_sre_manifests.py` in §64.
+
+### Live/manual (not durable) actions taken this session
+
+- `kubectl delete pod -n kube-system -l k8s-app=kube-proxy` — recovers the current cluster's ClusterIP routing; not a source-code fix (see Part A.1).
+- Multiple `docker build`/`ctr images import` cycles to get correct images onto the KinD node — superseded by the durable `ensure_images_fresh()` fix above for all *future* runs of this script, but any other workflow/tooling on this host that separately relies on `kind load docker-image` for this image is still exposed to Part A.4's underlying bug.
+
+### Verification performed
+
+Real GraphQL trigger path end-to-end for all 29 faults (`saveChaosExperiment`+`runChaosExperiment`, not `kubectl apply`), sequential, unattended, ~4h. Verified per-run: (a) Argo `Workflow` terminal phase — 29/29 `Succeeded`; (b) `ChaosResult` verdict/`probeSuccessPercentage` — 29/29 `Pass`/`100` (30 total incl. the earlier single-fault validation); (c) Langfuse `GENERATION`-span presence per `run_notify_id` — 29/29 non-zero (12–14 each); (d) agent diagnosis content — 29/29 empty (Part C). HPA fault and all five §64 name-shortened faults spot-checked individually, not just swept in the bulk pass.
+
+### Durability check
+
+The four Part A infra fixes: (1) kube-proxy — live/manual, not durable, no source-code bug identified to fix; (2) probe requirement + (3) `labelSelector` default — durable within `.tmp/create_sre_manifests.py`, but that file itself is gitignored/non-durable per §64's already-established pattern (would need to move into a tracked location to survive a fresh checkout — not done, matches existing repo convention that `.tmp/` scripts are dev-only tooling, not shipped product code); (4) image-load reliability — durable *within this session's script* (`ensure_images_fresh()`), but the underlying host-level `kind load docker-image` bug itself is not fixed and would still bite any other tooling on this host that calls it directly. Part C (empty agent diagnosis) — no fix attempted, nothing to assess for durability.
+
+### Status: uncommitted (all changes in gitignored `.tmp/` scripts + one live pod restart). On `feature/itbench-scenarios`; no modification made anywhere outside this branch's scope. Open item for a future session: root-cause why `sre-agent-comprehensive`'s CrewAI ReAct loop fails to parse its own tool-call format on 100% of real fault-injection runs, despite a successful manual run recorded in §62.
+
+---
+
+## 66. Litmus run graph was visually reordering install steps to the end (UI merge-key regression) — fixed by merging on stable step identity instead of mutable display labels (2026-08-25, uncommitted)
+
+### Context
+
+User reported that in ChaosCenter's experiment-run workflow graph, the first two steps (`install-application`, `install-agent`) appeared at the tail of the graph even though they execute first.
+
+### Root cause
+
+This was a frontend merge-key bug in the run-details graph renderer, not a backend workflow-ordering bug:
+
+- `KubernetesYamlService.getFaultsFromExperimentManifest()` now decorates install step labels for canvas readability as `install-agent: <folder>` / `install-application: <folder>`.
+- `ExperimentRunDetailsGraph` merged static manifest steps with runtime Argo node state using `name` as the join key.
+- Runtime Argo nodes still expose base names (`install-agent`, `install-application`).
+- Because the keys no longer matched, install steps were not merged in place and were appended as runtime-only entries, visually making them appear at the end.
+
+### Fix applied
+
+`AgentCert/chaoscenter/web/src/views/ExperimentRunDetailsGraph/ExperimentRunDetailsGraph.tsx`:
+
+1. Removed `name`-based `keyBy(...)/merge(...)` joining.
+2. Added key normalization that strips display suffixes (text after `:`) and Argo wrapper suffixes like `(0)`/prefix wrappers.
+3. Merged runtime state onto manifest graph nodes using stable step identity (`identifier`/`id`/normalized key), preserving manifest order.
+4. Appended only truly runtime-only nodes after manifest-ordered nodes.
+
+### Verification performed
+
+- TypeScript diagnostics check on the edited file (`get_errors`) returned no errors.
+- Logic check confirms install step labels can remain decorated for UX while join keys stay canonical, so install nodes no longer drift due to label changes.
+
+### Secondary risk identified (not changed in this patch)
+
+Two graph-traversal helpers still seed traversal with `Object.keys(nodes)[0]`:
+
+- `web/src/utils/transformArgoData.ts`
+- `web/src/services/experiment/ExperimentYamlService.ts`
+
+If node map key insertion order changes (serialization/runtime differences), the initial traversal root can vary, causing occasional unstable visual ordering even when workflow execution order is unchanged. This is separate from the install-step key regression fixed above.
+
+### Durability check
+
+Durable: yes. The fix is in checked-in frontend source (`ExperimentRunDetailsGraph.tsx`), so fresh checkouts and new runs pick it up automatically.
+
+### Status
+
+Uncommitted working-tree change (single tracked frontend file edit).
+
+---
+
+## 67. Setup-time dependency availability audit across Python, Node, and Go (2026-08-25)
+
+**Request context:** user asked for three things in one pass: (1) verify whether Python
+packages used by this repo are present in the currently used environment, (2) identify
+which Python environment infra setup would use right now, and (3) make setup check required
+packages across languages before proceeding.
+
+### 67.1 Environment and package-state checks performed
+
+1. Resolved workspace Python environment via tooling:
+   - Environment type: `venv`
+   - Version: `3.12.3`
+   - Interpreter prefix: `/home/alfred02.TRN/ace-monorepo/.venv/bin/python`
+2. Ran a manifest-vs-installed Python dependency audit against repo manifests
+   (`requirements*.txt` + `pyproject.toml`, excluding `.venv`/generated dirs).
+3. Result summary:
+   - Manifests scanned: `5` requirements + `5` pyproject files
+   - Requirements evaluated: `354`
+   - Missing packages: `182`
+   - Incompatible versions: `117`
+   - Highest-gap manifests: `agents/ciso-agent/requirements-dev.txt` and `certifier/requirements.txt`
+
+### 67.2 What Python environment infra setup uses now
+
+Observed behavior from `scripts/setup.sh` + `scripts/check-prerequisites.sh`:
+
+- Host-side setup scripting uses shell + `python3` heredocs (not the workspace venv by
+  default), with prerequisite validation ensuring `python3.12` availability (`/usr/bin/python3.12`
+  on this host).
+- The certifier runtime used by infra deploy paths is containerized and pinned by
+  `certifier/Dockerfile` to `python:3.11-slim` (builder + runtime stages).
+- Net: setup-time host checks run with host Python; deployed certifier runs with image Python 3.11.
+
+### 67.3 Source changes made
+
+| File | Change |
+|---|---|
+| `scripts/check-prerequisites.sh` | Added optional full dependency audit mode (`ACE_PREREQ_FULL_DEP_AUDIT=1`) that checks: Python manifest dependencies (requirements + pyproject) with report output to `.tmp/prereq/python-dependency-audit.txt`, Node dependencies for `AgentCert/chaoscenter/web` via `npm ls`, and Go module availability across all `go.mod` trees via `go list -m all` (`-mod=readonly`). |
+| `scripts/check-prerequisites.sh` | Added non-blocking issue reporting by default plus strict mode toggle (`ACE_PREREQ_FAIL_ON_DEP_ISSUES=1`) to fail fast when any language audit reports gaps. |
+| `scripts/setup.sh` | Exports `ACE_PREREQ_FULL_DEP_AUDIT=1` before sourcing `check-prerequisites.sh`, so every setup/restart run now performs cross-language dependency availability checks automatically. |
+
+### 67.4 Verification
+
+- Syntax validation: `bash -n scripts/check-prerequisites.sh` and `bash -n scripts/setup.sh` passed.
+- Runtime validation of new path:
+  - `ACE_PREREQ_FULL_DEP_AUDIT=1 bash scripts/check-prerequisites.sh`
+  - Output confirmed Python/Node/Go audits run and report status; Python gaps correctly surfaced;
+    Node and Go audits passed on this host.
+
+### 67.5 Durability check
+
+Durable: **yes**. The new checks are in tracked source (`scripts/check-prerequisites.sh` and
+`scripts/setup.sh`), so fresh checkouts and future setup runs inherit them automatically. The
+dependency-detail artifacts are intentionally runtime outputs under `.tmp/prereq/`.
+
+**Status:** uncommitted working-tree changes in `scripts/check-prerequisites.sh` and
+`scripts/setup.sh`.
+
+---
+
+## 68. Langfuse trace volumes can now survive teardown and be reused on the next local setup (2026-08-25, uncommitted)
+
+### Context
+
+User asked for `shut_down.sh` and `setup.sh` to let them keep Langfuse traces from the previous infrastructure and get them back when setting the infra up again.
+
+### Root cause / behavior gap
+
+`scripts/shut_down.sh` used `docker compose down -v` for the Langfuse compose project, and the root compose stack also used `down -v`. Both paths delete Docker named volumes. For Langfuse, those volumes are where the local compose stack keeps Postgres metadata, ClickHouse trace data/logs, MinIO objects, and Redis state, so a full teardown discarded local trace history. Unlike the existing Kubernetes MongoDB backup flow, there was no user-visible keep/delete choice for Langfuse data.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/shut_down.sh` | Added `--keep-langfuse-traces` and `--delete-langfuse-traces`. Interactive teardown now prompts when matching Langfuse data volumes exist; `--yes` defaults to keeping them, mirroring the existing Ollama-model retention behavior. |
+| `scripts/shut_down.sh` | Identifies Langfuse trace/data volumes for both compose project shapes: `ace-langfuse-<instance>_langfuse_*` from `start-local-services.sh` and `ace-<instance>_langfuse_*` from the root compose stack. |
+| `scripts/shut_down.sh` | When preserving Langfuse traces, stops compose projects without `-v`, then explicitly removes non-kept project volumes so teardown still cleans unrelated data while leaving Langfuse volumes available for the next bring-up. Final verification excludes intentionally kept Langfuse volumes. |
+| `scripts/setup.sh` | Added a startup detector that reports preserved Langfuse data volumes for the current `ACE_INSTANCE_NAME` and explains that the next local Langfuse compose bring-up will reattach them automatically. |
+
+### Verification performed
+
+- `bash -n scripts/shut_down.sh`
+- `bash -n scripts/setup.sh`
+- `bash -n scripts/shut_down.sh scripts/setup.sh`
+- `./scripts/shut_down.sh --help | sed -n '1,32p'` confirmed the new flags are visible in the CLI help.
+- VS Code diagnostics reported no errors for either edited script.
+
+### Durability check
+
+Durable for the local Docker Compose Langfuse path: yes. The behavior lands in tracked setup/teardown scripts and relies on the existing instance-scoped compose volume names, so preserved local Langfuse volumes are reattached by the next local compose bring-up for the same `ACE_INSTANCE_NAME`.
+
+This does not yet implement a Kubernetes/KinD Langfuse export/import archive analogous to the existing MongoDB archive flow; preserving traces for a deleted KinD cluster would still require a separate Postgres/ClickHouse/MinIO backup path.
+
+**Status:** uncommitted working-tree changes in `scripts/shut_down.sh` and `scripts/setup.sh`.
+
+---
+
+## 69. Langfuse trace retention default restored to old delete-on-teardown workflow (2026-08-25, uncommitted)
+
+### Context
+
+Follow-up correction to §68. User clarified that the default should remain the old workflow: if no explicit Langfuse-retention choice is made, teardown should delete Langfuse trace/data volumes.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/shut_down.sh` | Changed `KEEP_LANGFUSE_TRACES` default from `1` to `0`, so Langfuse volumes are deleted unless the user explicitly chooses `--keep-langfuse-traces` or answers `y` at the interactive prompt. |
+| `scripts/shut_down.sh` | Updated help text and `--yes` messaging to state that the default is deleting Langfuse trace volumes, matching the old workflow. |
+| `scripts/shut_down.sh` | Changed the interactive prompt default from `[Y/n]` to `[y/N]`. |
+
+### Verification performed
+
+- `bash -n scripts/shut_down.sh` passed.
+- `./scripts/shut_down.sh --help | sed -n '1,20p'` confirmed the help now says Langfuse retention is opt-in and default teardown deletes trace volumes.
+- VS Code diagnostics reported no errors for `scripts/shut_down.sh`.
+
+### Durability check
+
+Durable: yes. The behavior lands in tracked `scripts/shut_down.sh`; future teardowns keep the old delete-by-default behavior unless `--keep-langfuse-traces` is used explicitly.
+
+**Status:** uncommitted working-tree change in `scripts/shut_down.sh`.
+
+---
+
+## 70. setup.sh now fails hard on any dependency gap and runs helper Python via workspace venv when present (2026-08-25, uncommitted)
+
+### Context
+
+User requested two stricter guarantees:
+
+1. Setup must fail loudly unless **all** declared codebase libraries/dependencies are present.
+2. Setup should use workspace venv Python (instead of base host Python) so setup-time Python snippets can import the same libraries as normal dev workflows.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Enabled strict dependency enforcement by exporting `ACE_PREREQ_FAIL_ON_DEP_ISSUES=1` (full audits were already enabled via `ACE_PREREQ_FULL_DEP_AUDIT=1`). |
+| `scripts/setup.sh` | Exported `ACE_PREREQ_PYTHON_BIN=${REPO_ROOT}/.venv/bin/python` before sourcing `check-prerequisites.sh`, so audit selection explicitly targets the workspace venv interpreter first. |
+| `scripts/setup.sh` | Added `SETUP_PYTHON` resolver (`.venv/bin/python` preferred, fallback to `python3` with warning) and rewired all embedded Python invocations (`- <<'PY'`, `-c`, and heredoc runners) to use `"${SETUP_PYTHON}"` instead of hardcoded `python3`. |
+| `scripts/check-prerequisites.sh` | Added `PREFERRED_AUDIT_PYTHON` (`ACE_PREREQ_PYTHON_BIN`) support in `pick_python_for_audit()`, so prerequisite audits honor setup-provided interpreter selection. |
+| `scripts/check-prerequisites.sh` | Fixed strict-mode failure messaging: dependency-audit failures no longer print the misleading docker/git missing-tools error. Added `BASE_REQ_FAILED` split to distinguish base-tool failures from dependency-audit failures. |
+
+### Verification performed
+
+- `bash -n scripts/setup.sh`
+- `bash -n scripts/check-prerequisites.sh`
+- `ACE_PREREQ_FULL_DEP_AUDIT=1 ACE_PREREQ_FAIL_ON_DEP_ISSUES=1 ACE_PREREQ_PYTHON_BIN=/home/alfred02.TRN/ace-monorepo/.venv/bin/python bash scripts/check-prerequisites.sh`
+
+Observed runtime behavior:
+
+- Python/Node/Go audits all execute.
+- On missing/incompatible Python dependencies, script exits non-zero in strict mode and now reports:
+  `Dependency audits failed in strict mode. Review the .tmp/prereq reports ...`
+
+### Durability check
+
+Durable: yes. Behavior is in tracked setup/prereq scripts and will apply to fresh checkouts and future setup runs. Reports remain runtime artifacts under `.tmp/prereq/`.
+
+**Status:** uncommitted working-tree changes in `scripts/setup.sh` and `scripts/check-prerequisites.sh`.
+
+---
+
+## 71. Added Python import-surface audit so undeclared imports also fail setup (2026-08-25, uncommitted)
+
+### Context
+
+After strict manifest auditing was enabled (§70), a gap remained: imports that are used in code but not declared in requirement manifests (example discussed with user: `import litellm` in `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py`) could still slip through manifest-only checks.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/check-prerequisites.sh` | Added a Python import-surface audit (`.tmp/prereq/python-import-audit.txt`) executed in full-audit mode. It parses all repo Python files (excluding generated/venv dirs), extracts imported top-level module names, filters stdlib and repository-local modules, and checks importability with `importlib.util.find_spec`. |
+| `scripts/check-prerequisites.sh` | Import-audit findings now set dependency-audit failure state, which is fatal under strict mode (`ACE_PREREQ_FAIL_ON_DEP_ISSUES=1`). |
+| `scripts/check-prerequisites.sh` | Reduced local-module false positives by collecting local module/package names recursively (`**/*.py`, `**/__init__.py`) instead of only top-level package names. |
+
+### Verification performed
+
+- `ACE_PREREQ_FULL_DEP_AUDIT=1 ACE_PREREQ_FAIL_ON_DEP_ISSUES=1 ACE_PREREQ_PYTHON_BIN=/home/alfred02.TRN/ace-monorepo/.venv/bin/python bash scripts/check-prerequisites.sh`
+- Confirmed strict failure and report generation at `.tmp/prereq/python-import-audit.txt`.
+
+Current import-audit summary on this host (workspace venv):
+
+- `python_files_scanned=332`
+- `imports_checked=42`
+- `missing_import_modules=28`
+
+### Durability check
+
+Durable: yes. The import-surface audit is in tracked prerequisite source and runs on every setup/prereq full audit path.
+
+**Status:** uncommitted working-tree change in `scripts/check-prerequisites.sh` (plus prior uncommitted setup/prereq changes from §70).
+
+---
+
+## 72. setup.sh dependency-audit investigation fixed strict-mode regression and sourced color assumption (2026-08-25, uncommitted)
+
+### Context
+
+User reported setup output where the new full dependency audit warned about missing/incompatible Python packages, printed that setup could continue, then `setup.sh` failed immediately after `.env` handling with a shell syntax-style error near a parenthesized token.
+
+Investigation found that the current checked-out `scripts/setup.sh` parses cleanly with Bash (`bash -n`) and the reported line region no longer reproduces a syntax error under the shebang interpreter. A POSIX `sh` parse does fail on Bash-only syntax, but with a different line number and before the same execution path, so it does not match the exact captured output. The nearby concrete failure found on the same setup/prereq path was that strict dependency-audit behavior had been forced from `setup.sh` while the script still printed advisory-mode messaging, and strict failure while sourced could hit an unbound `RED` color variable.
+
+### Fix applied
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` | Added the missing `RED` color variable used by the sourced prerequisite script's `err()` function. |
+| `scripts/setup.sh` | Changed `ACE_PREREQ_FAIL_ON_DEP_ISSUES` from an unconditional `1` to an opt-in default: `ACE_PREREQ_FAIL_ON_DEP_ISSUES=${ACE_PREREQ_FAIL_ON_DEP_ISSUES:-0}`. Setup now matches its own warning text: dependency-audit gaps are advisory unless the caller explicitly requests fail-fast behavior. |
+| `scripts/check-prerequisites.sh` | Hardened sourced-mode behavior so `RED` and `NC` get defaults even when a caller already defines `ok`/`warn` but not all color variables. |
+
+### Verification performed
+
+- `bash -n scripts/setup.sh && bash -n scripts/check-prerequisites.sh` passed.
+- `./scripts/setup.sh --agent=definitely-not-a-real-agent` ran through prerequisite sourcing, dependency-audit warnings, workspace-venv selection, and `.env` handling, then exited cleanly at the intentional invalid-agent validation. No syntax error reproduced.
+- `ACE_PREREQ_FULL_DEP_AUDIT=1 ACE_PREREQ_FAIL_ON_DEP_ISSUES=1 ACE_PREREQ_PYTHON_BIN=/home/alfred02.TRN/ace-monorepo/.venv/bin/python bash scripts/check-prerequisites.sh` exits nonzero with the intended strict dependency-audit failure message, not an unbound-variable failure.
+
+### Durability check
+
+Durable: yes. The changes land in tracked setup/prereq scripts, so fresh checkouts get advisory setup audits by default and explicit strict dependency checks still fail fast with clear messaging.
+
+**Status:** uncommitted working-tree changes in `scripts/setup.sh`, `scripts/check-prerequisites.sh`, and both handoff docs.
+
+---
+
+## 73. Litmus UI agent cleanup and sre-agent-comprehensive ImagePullBackOff fixes (2026-08-25, uncommitted)
+
+### Context
+
+User reported two runtime issues from launching experiments in the Litmus Chaos UI:
+
+1. `flash-agent` was installed but was not deleted at experiment end; Langfuse showed it kept making LLM calls.
+2. `sre-agent-comprehensive` did not set up cleanly; one of the two containers in the pod was consistently stuck in `ImagePullBackOff`.
+
+### Live investigation
+
+- Current cluster showed a surviving `flash-agent` deployment in `book-info` with Helm release metadata and no Argo owner reference: deployment `book-info/flash-agent`, Helm release secrets `sh.helm.release.v1.flash-agent.v1` and `sh.helm.release.v1.flash-agent.v2`.
+- Because that deployment has no Argo owner reference, Kubernetes garbage collection cannot remove it when the workflow exits; the workflow must explicitly uninstall the Helm release.
+- Recent Flash logs showed the paired LLM-call pattern is expected ReAct behavior: one `/v1/chat/completions` call requests tool calls, then another synthesizes the final response after tool results. Scans with another tool batch can show three calls.
+- Flash continued calling the LLM because the pod survived the workflow and remained in scan mode, repeatedly finding warning-level issues and rescheduling another scan.
+- Current `sre-agent-comprehensive` pod in `otel-demo` was `1/2` because `agent-sidecar` pulled successfully but the `agent` container failed on `localhost:5000/agentcert/sre-agent-comprehensive:latest` with `dial tcp [::1]:5000: connect: connection refused`.
+- This contradicted the durable image-preparation path from §36, where `scripts/prepare-images.sh` builds and kind-loads `agentcert/sre-agent-comprehensive:latest` directly into the KinD node, not into an in-cluster registry at `localhost:5000`.
+
+### Root causes
+
+1. Several UI-launchable Argo workflows installed agents through Helm but either had no teardown step or only had normal-path teardown. If a workflow failed/aborted after the agent install, Argo did not run later cleanup steps, and Helm-created Deployments are not owned by the Workflow.
+2. `agent-charts/charts/sre-agent-comprehensive/values.yaml` defaulted to a non-existent `localhost:5000` registry with `imagePullPolicy: Always`. On KinD, `localhost` in the node is the node container itself, so the pull failed unless a registry was running in that namespace. `Always` also bypassed the local `kind load docker-image agentcert/sre-agent-comprehensive:latest` path.
+
+### Source changes (durable)
+
+| File | Change |
+|------|--------|
+| `agent-charts/charts/sre-agent-comprehensive/values.yaml` | Changed agent image registry from `localhost:5000` to `docker.io` and pull policy from `Always` to `IfNotPresent`, matching the `agentcert/sre-agent-comprehensive:latest` image name built/kind-loaded by `scripts/prepare-images.sh`. |
+| `chaos-charts/experiments/bookinfo-itbench/experiment.yaml` | Added `spec.onExit: uninstall-all`; replaced the optional app-only teardown template with an `uninstall-all` template that uninstalls the Helm agent release and the `bookinfo` app release. |
+| `chaos-charts/experiments/sre-agent-comprehensive-itbench-single/experiment.yaml` | Added `spec.onExit: uninstall-all`; added an `uninstall-all` template that uninstalls the SRE agent release, the `otel-demo` app release, and best-effort deletes ChaosEngine/ChaosResult resources. |
+| `chaos-charts/experiments/itbench-adapted-scenarios/experiment.yaml` | Added `spec.onExit: uninstall-all` so its existing cleanup template runs even when earlier install or fault steps fail. |
+
+### Verification performed
+
+- `helm template sre-agent-comprehensive agent-charts/charts/sre-agent-comprehensive --namespace otel-demo | grep -E 'image:|imagePullPolicy:'` confirmed `image: "docker.io/agentcert/sre-agent-comprehensive:latest"` and `imagePullPolicy: IfNotPresent`.
+- `kubectl apply --dry-run=client -f chaos-charts/experiments/bookinfo-itbench/experiment.yaml -f chaos-charts/experiments/sre-agent-comprehensive-itbench-single/experiment.yaml` validated the two named workflow manifests.
+- `kubectl create --dry-run=client -f chaos-charts/experiments/itbench-adapted-scenarios/experiment.yaml` validated the `generateName` workflow manifest.
+
+### Durability check
+
+Durable: yes. The fixes land in tracked Helm chart defaults and tracked ChaosExperiment workflow manifests, so future UI-launched experiments inherit the corrected image reference and failure-path cleanup. This does not delete the already-running live leftover resources; those require an explicit, user-approved cleanup command because this is a shared host.
+
+**Status:** uncommitted working-tree changes in `agent-charts`, `chaos-charts`, and both handoff docs.
+
+---
+
+## 74. Local feature-branch changes packaged into submodule commits (2026-08-25, uncommitted superproject pointer update)
+
+### Context
+
+The user requested that all local changes in the ACE monorepo and subrepos be committed and pushed, while only modifying the `feature/itbench-scenarios` branches. The root checkout and all dirty submodules were verified to be on `feature/itbench-scenarios` before staging or committing.
+
+Generated/local-only root artifacts were found during staging: `.venv-setup-auto/` and `.claude-diag-test.txt`. These were not source changes and should not be committed. The root `.gitignore` was updated so they stay out of future commits.
+
+### Submodule commits created
+
+| Repository | Commit | Summary |
+|------------|--------|---------|
+| `AgentCert` | `a98cafc` | `feat: improve ITBench experiment workflow UX` |
+| `agent-charts` | `854d53c` | `feat: configure ITBench SRE agents` |
+| `agentcert-stack` | `b1c7a9b` | `chore: update LiteLLM model routing` |
+| `certifier` | `b22c679` | `chore: update certifier dependencies` |
+| `chaos-charts` | `3ec0947` | `feat: add ITBench fault RBAC manifests` |
+| `litmus-go` | `d6d18fcc` | `feat: add ITBench experiment runner` |
+
+### Verification performed
+
+- Verified the root checkout and dirty submodules were on `feature/itbench-scenarios` before committing.
+- Staged source changes in each dirty submodule and ran `git diff --cached --check` for every submodule. The AgentCert web files retain their existing CRLF style; the whitespace check is noisy for those CRLF lines, but `git diff --cached --ignore-space-at-eol --stat` confirmed the content delta stayed scoped to the intended source changes rather than a whole-file rewrite.
+- Ran a staged grep scan for common credential-like terms before committing. Matches were expected config labels, environment-variable references, RBAC API group strings, UI strings, or test/log token-count text; no live secret was identified in staged content.
+
+### Durability check
+
+Durable: yes. The source changes are now captured in feature-branch commits in their owning submodules, and the superproject pointer update is ready to record those exact SHAs. The root `.gitignore` change prevents future accidental staging of the generated setup virtualenv and scratch diagnostic file.
+
+**Status:** submodule commits created locally; superproject commit and pushes still pending.

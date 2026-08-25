@@ -10,10 +10,12 @@ by at least one explicit phase of the protocol.
 from __future__ import annotations
 
 import os
+from typing import Any, Dict, List, Optional
 
+import litellm
 from crewai import Agent, Crew, LLM, Task
 
-from .mcp_tools import get_all_tools
+from mcp_tools import get_all_tools
 
 # ---------------------------------------------------------------------------
 # Output schema shared by ITBench evaluators
@@ -231,6 +233,166 @@ Rules:
 - If no fault was found, return entities=[] and propagation_chain=[]
 """
 
+# Some model aliases behind the shared LiteLLM proxy silently route to a
+# different real model than their name implies — same environment/proxy as
+# sre-agent-crewai (see agents/sre-agent-crewai/src/sre_crewai/crew.py),
+# verified there for "gpt-4o" via the `x-ms-served-model` Azure response
+# header (it's actually GPT-5.1, a reasoning-class model). Reasoning-class
+# models reject the legacy `max_tokens`/`stop` Chat Completions params
+# outright (400 Bad Request), and CrewAI's own capability auto-detection
+# (LLM.supports_stop_words()) can't catch this — it pattern-matches the
+# model *name* string via litellm's static registry, which has no
+# visibility into what a given deployment was actually repointed to.
+#
+# CrewAgentExecutor also unconditionally sets `self.llm.stop = stop_words`
+# on construction (crew_agent_executor.py ~L84-87) regardless of what
+# supports_stop_words() returns, and base LLM.call() sends whatever's in
+# `self.stop` on every request — so overriding supports_stop_words() alone
+# does NOT stop `stop` from being sent; call() itself must be overridden
+# too. Two strategies, selected via SRE_AGENT_STOP_STRATEGY:
+#   "truncate" (default) — never send `stop`; let the model generate its
+#     full response and cut it client-side at the first stop marker, same
+#     effect as CrewAI's own dormant fallback path (the
+#     `if not self.use_stop_words:` branch in crew_agent_executor.py) but
+#     reachable without depending on supports_stop_words()'s wrong answer.
+#     Bounded by SRE_AGENT_MAX_COMPLETION_TOKENS so a runaway/hallucinated
+#     continuation has a hard ceiling rather than an unbounded worst case.
+#   "stream" — abort the connection the instant the stop marker appears in
+#     the streamed text, closer to what native `stop` would have actually
+#     cost in billed tokens. More precise, more code, not yet
+#     production-hardened — prototype only, ported from sre-agent-crewai
+#     (see innovation.md §4.7 there).
+_STOP_STRATEGY = os.environ.get("SRE_AGENT_STOP_STRATEGY", "truncate").strip().lower()
+# Matches the original hardcoded `max_tokens=4096` this file used before we
+# learned it has to be sent as `max_completion_tokens` instead (see
+# _build_llm_params below) — same budget, correct wire key, adjustable
+# per-deployment without a code change.
+_MAX_COMPLETION_TOKENS = int(os.environ.get("SRE_AGENT_MAX_COMPLETION_TOKENS", "4096"))
+# Off by default — token_counter() re-tokenizes every truncated completion,
+# pure overhead unless someone's actually trying to quantify the workaround's
+# cost right now. Opt in with SRE_AGENT_LOG_TOKEN_WASTE=1/true/yes.
+_LOG_TOKEN_WASTE = os.environ.get("SRE_AGENT_LOG_TOKEN_WASTE", "").strip().lower() in ("1", "true", "yes")
+
+# CrewAI's ReAct prompt format cuts each turn here (agent.py:
+# `stop_words = [self.i18n.slice("observation")]`, same literal in this
+# crewai version) — duplicated here since it's not derivable without a
+# constructed Agent instance at the point _TruncatingLLM needs it.
+_STOP_MARKER = "\nObservation:"
+
+
+def _build_llm_params(llm: "LLM", messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Same param set as crewai.LLM.call(), except:
+    - `stop` is always omitted — the marker is stripped client-side instead
+      (either after the fact or mid-stream, depending on strategy).
+    - the length cap is sent as `max_completion_tokens`, never the legacy
+      `max_tokens` key: base LLM.call() builds
+      `"max_tokens": self.max_tokens or self.max_completion_tokens` — i.e.
+      it collapses max_completion_tokens onto the wire key "max_tokens"
+      regardless of which attribute is actually set, which is exactly the
+      param this model rejects. Sending it under its real name is the
+      entire fix.
+    """
+    params = {
+        "model": llm.model,
+        "messages": messages,
+        "timeout": llm.timeout,
+        "temperature": llm.temperature,
+        "top_p": llm.top_p,
+        "n": llm.n,
+        "max_completion_tokens": llm.max_completion_tokens or _MAX_COMPLETION_TOKENS,
+        "presence_penalty": llm.presence_penalty,
+        "frequency_penalty": llm.frequency_penalty,
+        "logit_bias": llm.logit_bias,
+        "response_format": llm.response_format,
+        "seed": llm.seed,
+        "logprobs": llm.logprobs,
+        "top_logprobs": llm.top_logprobs,
+        "api_base": llm.base_url,
+        "api_version": llm.api_version,
+        "api_key": llm.api_key,
+        **llm.kwargs,
+    }
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _log_waste(model: str, kept_text: str, completion_tokens: Optional[int]) -> None:
+    """Best-effort measurement of how much of the billed completion was
+    discarded by client-side truncation. Opt-in only — see
+    _LOG_TOKEN_WASTE above."""
+    if not _LOG_TOKEN_WASTE or not completion_tokens:
+        return
+    try:
+        kept_tokens = litellm.token_counter(model=model, text=kept_text)
+        wasted = max(completion_tokens - kept_tokens, 0)
+        if wasted:
+            # print(), not logging: matches __main__.py's [sre-comprehensive]
+            # convention and guarantees visibility in `kubectl logs` without
+            # depending on whatever logging config (if any) the host process
+            # has set up.
+            print(
+                f"[sre-comprehensive] stop-word workaround: {wasted}/{completion_tokens} "
+                f"completion tokens discarded after truncation "
+                f"({100 * wasted / completion_tokens:.0f}% waste)"
+            )
+    except Exception:
+        pass  # measurement is best-effort; never let it break a real call
+
+
+class _TruncatingLLM(LLM):
+    """Default ("truncate") strategy — see module-level comment above."""
+
+    def supports_stop_words(self) -> bool:
+        return False
+
+    def call(self, messages: List[Dict[str, str]], callbacks: Optional[List[Any]] = None) -> str:
+        if callbacks:
+            self.set_callbacks(callbacks)
+        params = _build_llm_params(self, messages)
+        response = litellm.completion(**params)
+        full_text = response["choices"][0]["message"]["content"]
+        kept_text = full_text.split(_STOP_MARKER)[0].rstrip()
+        _log_waste(self.model, kept_text, response["usage"].get("completion_tokens"))
+        return kept_text
+
+
+class _StreamingTruncatingLLM(LLM):
+    """"stream" strategy (opt-in, SRE_AGENT_STOP_STRATEGY=stream) — prototype,
+    ported from sre-agent-crewai, see module-level comment above."""
+
+    def supports_stop_words(self) -> bool:
+        return False
+
+    def call(self, messages: List[Dict[str, str]], callbacks: Optional[List[Any]] = None) -> str:
+        if callbacks:
+            self.set_callbacks(callbacks)
+        params = _build_llm_params(self, messages)
+        params["stream"] = True
+        stream = litellm.completion(**params)
+        chunks: List[str] = []
+        try:
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    chunks.append(delta)
+                    if _STOP_MARKER in "".join(chunks):
+                        break
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+        full_text = "".join(chunks)
+        return full_text.split(_STOP_MARKER)[0].rstrip()
+
+
+def _build_llm(model: str, base_url: str, api_key: str) -> LLM:
+    llm_cls = _StreamingTruncatingLLM if _STOP_STRATEGY == "stream" else _TruncatingLLM
+    return llm_cls(
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=0.0,
+    )
+
 
 def build_crew(
     goal: str,
@@ -239,6 +401,10 @@ def build_crew(
     output_path: str,
     namespace: str = "otel-demo",
 ) -> Crew:
+    import sys
+
+    # Prints the directory path of the active Python environment
+    print("Current Environment Path:", sys.prefix)
     base_url = (
         os.environ.get("LITELLM_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
@@ -251,13 +417,7 @@ def build_crew(
     )
     prefixed_model = model if "/" in model else f"openai/{model}"
 
-    llm = LLM(
-        model=prefixed_model,
-        base_url=base_url,
-        api_key=api_key,
-        temperature=0.0,
-        max_tokens=4096,
-    )
+    llm = _build_llm(prefixed_model, base_url, api_key)
 
     investigator = Agent(
         role="SRE Comprehensive Fault Investigator and Remediator",
@@ -303,3 +463,4 @@ def build_crew(
         tasks=[task],
         verbose=True,
     )
+build_crew()

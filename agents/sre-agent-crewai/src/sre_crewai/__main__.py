@@ -40,10 +40,22 @@ def _extract_json(text: str) -> dict | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CrewAI SRE incident investigator")
-    parser.add_argument("--goal", required=True, help="Investigation goal")
+    # The agent-charts Helm chart (the only live deployment path — see
+    # agents/harness/sre-agent-crewai/bench.yaml) runs this entrypoint with no
+    # CLI args at all, relying entirely on env vars from its ConfigMap. --goal
+    # must therefore have an env-backed default, not `required=True`, or every
+    # pod deployed that way fails at argument parsing before build_crew() ever
+    # runs. GOAL/MODEL_ALIAS are the chart's ConfigMap key names; the old
+    # standalone agent-harness.yaml script still passes --goal/--model
+    # explicitly and continues to take precedence when given.
+    parser.add_argument(
+        "--goal",
+        default=os.environ.get("GOAL", "Diagnose and remediate all faults in the Kubernetes cluster."),
+        help="Investigation goal",
+    )
     parser.add_argument(
         "--model",
-        default=os.environ.get("MODEL", "qwen2.5-7b-instruct"),
+        default=os.environ.get("MODEL_ALIAS") or os.environ.get("MODEL", "qwen2.5-7b-instruct"),
         help="LiteLLM model alias",
     )
     parser.add_argument("--workspace-dir", default="/tmp/agent/workspace")

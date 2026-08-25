@@ -491,7 +491,17 @@ class FlashAgent:
 
         if not mcp_tools:
             logger.error("No MCP tools discovered – cannot proceed")
-            return {"health": {"overall_health_score": -1}, "issues": []}
+            self._add_to_history(
+                "assistant",
+                "SCAN FAILED: no MCP tools discovered — cannot analyze cluster/namespace health",
+                {"scan_id": scan_id, "status": "failed"},
+            )
+            return {
+                "health": {"overall_health_score": -1},
+                "issues": [],
+                "status": "failed",
+                "status_reason": "no_mcp_tools_discovered",
+            }
 
         # Direct tool→client routing: each tool carries the URL of the server
         # that advertised it. Build a lookup so _execute_mcp_tool can route
@@ -628,7 +638,18 @@ class FlashAgent:
         
         if analysis is None:
             logger.error("ReAct loop ended without valid analysis")
-            return {"health": {"overall_health_score": -1}, "issues": []}
+            self._add_to_history(
+                "assistant",
+                f"SCAN FAILED: ReAct loop ended without valid analysis after "
+                f"{iteration} iteration(s) — LLM calls failed or produced unparseable output",
+                {"scan_id": scan_id, "status": "failed"},
+            )
+            return {
+                "health": {"overall_health_score": -1},
+                "issues": [],
+                "status": "failed",
+                "status_reason": "react_loop_no_analysis",
+            }
 
         # ── Step 4: Log results ──────────────────────────────────────────────
         duration = time.time() - scan_start
@@ -666,7 +687,8 @@ class FlashAgent:
             "tool_calls": tool_calls_made,
             "iterations": iteration,
         }
-        
+        analysis["status"] = "completed"
+
         if hindsight:
             analysis["hindsight_reflection"] = {
                 "generated": True,

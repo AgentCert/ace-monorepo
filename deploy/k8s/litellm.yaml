@@ -67,6 +67,27 @@ data:
           context_window: 128000
           max_output_tokens: 16384
 
+      # Azure OpenAI GPT-4o -- SECOND deployment entry, same real backend,
+      # deliberately duplicated for cooldown redundancy. See
+      # agentcert-stack/litellm-setup/litellm_config.yaml for the full
+      # explanation: a single-deployment model_name group gets entirely
+      # blackballed (aborting retries regardless of num_retries) after 3
+      # failures in 10s, which happens for real under litellm v1.82's
+      # shared-aiohttp-session connection-pool bug. `timeout` is set
+      # explicitly so this entry's litellm_params hashes to a distinct
+      # deployment id instead of collapsing into the entry above.
+      - model_name: os.environ/AZURE_OPENAI_DEPLOYMENT
+        litellm_params:
+          model: os.environ/LITELLM_AZURE_CHAT_MODEL
+          api_base: os.environ/AZURE_OPENAI_ENDPOINT
+          api_key: os.environ/AZURE_OPENAI_KEY
+          api_version: os.environ/AZURE_OPENAI_API_VERSION
+          timeout: 600
+        model_info:
+          description: "Azure OpenAI GPT-4o (redundant deployment id for cooldown isolation)"
+          context_window: 128000
+          max_output_tokens: 16384
+
       # OpenRouter Free Tier
       - model_name: auto-free
         litellm_params:
@@ -98,8 +119,11 @@ data:
       # Drop parameters not supported by target model
       drop_params: true
   
-      # Number of retries on failure
-      num_retries: 3
+      # Number of retries on failure. The only retry knob that covers
+      # litellm.APIConnectionError (stale pooled connection) -- see
+      # agentcert-stack/litellm-setup/litellm_config.yaml for why a typed
+      # retry_policy entry can't target that exception in v1.82.0.
+      num_retries: 5
   
       # Timeout between retries
       retry_after: 2
@@ -184,6 +208,13 @@ spec:
             # Langfuse is a K8s service in the same namespace
             - name: LANGFUSE_HOST
               value: "http://langfuse-web:3000"
+            # See deploy/helm/ace/templates/litellm.yaml for the full explanation:
+            # LiteLLM v1.82's shared aiohttp session pools connections proxy-wide
+            # with a 120s default keepalive; a backend that closes idle connections
+            # sooner produces a bare litellm.APIConnectionError on reuse. aiohttp
+            # has no "verify before reuse" option, only this static timeout.
+            - name: AIOHTTP_KEEPALIVE_TIMEOUT
+              value: "45"
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

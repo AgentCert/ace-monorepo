@@ -55,7 +55,7 @@ ENV_FILE="${REPO_ROOT}/.env"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 # Force UTF-8 as Python's default text encoding (PEP 540) for every embedded
-# `python3 - <<'PY'` heredoc below. Without this, Python on Windows opens
+# `${SETUP_PYTHON} - <<'PY'` heredoc below. Without this, Python on Windows opens
 # files (.env, litellm_config.yaml, ...) using the OS codepage (e.g. cp1252)
 # instead of UTF-8, and decoding fails with UnicodeDecodeError on this
 # repo's box-drawing/arrow characters (→ ─ ▸ ✓) the moment any open(path)
@@ -63,7 +63,7 @@ EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 # default to UTF-8.
 export PYTHONUTF8=1
 
-BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
+BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; DIM='\033[2m'; NC='\033[0m'
 
 say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
@@ -75,8 +75,24 @@ warn() { echo -e "${YELLOW}!${NC} $*"; }
 # guided to a working state (or auto-fixed, for what can be fixed without
 # sudo) instead of failing deep into the wizard with an opaque error. See
 # scripts/check-prerequisites.sh for what's checked and why.
+export ACE_PREREQ_FULL_DEP_AUDIT=1
+export ACE_PREREQ_FAIL_ON_DEP_ISSUES="${ACE_PREREQ_FAIL_ON_DEP_ISSUES:-0}"
+export ACE_PREREQ_PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 # shellcheck source=scripts/check-prerequisites.sh
 source "${SCRIPT_DIR}/check-prerequisites.sh"
+
+# Use the workspace venv interpreter for every setup-time Python snippet when
+# available, so setup follows the same import environment developers use.
+SETUP_PYTHON="${REPO_ROOT}/.venv/bin/python"
+if [[ -x "${SETUP_PYTHON}" ]]; then
+    ok "Using workspace venv Python for setup helpers: ${SETUP_PYTHON}"
+elif command -v python3 >/dev/null 2>&1; then
+    SETUP_PYTHON="$(command -v python3)"
+    warn "Workspace venv Python not found at ${REPO_ROOT}/.venv/bin/python; falling back to ${SETUP_PYTHON}."
+else
+    echo "ERROR: no Python interpreter available for setup helper scripts (expected ${REPO_ROOT}/.venv/bin/python or python3 on PATH)." >&2
+    exit 1
+fi
 
 # --- prep .env -------------------------------------------------------------
 # Moved ahead of the rootless Docker bootstrap (below) so it can read/write
@@ -113,6 +129,29 @@ sanitize_instance_name() {
         | cut -c1-20 \
         | sed -e 's/-*$//')"
     echo "${clean:-instance}"
+}
+
+report_preserved_langfuse_traces() {
+    command -v docker >/dev/null 2>&1 || return 0
+    local inst; inst="$(cur ACE_INSTANCE_NAME)"
+    [[ -z "${inst}" ]] && return 0
+
+    local -a lf_volumes=()
+    while IFS= read -r _lfv; do
+        [[ -n "${_lfv}" ]] && lf_volumes+=("${_lfv}")
+    done < <(docker volume ls --format '{{.Name}}' 2>/dev/null \
+        | grep -E "^(ace-${inst}|ace-langfuse-${inst})_langfuse_(postgres_data|clickhouse_data|clickhouse_logs|minio_data|redis_data)$" \
+        | sort || true)
+    [[ ${#lf_volumes[@]} -eq 0 ]] && return 0
+
+    echo
+    echo -e "${CYAN}▸ Preserved Langfuse traces${NC}"
+    echo -e "  ${DIM}Found ${#lf_volumes[@]} Langfuse data volume(s) for ACE_INSTANCE_NAME=${inst}.${NC}"
+    echo -e "  ${DIM}The next local Langfuse compose bring-up reattaches these volumes automatically, so prior traces should reappear.${NC}"
+    for _lfv in "${lf_volumes[@]}"; do
+        echo -e "    ${DIM}• ${_lfv}${NC}"
+    done
+    unset _lfv lf_volumes inst
 }
 
 # --- Available agents (subfolders of agents/, excluding the harness/ dir) ---
@@ -470,7 +509,7 @@ Environment=PATH=${_civ_pin_dir}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
             ok "Generated ${HOME}/.config/cdi/nvidia.yaml"
             _daemon_json="${HOME}/.config/docker/daemon.json"
             _before="$(cat "${_daemon_json}" 2>/dev/null || true)"
-            python3 - "${_daemon_json}" "${HOME}/.config/cdi" <<'PY'
+            "${SETUP_PYTHON}" - "${_daemon_json}" "${HOME}/.config/cdi" <<'PY'
 import json, os, sys
 path, cdi_dir = sys.argv[1], sys.argv[2]
 cfg = {}
@@ -1344,7 +1383,7 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _LITMUS_SRC="${_LITMUS_SRC:-}" \
        _JFROG_HOST="${_JFROG_HOST:-}" _JFROG_PATH="${_JFROG_PATH:-}" \
        _JFROG_USER="${_JFROG_USER:-}" _JFROG_TOKEN="${_JFROG_TOKEN:-}"
-python3 - "${ENV_FILE}" <<'PY'
+"${SETUP_PYTHON}" - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
 cm   = os.environ["_CLUSTER_MODE"]
@@ -1577,12 +1616,13 @@ open(path, "w").write("\n".join(lines) + "\n")
 PY
 
 ok "Wrote LiteLLM model config, flash-agent model, BENCHMARK_AGENT=${BENCHMARK_AGENT}, and CLUSTER_MODE=${CLUSTER_MODE} to .env"
+report_preserved_langfuse_traces
 
 # --- patch litellm_config.yaml with the chosen Ollama model -----------------
 if [[ -n "${OLLAMA_MODEL_TAG:-}" ]]; then
     _litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
     if [[ -f "${_litellm_cfg}" ]]; then
-        python3 - "${_litellm_cfg}" <<'PY'
+        "${SETUP_PYTHON}" - "${_litellm_cfg}" <<'PY'
 import sys, re, os
 path  = sys.argv[1]
 tag   = os.environ["_OLLAMA_MODEL_TAG"]   # e.g. qwen2.5:32b-instruct
@@ -1691,7 +1731,7 @@ unset _ollama_tag_final
 # collapsed. This prevents `kubectl create secret --from-env-file` from failing
 # with "another key by that name already exists".
 dedup_env() {
-    python3 - "$1" <<'PY'
+    "${SETUP_PYTHON}" - "$1" <<'PY'
 import sys, re
 path = sys.argv[1]
 lines = open(path).read().splitlines()
@@ -1715,7 +1755,7 @@ PY
 set_env() {
     local k="$1" v="$2"
     if grep -qE "^${k}=" "${ENV_FILE}"; then
-        python3 - "${ENV_FILE}" "$k" "$v" <<'PY'
+        "${SETUP_PYTHON}" - "${ENV_FILE}" "$k" "$v" <<'PY'
 import sys, re
 path, k, v = sys.argv[1:4]
 ls = open(path).read().splitlines()
@@ -1844,7 +1884,7 @@ post_cloud_setup() {
     local cur_origins
     cur_origins="$(grep -m1 '^ALLOWED_ORIGINS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
     local escaped_lb
-    escaped_lb="$(python3 -c "import re,sys; print(re.escape(sys.argv[1]))" "${lb_ip}")"
+    escaped_lb="$("${SETUP_PYTHON}" -c "import re,sys; print(re.escape(sys.argv[1]))" "${lb_ip}")"
     if [[ -n "${cur_origins}" ]] && ! echo "${cur_origins}" | grep -qF "${lb_ip}"; then
         set_env ALLOWED_ORIGINS "${cur_origins}|^(http://|https://|)${escaped_lb}(:[0-9]+)?\$"
     fi
@@ -2173,7 +2213,7 @@ ensure_kind_cluster() {
     _inspect_json="$(docker inspect "${cluster_name}-control-plane" 2>/dev/null || true)"
     has_ace_ports="no"
     if [[ -n "${_inspect_json}" ]]; then
-        has_ace_ports="$(echo "${_inspect_json}" | python3 -c "
+        has_ace_ports="$(echo "${_inspect_json}" | "${SETUP_PYTHON}" -c "
 import sys, json
 data = json.load(sys.stdin)
 if not data:
@@ -2195,7 +2235,7 @@ print('yes' if sum(1 for p in ace if p in pb) >= 3 else 'no')
         # they are assumed to be intentional manual overrides (e.g. an SSH-tunnel
         # port or a value set by a different tool).
         export _ACE_INSPECT_JSON="${_inspect_json}"
-        python3 - "${ENV_FILE}" <<'PY'
+        "${SETUP_PYTHON}" - "${ENV_FILE}" <<'PY'
 import json, os, re, sys
 
 env_path = sys.argv[1]
@@ -2370,7 +2410,7 @@ patch_litellm_configmap() {
     fi
     # Replace the placeholder value in the ConfigMap with the real config,
     # indented by 4 spaces to match the YAML data block.
-    python3 - "${src}" "${dst}" <<'PY'
+    "${SETUP_PYTHON}" - "${src}" "${dst}" <<'PY'
 import sys, re, textwrap
 src_path, dst_path = sys.argv[1], sys.argv[2]
 cfg = open(src_path).read()
@@ -2393,9 +2433,8 @@ PY
 # has been registered via the LitmusChaos UI.  Safe to call repeatedly — uses
 # kubectl apply --dry-run so it is idempotent.
 sync_subscriber_secret() {
-    local LITMUS_NS="litmus"
     local ACE_NS="ace"
-    local mongo_user mongo_pass mongo_output infra_id access_key
+    local mongo_user mongo_pass mongo_output infra_id access_key LITMUS_NS
 
     mongo_user="$(cur MONGODB_USERNAME)"; mongo_user="${mongo_user:-admin}"
     mongo_pass="$(cur MONGODB_PASSWORD)"; mongo_pass="${mongo_pass:-1234}"
@@ -2407,12 +2446,20 @@ sync_subscriber_secret() {
     # graphql, mongodb, and the litmus subscriber all run in-cluster, so the source
     # of truth is the mongodb-0 pod in the ace namespace.  Filter on is_registered
     # (set once at registration, stable) rather than is_active (flaps to false on
-    # disconnect) — we are syncing precisely to recover from a disconnect.
+    # disconnect) — we are syncing precisely to recover from a disconnect. A given
+    # infra can be re-registered multiple times over a cluster's life (each attempt
+    # leaves behind a prior is_registered:true document with a stale infra_id that
+    # is_registered alone can't distinguish from the current one), so sort by
+    # created_at descending and take the newest non-removed match. Also pull
+    # infra_namespace instead of assuming "litmus" — this infra may have been
+    # connected into any namespace (e.g. "itbench").
     mongo_output="$(kubectl exec mongodb-0 -n "${ACE_NS}" -- mongosh \
         "mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true" \
         --quiet --eval \
-        'var doc = db.getSiblingDB("litmus").chaosInfrastructures.findOne({is_registered:true});
-         if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key); }' \
+        'var doc = db.getSiblingDB("litmus").chaosInfrastructures
+             .find({is_registered:true, is_removed:{$ne:true}})
+             .sort({created_at:-1}).limit(1).next();
+         if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key + "\ninfra_namespace=" + doc.infra_namespace); }' \
         2>/dev/null)" || true
 
     if [[ -z "$mongo_output" ]]; then
@@ -2423,6 +2470,8 @@ sync_subscriber_secret() {
 
     infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2- || true)"
     access_key="$(echo "$mongo_output" | grep '^access_key=' | cut -d= -f2- || true)"
+    LITMUS_NS="$(echo "$mongo_output" | grep '^infra_namespace=' | cut -d= -f2- || true)"
+    LITMUS_NS="${LITMUS_NS:-litmus}"
 
     if [[ -z "$infra_id" || -z "$access_key" ]]; then
         warn "Could not parse infra_id or access_key from MongoDB output — skipping sync."
@@ -2483,28 +2532,35 @@ _seed_flash_agent_experiment() {
     echo -e "${DIM}Seeding ${exp_name} experiment…${NC}"
 
     # --- Step 1: infra_id + project_id from MongoDB ---
-    local mongo_user mongo_pass mongo_uri infra_id project_id
+    # Pulled from the SAME chaosInfrastructures document (it already carries the
+    # infra's own project_id) rather than a second, independent `auth.project`
+    # lookup — a standalone project.findOne() would be just as non-deterministic
+    # under multiple projects as the old infra lookup was under multiple
+    # registrations, and worse, could return a project unrelated to the infra
+    # actually being seeded against. Same is_registered + is_removed + newest
+    # created_at selection as sync_subscriber_secret, for the same reason: an
+    # infra can be re-registered multiple times, leaving stale documents behind.
+    local mongo_user mongo_pass mongo_uri mongo_output infra_id project_id
     mongo_user="$(cur MONGODB_USERNAME)"; mongo_user="${mongo_user:-admin}"
     mongo_pass="$(cur MONGODB_PASSWORD)"; mongo_pass="${mongo_pass:-1234}"
     mongo_uri="mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true"
 
-    infra_id="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
+    mongo_output="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
         mongosh "${mongo_uri}" --quiet --eval \
-        'var doc = db.getSiblingDB("litmus").chaosInfrastructures.findOne({is_registered:true});
-         if(doc){ print(doc.infra_id); }' \
+        'var doc = db.getSiblingDB("litmus").chaosInfrastructures
+             .find({is_registered:true, is_removed:{$ne:true}})
+             .sort({created_at:-1}).limit(1).next();
+         if(doc){ print("infra_id=" + doc.infra_id + "\nproject_id=" + doc.project_id); }' \
         2>/dev/null)" || true
+
+    infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2- || true)"
+    project_id="$(echo "$mongo_output" | grep '^project_id=' | cut -d= -f2- || true)"
 
     if [[ -z "${infra_id}" ]]; then
         warn "_seed_flash_agent_experiment(${exp_name}): no registered chaos infrastructure found."
         warn "  Register an infrastructure via the UI, then re-run: ./scripts/setup.sh --restart"
         return 0
     fi
-
-    project_id="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
-        mongosh "${mongo_uri}" --quiet --eval \
-        'var doc = db.getSiblingDB("auth").project.findOne();
-         if(doc){ print(doc._id.toString()); }' \
-        2>/dev/null)" || true
 
     if [[ -z "${project_id}" ]]; then
         warn "_seed_flash_agent_experiment(${exp_name}): could not determine project ID — skipping."
@@ -2536,7 +2592,7 @@ _seed_flash_agent_experiment() {
         -H "Content-Type: application/json" \
         -d "{\"username\":\"${admin_user}\",\"password\":\"${admin_pass}\"}" \
         2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))")" || true
+        | "${SETUP_PYTHON}" -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))")" || true
 
     if [[ -z "${jwt}" ]]; then
         warn "_seed_flash_agent_experiment(${exp_name}): auth service login failed — experiment not registered."
@@ -2550,7 +2606,7 @@ _seed_flash_agent_experiment() {
     result="$(INFRA_ID="${infra_id}" PROJECT_ID="${project_id}" JWT="${jwt}" \
         GQL_PORT="${gql_port}" MANIFEST_TEMPLATE="${manifest_template}" \
         EXP_NAME="${exp_name}" EXP_DESCRIPTION="${exp_description}" EXP_ID="${exp_id}" \
-        python3 - <<'PYEOF'
+        "${SETUP_PYTHON}" - <<'PYEOF'
 import json, sys, os, urllib.request, urllib.error
 
 infra_id        = os.environ["INFRA_ID"]
@@ -3045,7 +3101,7 @@ generate_helm_values_env() {
     local out="${REPO_ROOT}/deploy/helm/ace/values-env.yaml"
     local litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
     dedup_env "${ENV_FILE}"
-    python3 - "${ENV_FILE}" "${out}" "${litellm_cfg}" <<'PY'
+    "${SETUP_PYTHON}" - "${ENV_FILE}" "${out}" "${litellm_cfg}" <<'PY'
 import sys, re, os
 env_path, out_path, litellm_cfg = sys.argv[1], sys.argv[2], sys.argv[3]
 # collect keys in order, last value wins
@@ -3288,6 +3344,19 @@ OLLAMA_SVC_EOF
         fi
     fi
 
+    # 5d) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered).
+    # Mirrors k8s_deploy's step 9c — without this, helm_deploy (the default deploy
+    # path: deploy_choice defaults to "h") never runs the instanceID self-heal at
+    # all, silently leaving a re-registered chaos infrastructure's workflow-controller
+    # pinned to a stale instanceID with every submitted experiment workflow orphaned.
+    sync_subscriber_secret
+
+    # 5e) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
+    seed_flash_agent_comprehensive
+
+    # 5f) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
+    seed_flash_agent_5scenario
+
     # 6) Print access URLs
     local admu admp luser lpass
     admu="$(envval ADMIN_USERNAME)";              admu="${admu:-admin}"
@@ -3415,7 +3484,17 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 echo "▸ ${tag}  (${label})"
                 if [[ "${method}" == compose:* ]]; then
                     svc="${method#compose:}"
-                    ( cd "${REPO_ROOT}" && docker compose build "${svc}" ) && build_ok=1
+                    # --no-cache: observed BuildKit reuse a stale `COPY . .`
+                    # layer here across --local-build runs even though the
+                    # web/ source tree had genuinely changed between them —
+                    # the resulting image silently shipped old frontend code
+                    # with a fresh-looking build timestamp and no error of any
+                    # kind. Root cause not fully isolated (compose's bake
+                    # driver vs. this daemon's local-source cache keying);
+                    # forcing --no-cache here is the reliable fix. Only "web"
+                    # uses the compose: build method today, so this doesn't
+                    # slow down the other 11 (direct docker build) images.
+                    ( cd "${REPO_ROOT}" && docker compose build --no-cache "${svc}" ) && build_ok=1
                 elif [[ ! -f "${ctx}/${df}" ]]; then
                     echo "Dockerfile not found: ${ctx}/${df}"
                 else

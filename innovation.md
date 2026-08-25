@@ -310,6 +310,23 @@ A validation block runs on every `setup.sh` invocation. If `FLASH_AGENT_MODEL` d
 **Status: Implemented**
 `agentcert/prometheus-mcp-server:latest` was a re-tag of `ghcr.io/pab1it0/prometheus-mcp-server:v1.6.0` with no Dockerfile. All references updated to point at the upstream directly to clarify ownership.
 
+### 4.7 Streaming Early-Abort for `stop`-Incompatible Model Aliases
+**Status: Proposed (prototype implemented, not the default)**
+Investigating why `sre-agent-crewai` produced zero Langfuse telemetry (see `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` §60) surfaced a deeper issue: this environment's `gpt-4o` LiteLLM alias doesn't actually serve GPT-4o. Cross-referencing the proxy config against the cluster's live secrets showed `gpt-4o`'s `litellm_params.model` is `azure/gpt4o` at the same endpoint this repo's own certifier config (`AZURE_OPENAI_GPT5_CHAT_DEPLOYMENT_NAME`/`AZURE_OPENAI_GPT5_ENDPOINT`) already designates as its reasoning-class model. Confirmed definitively via the raw HTTP response: Azure attaches an `x-ms-served-model` header to every completion (passed through by litellm as `llm_provider-x-ms-served-model`), which read `gpt-5.1-2025-11-13`. So `gpt-4o` is silently GPT-5.1 underneath — a real, general technique worth remembering: **the served-model identity can be read directly off the wire, per-request, without any control-plane/management-API access — no probing or guessing required.**
+
+GPT-5.1 (like the rest of the o-series/reasoning-model family) rejects the legacy `max_tokens` and `stop` Chat Completions params outright (400 Bad Request), requiring `max_completion_tokens` instead and no native stop-sequence support at all. CrewAI's own ReAct executor injects a `stop` sequence into every LLM call (needed for its own Thought/Action/Observation parsing) and has a capability auto-detection (`LLM.supports_stop_words()`) meant to skip this for incompatible models — but that detection is itself wrong here, since it pattern-matches litellm's static model-name registry, which has no visibility into what a given Azure deployment name was silently repointed to (confirmed via the proxy's `/model/info` endpoint: it reports `stop`/`max_tokens` as supported for this exact model string, on every provider-prefix variant tried).
+
+Two client-side workarounds were implemented in `agents/sre-agent-crewai/src/sre_crewai/crew.py`, selected via `SRE_AGENT_STOP_STRATEGY` (default `"truncate"`):
+
+- **`_TruncatingLLM` (default, "truncate")** — never sends `stop`; lets the model generate its full response, then cuts the text client-side at the first `"Observation:"` marker (the same effect CrewAI's own dormant fallback path already implements, just reached without depending on its wrong auto-detection). Bounded by `SRE_AGENT_MAX_COMPLETION_TOKENS` (default 2048) so a hallucinated/runaway continuation has a hard ceiling. Optional waste measurement via `SRE_AGENT_LOG_TOKEN_WASTE=1` (off by default — `litellm.token_counter()` re-tokenizes every call, pure overhead unless someone's actively trying to quantify the cost).
+- **`_StreamingTruncatingLLM` ("stream", opt-in)** — streams the response and aborts the connection the instant the marker appears in the accumulated text, instead of waiting for the full completion. Closer to what native `stop` would have actually cost in billed tokens, since Azure/OpenAI generate and bill token-by-token — an early client disconnect generally stops billing for tokens not yet produced.
+
+**Why "stream" isn't the default:** it's a real, working prototype (verified it doesn't error against the live proxy) but hasn't been validated for correctness/robustness the way "truncate" has (multiple full live pod runs producing real diagnoses, zero errors). Open questions for whoever picks this up:
+- Does `litellm.completion(..., stream=True)`'s returned `CustomStreamWrapper` reliably release the underlying HTTP connection on early `.close()`/abandonment, or does it linger until GC across many rapid calls in a long ReAct loop (12+ LLM calls observed in one investigation run)?
+- Azure/OpenAI's exact billing behavior on a client-aborted stream — is it always "billed only for tokens actually generated so far," or are there provider-specific edge cases (buffering, minimum billing granularity)?
+- No usage/token-count is available on an aborted stream (no final `usage` chunk arrives), so the waste-measurement approach `_TruncatingLLM` uses doesn't carry over — would need estimating actual savings a different way (e.g. comparing chunk counts against a full non-streamed baseline run of the same prompt).
+- Worth checking whether this same alias-mislabeling pattern exists elsewhere in the shared LiteLLM config (other aliases proxying to a different real model than their name implies) — the `x-ms-served-model` header technique above is the fast way to check any of them without needing Azure control-plane access.
+
 ---
 
 ## 5. Image Management
@@ -369,6 +386,12 @@ Allow answering all implementation choices at the start of `setup.sh` rather tha
 ### 6.9 Simple Onboarding Procedure for Benchmarked Agents
 **Status: Proposed**
 Adding a new agent/app pairing to Chaos Studio currently has no guided path. `AppsHub`/`AgentHub` are read-only catalog pages with no "Create Experiment" CTA — users must hand-author the `install-application`/`install-agent` Argo container `args` directly in the raw YAML tab (`AgentCert/chaoscenter/web/src/views/ChaosStudio`). The required `-folder=<chart-dir-name>` value must match the literal chart directory name under `app-charts/`/`agent-charts/` exactly (e.g. `bookinfo`, not the `book-info` namespace/display name used elsewhere for the same app — a mismatch that silently fails the install step and cascades into an empty fault-injection target list, since `TargetApplicationTab` only lists what's actually live in-cluster). Additionally, Save stays disabled until a real fault step (`install-chaos-faults`/`install-chaos-experiments` with ≥1 artifact) is added via the fault drawer — `install-app`/`install-agent` steps alone never populate it, and no chaos-charts template currently pairs `book-info` with plain `sre-agent`. A simple onboarding procedure — either a short guided doc or a form-based install-app/install-agent step in the builder that lists valid chart folder names from `apphub`/`agenthub` — would remove this whole class of blank-canvas confusion.
+
+### 6.10 VS Code Ports Panel Automation Boundary
+**Status: Implemented workaround; direct live automation not supported**
+`scripts/gen-vscode-ports.sh` can discover this checkout's owned ACE ports and generate VS Code settings for them, but it cannot directly delete/recreate rows in the already-open VS Code Ports panel. That live forwarded-port list is owned by the local VS Code client / Remote-SSH extension, not by the remote Linux shell where the script runs. There is no supported `code` CLI command or remote-side state file for a Bash script to mutate those live rows.
+
+The practical workaround is to generate settings that the client reads at connection startup: workspace `remote.portsAttributes` for labels, `remote.restoreForwardedPorts=false` to avoid resurrecting stale forwards, and a generated `.vscode/ace-vscode-ports.user-settings.json` snippet containing `remote.SSH.defaultForwardedPorts` for client-side User settings. After merging that snippet into User settings and reloading/reconnecting Remote-SSH, VS Code can create the current static forwards reliably. Full automation would require a tiny VS Code-side helper/extension that runs in the local/UI extension host and updates User settings through VS Code's configuration API; direct live Ports-panel mutation would rely on internal Remote/Ports commands and should be treated as brittle.
 
 ---
 
@@ -481,6 +504,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 4.4 | `FLASH_AGENT_MODEL` self-healing | LLM Config | Implemented |
 | 4.5 | Configurable LLM timeout/retry in flash-agent | LLM Config | Implemented |
 | 4.6 | Switch Prometheus MCP to upstream ghcr.io image | Images | Implemented |
+| 4.7 | Streaming early-abort for `stop`-incompatible model aliases | LLM Config | Proposed |
 | 5.1 | `kind load` + rollout restart for image freshness | Images | Implemented |
 | 5.2 | Global image registry strip in service.go | Images | Implemented |
 | 5.3 | `--local` flag for build-and-push.sh | Images | Proposed |
@@ -493,6 +517,7 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 6.7 | `make setup-env` for trial env files | Dev Experience | Proposed |
 | 6.8 | "Answer all upfront" option in setup.sh | Dev Experience | Proposed |
 | 6.9 | Simple onboarding procedure for benchmarked agents | Dev Experience | Proposed |
+| 6.10 | VS Code Ports panel automation boundary | Dev Experience | Implemented workaround |
 | 7.1 | Compose-up-guard ownership check | Security | Implemented |
 | 7.2 | `itbench-litmus-chaos-enable.yml` in .gitignore | Security | Implemented |
 | 7.3 | Hardcoded `/srv/projects/` path made adaptive | Security | Implemented |

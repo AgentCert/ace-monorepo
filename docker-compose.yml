@@ -429,6 +429,14 @@ services:
       # Reach Langfuse by its compose service name instead (same network). For
       # LANGFUSE_MODE=external, set LANGFUSE_HOST_COMPOSE to your external URL.
       LANGFUSE_HOST: ${LANGFUSE_HOST_COMPOSE:-http://langfuse-web:3000}
+      # LiteLLM v1.82's shared aiohttp session pools connections proxy-wide
+      # with a 120s default keepalive; a backend that closes idle connections
+      # sooner produces a bare litellm.APIConnectionError on reuse (root-caused
+      # against this deployment via /app/litellm/proxy/route_llm_request.py and
+      # constants.py in the image). No "verify before reuse" option exists in
+      # aiohttp's connector, so keeping this below the flakiest backend's own
+      # idle timeout is the available mitigation.
+      AIOHTTP_KEEPALIVE_TIMEOUT: "45"
     volumes:
       - ./agentcert-stack/litellm-setup/litellm_config.yaml:/app/config.yaml:ro
       - litellm-data:/app/data

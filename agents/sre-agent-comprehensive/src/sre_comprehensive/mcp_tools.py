@@ -24,7 +24,12 @@ from typing import Optional, Type
 
 from crewai.tools import BaseTool
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:
+    # mcp>=2.0 renamed this function; pyproject.toml pins "mcp>=1.9.0" with no
+    # upper bound, so whichever name the installed version exposes is used.
+    from mcp.client.streamable_http import streamablehttp_client
+except ImportError:
+    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
 from pydantic import BaseModel, Field, field_validator
 
 def _parse_mcp_urls() -> tuple[str, str]:

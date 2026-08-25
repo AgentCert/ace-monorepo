@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Generates/updates the personal (gitignored) .vscode/settings.json with
 # remote.portsAttributes for every ACE service port belonging to THIS
-# checkout — so VS Code Remote-SSH auto-forwards them instead of forwards
-# going stale and needing manual delete+recreate.
+# checkout, plus a generated User-settings snippet for the Remote-SSH static
+# forwards that create tunnels on reconnect.
 #
 # Ownership, not guessing: this host is shared, and other checkouts' ACE
 # stacks (possibly on ACE's own unparameterized default ports, e.g. 2001)
@@ -33,8 +33,14 @@
 # hand-edited or added their own unrelated entries in between, those are
 # left alone rather than being wiped by a full overwrite.
 #
+# Important limitation: a shell script running on the remote host cannot
+# directly delete/recreate rows in the already-open local VS Code Ports panel.
+# The live forwarded-port list is client-side Remote-SSH state. This script
+# can only write the settings VS Code reads when a remote connection starts,
+# and stop stale restored forwards from being resurrected on the next connect.
+#
 # Why both remote.portsAttributes AND remote.SSH.defaultForwardedPorts are
-# written (not just the former): VS Code's own source
+# generated (not just the former): VS Code's own source
 # (src/vs/workbench/contrib/remote/common/remote.contribution.ts) documents
 # "process" auto-forward mode as "ports will be automatically forwarded when
 # discovered by watching for processes that are STARTED and include a port"
@@ -49,7 +55,10 @@
 # remote.restoreForwardedPorts) — it was never actually auto-forwarding these
 # ports itself. remote.SSH.defaultForwardedPorts is the Remote-SSH-extension
 # setting built for exactly this case: a static list forwarded unconditionally
-# on every connect, independent of any discovery heuristic.
+# on every connect, independent of any discovery heuristic. In practice,
+# Remote-SSH may ignore that setting from workspace scope, so this script also
+# writes .vscode/ace-vscode-ports.user-settings.json as the exact snippet to
+# merge into VS Code User settings on the client side.
 
 set -euo pipefail
 
@@ -57,6 +66,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 SETTINGS_FILE="$REPO_ROOT/.vscode/settings.json"
 STATE_FILE="$REPO_ROOT/.vscode/.gen-vscode-ports.state.json"
+USER_SETTINGS_SNIPPET_FILE="$REPO_ROOT/.vscode/ace-vscode-ports.user-settings.json"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "No .env found at $ENV_FILE — run ./scripts/setup.sh first." >&2
@@ -223,14 +233,26 @@ jq --argjson pruned "$pruned_attrs_json" --argjson new "$new_attrs_json" \
    --argjson pruned_dfp "$pruned_dfp_json" --argjson new_dfp "$new_dfp_json" \
   '.["remote.autoForwardPorts"] = true
    | .["remote.autoForwardPortsSource"] = "process"
+   | .["remote.restoreForwardedPorts"] = false
    | .["remote.portsAttributes"] = ($pruned + $new)
    | .["remote.SSH.defaultForwardedPorts"] = ($pruned_dfp + $new_dfp)' \
   "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
 
 jq -n --argjson attrs "$new_attrs_json" --argjson dfp "$new_dfp_json" \
+  '{
+    "remote.autoForwardPorts": true,
+    "remote.autoForwardPortsSource": "process",
+    "remote.restoreForwardedPorts": false,
+    "remote.portsAttributes": $attrs,
+    "remote.SSH.defaultForwardedPorts": $dfp
+  }' > "$USER_SETTINGS_SNIPPET_FILE.tmp" && mv "$USER_SETTINGS_SNIPPET_FILE.tmp" "$USER_SETTINGS_SNIPPET_FILE"
+
+jq -n --argjson attrs "$new_attrs_json" --argjson dfp "$new_dfp_json" \
   '{"portsAttributes": $attrs, "defaultForwardedPorts": $dfp}' > "$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
 
-echo "Forwarded ${#forwarded[@]} port(s) belonging to this checkout (KIND_CLUSTER_NAME=${kind_cluster:-<unset>}, ACE_INSTANCE_NAME=${instance:-<unset>}) into .vscode/settings.json (remote.SSH.defaultForwardedPorts + remote.portsAttributes):"
+echo "Wrote ${#forwarded[@]} port definition(s) belonging to this checkout (KIND_CLUSTER_NAME=${kind_cluster:-<unset>}, ACE_INSTANCE_NAME=${instance:-<unset>}):"
+echo "  .vscode/settings.json: workspace labels/metadata, stale restore disabled"
+echo "  .vscode/ace-vscode-ports.user-settings.json: User settings snippet for Remote-SSH static forwards"
 for port in "${!forwarded[@]}"; do
   echo "  $port -> ${forwarded[$port]}"
 done
@@ -246,4 +268,5 @@ if [[ "$(jq 'length' <<<"$dropped_json")" -gt 0 ]]; then
 fi
 
 echo ""
-echo "NOTE: if newly-added ports above still don't appear forwarded in VS Code's Ports panel, reload the window (Remote-SSH: Reload Window) or fully reconnect — remote.SSH.defaultForwardedPorts is read at connection time, not live-reloaded from an external settings.json edit. If they *still* don't appear after that, remote.SSH.defaultForwardedPorts may be one of the settings this VS Code version ignores from workspace scope (a known upstream quirk, e.g. microsoft/vscode-remote-release#3406) — as a fallback, copy the \"remote.SSH.defaultForwardedPorts\" array printed into this file into your User settings.json instead."
+echo "NOTE: this script cannot mutate the currently-open VS Code Ports panel from the remote shell."
+echo "To force stale rows to disappear and new static forwards to appear, merge .vscode/ace-vscode-ports.user-settings.json into VS Code User settings on the client side, then reload/reconnect the Remote-SSH window."

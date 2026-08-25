@@ -48,6 +48,20 @@ spec:
           env:
             - name: LANGFUSE_HOST
               value: "http://langfuse-web:3000"
+            # LiteLLM's shared aiohttp session (added in v1.82, "prevents cold
+            # starts") pools connections for the proxy's whole lifetime,
+            # default keepalive 120s. If a backend (e.g. Azure) closes an idle
+            # connection server-side sooner than that, the client hands it
+            # back out anyway on the next request and gets a bare
+            # litellm.APIConnectionError -- observed directly against this
+            # deployment (root-caused via /app/litellm/proxy/route_llm_request.py
+            # and constants.py in the deployed litellm/litellm:v1.82.0-stable
+            # image). aiohttp's TCPConnector has no "verify still alive before
+            # reuse" option, only this static timeout, so the fix is keeping
+            # it comfortably below whatever the flakiest backend's own idle
+            # timeout is rather than relying on the 120s default.
+            - name: AIOHTTP_KEEPALIVE_TIMEOUT
+              value: "45"
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

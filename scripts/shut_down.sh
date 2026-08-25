@@ -23,6 +23,11 @@ set -euo pipefail
 #                                                  # outcome even without the flag — see above)
 #   ./scripts/shut_down.sh --delete-ollama-model  # explicitly delete the ollama-models-<instance>
 #                                                  # volume without being asked
+#   ./scripts/shut_down.sh --keep-langfuse-traces  # preserve Langfuse's Postgres, ClickHouse,
+#                                                  # Redis, and MinIO data volumes so traces
+#                                                  # reappear on the next setup/compose bring-up
+#                                                  # (opt-in; default teardown deletes them)
+#   ./scripts/shut_down.sh --delete-langfuse-traces # explicitly delete Langfuse trace volumes
 #   ./scripts/shut_down.sh --no-mongo-backup       # skip the automatic MongoDB dump (see below)
 #   ./scripts/shut_down.sh --clean-itbench-pods    # standalone: delete only Completed pods in
 #                                                    # whichever namespace(s) currently have a
@@ -80,6 +85,8 @@ say()  { echo -e "$*"; }
 YES=0
 KEEP_OLLAMA_MODEL=1   # default: keep the pulled model volume unless told otherwise
 OLLAMA_MODEL_FLAG_SET=0
+KEEP_LANGFUSE_TRACES=0   # default: old workflow — delete trace volumes unless told otherwise
+LANGFUSE_TRACE_FLAG_SET=0
 SKIP_MONGO_BACKUP=0   # default: back up MongoDB (K8s path) before deleting the KinD cluster
 CLEAN_ITBENCH_PODS=0  # standalone mode: only clean Completed pods in the in-use namespace(s), see below
 CLEAN_NAMESPACE=""    # optional explicit target for --clean-itbench-pods; skips discovery/prompt
@@ -88,19 +95,27 @@ for _arg in "$@"; do
         -y|--yes) YES=1 ;;
         -k|--keep-ollama-model) KEEP_OLLAMA_MODEL=1; OLLAMA_MODEL_FLAG_SET=1 ;;
         --delete-ollama-model) KEEP_OLLAMA_MODEL=0; OLLAMA_MODEL_FLAG_SET=1 ;;
+        --keep-langfuse-traces) KEEP_LANGFUSE_TRACES=1; LANGFUSE_TRACE_FLAG_SET=1 ;;
+        --delete-langfuse-traces) KEEP_LANGFUSE_TRACES=0; LANGFUSE_TRACE_FLAG_SET=1 ;;
         --no-mongo-backup) SKIP_MONGO_BACKUP=1 ;;
         --clean-itbench-pods) CLEAN_ITBENCH_PODS=1 ;;
         --namespace=*) CLEAN_NAMESPACE="${_arg#--namespace=}" ;;
         -h|--help)
-            say "Usage: $0 [--yes|-y] [--keep-ollama-model|-k] [--delete-ollama-model] [--no-mongo-backup] [--clean-itbench-pods [--namespace=NS]]"
+            say "Usage: $0 [--yes|-y] [--keep-ollama-model|-k] [--delete-ollama-model] [--keep-langfuse-traces] [--delete-langfuse-traces] [--no-mongo-backup] [--clean-itbench-pods [--namespace=NS]]"
             say "  Tears down all ACE infrastructure for the ACE_INSTANCE_NAME in .env."
             say "  --yes / -y                skip the confirmation prompt"
             say "  --keep-ollama-model / -k  don't delete the ollama-models-<instance> volume"
             say "                            (preserves already-pulled models for next setup)"
             say "                            — this is the default even without the flag"
             say "  --delete-ollama-model     delete the ollama-models-<instance> volume"
+            say "  --keep-langfuse-traces    keep Langfuse Postgres/ClickHouse/Redis/MinIO"
+            say "                            data volumes so traces are reused next setup"
+            say "                            — opt-in; default teardown deletes them"
+            say "  --delete-langfuse-traces  delete Langfuse trace/data volumes"
             say "  If neither ollama-model flag is given: interactive runs are asked; --yes"
             say "  runs (no prompt possible) default to keeping the volume."
+            say "  If neither Langfuse flag is given: interactive runs are asked; --yes"
+            say "  runs default to deleting Langfuse trace volumes (old behavior)."
             say "  --no-mongo-backup         skip the automatic MongoDB dump normally taken"
             say "                            before the KinD cluster is deleted (see header"
             say "                            comment above) — this is done by default."
@@ -393,6 +408,32 @@ if [[ "${OLLAMA_MODEL_FLAG_SET}" -eq 0 ]] && docker volume inspect "${_OLLAMA_MO
     echo
 fi
 
+langfuse_trace_volume() {
+    local vname="$1"
+    [[ "${vname}" =~ ^(ace|ace-langfuse)-${INST}_langfuse_(postgres_data|clickhouse_data|clickhouse_logs|minio_data|redis_data)$ ]]
+}
+
+mapfile -t _LANGFUSE_TRACE_VOLUMES < <(docker volume ls --format '{{.Name}}' 2>/dev/null \
+    | grep -E "^(ace-${INST}|ace-langfuse-${INST})_langfuse_(postgres_data|clickhouse_data|clickhouse_logs|minio_data|redis_data)$" \
+    | sort || true)
+if [[ "${LANGFUSE_TRACE_FLAG_SET}" -eq 0 && ${#_LANGFUSE_TRACE_VOLUMES[@]} -gt 0 ]]; then
+    if [[ "${YES}" -eq 1 ]]; then
+        say "${DIM}No --keep-langfuse-traces/--delete-langfuse-traces given with --yes; defaulting to delete existing Langfuse trace volumes (old behavior).${NC}"
+    else
+        echo
+        say "${BOLD}Found Langfuse trace/data volumes for this instance:${NC}"
+        for _lfv in "${_LANGFUSE_TRACE_VOLUMES[@]}"; do say "    • ${_lfv}"; done
+        read -rp "$(echo -e "Keep these Langfuse volumes so traces reappear on the next setup? [y/${BOLD}N${NC}]: ")" _keep_langfuse
+        if [[ "${_keep_langfuse}" =~ ^[Yy] ]]; then
+            KEEP_LANGFUSE_TRACES=1
+        else
+            KEEP_LANGFUSE_TRACES=0
+        fi
+        unset _keep_langfuse _lfv
+    fi
+    echo
+fi
+
 # ── Safeguard: verify at least some infra exists on this host ─────────────────
 say "${BOLD}Scanning for ACE infrastructure (instance: ${BOLD}${INST}${NC}${BOLD})…${NC}"
 echo
@@ -434,6 +475,10 @@ while IFS= read -r vname; do
         KEPT_VOLUMES+=("${vname}")
         continue
     fi
+    if langfuse_trace_volume "${vname}" && [[ "${KEEP_LANGFUSE_TRACES}" -eq 1 ]]; then
+        KEPT_VOLUMES+=("${vname}")
+        continue
+    fi
     FOUND_VOLUMES+=("${vname}")
 done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E \
     "^(ace-${INST}_|ace-langfuse-${INST}_|ace-litellm-${INST}_|ace-certifier-${INST}_|ollama-models-${INST}$)" \
@@ -461,7 +506,7 @@ if [[ "${TOTAL_FOUND}" -eq 0 ]]; then
     say "${YELLOW}No ACE infrastructure found for instance '${INST}' on this host.${NC}"
     say "${DIM}Nothing to shut down."
     if [[ ${#KEPT_VOLUMES[@]} -gt 0 ]]; then
-        say "${DIM}(${KEPT_VOLUMES[*]} kept as requested via --keep-ollama-model)${NC}"
+        say "${DIM}(Kept data volumes: ${KEPT_VOLUMES[*]})${NC}"
     fi
     say "If resources were created under a different instance name, check ACE_INSTANCE_NAME in .env.${NC}"
     exit 0
@@ -482,7 +527,7 @@ if [[ ${#FOUND_VOLUMES[@]} -gt 0 ]]; then
     echo
 fi
 if [[ ${#KEPT_VOLUMES[@]} -gt 0 ]]; then
-    say "  ${CYAN}Kept (--keep-ollama-model):${NC}"
+    say "  ${CYAN}Kept data volumes:${NC}"
     for v in "${KEPT_VOLUMES[@]}"; do say "    • ${v} ${DIM}(will NOT be deleted)${NC}"; done
     echo
 fi
@@ -617,13 +662,23 @@ teardown_compose() {
         fi
     done
 
+    local down_args=(down -v --remove-orphans)
+    if [[ "${KEEP_LANGFUSE_TRACES}" -eq 1 && "${project}" == "ace-langfuse-${INST}" ]]; then
+        down_args=(down --remove-orphans)
+    fi
+
     if [[ "${all_exist}" -eq 1 && ${#compose_file_args[@]} -gt 0 ]]; then
         if ( cd "${compose_dir}" && \
              COMPOSE_PROJECT_NAME="${project}" \
              docker compose "${compose_file_args[@]}" \
              --env-file "${ENV_FILE}" \
-             down -v --remove-orphans 2>/dev/null ); then
-            ok "  Project '${project}' stopped and volumes removed."
+             "${down_args[@]}" 2>/dev/null ); then
+            if [[ "${down_args[*]}" == "down --remove-orphans" ]]; then
+                ok "  Project '${project}' stopped; preserved requested Langfuse data volumes."
+                _remove_project_volumes_except_kept "${project}"
+            else
+                ok "  Project '${project}' stopped and volumes removed."
+            fi
             return 0
         else
             warn "  'docker compose down' failed for '${project}' — falling back to label-based removal."
@@ -632,6 +687,34 @@ teardown_compose() {
 
     # Fallback: remove by project label (handles stopped containers too).
     _remove_by_label "${project}"
+}
+
+volume_should_be_kept() {
+    local vname="$1"
+    if [[ "${vname}" == "${_OLLAMA_MODELS_VOL}" && "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
+        return 0
+    fi
+    if langfuse_trace_volume "${vname}" && [[ "${KEEP_LANGFUSE_TRACES}" -eq 1 ]]; then
+        return 0
+    fi
+    return 1
+}
+
+_remove_project_volumes_except_kept() {
+    local project="$1"
+    while IFS= read -r vname; do
+        [[ -z "${vname}" ]] && continue
+        if volume_should_be_kept "${vname}"; then
+            ok "  Kept volume: ${vname}"
+            continue
+        fi
+        if docker volume rm "${vname}" >/dev/null 2>&1; then
+            ok "  Removed volume: ${vname}"
+        else
+            warn "  Could not remove volume: ${vname} (may still be in use)"
+        fi
+    done < <(docker volume ls --format '{{.Name}}' 2>/dev/null \
+        | grep "^${project}_" || true)
 }
 
 # Remove all containers in a compose project by label, then prune their volumes.
@@ -653,6 +736,11 @@ _remove_by_label() {
 
     while IFS= read -r vname; do
         [[ -z "${vname}" ]] && continue
+        if volume_should_be_kept "${vname}"; then
+            ok "  Kept volume: ${vname}"
+            did_something=1
+            continue
+        fi
         if docker volume rm "${vname}" >/dev/null 2>&1; then
             ok "  Removed volume: ${vname}"
             did_something=1
@@ -718,15 +806,33 @@ say "${CYAN}▸ Root stack (ace-${INST}: MongoDB, auth, graphql, web…)${NC}"
 # pass --env-file instead of COMPOSE_PROJECT_NAME to let Compose resolve it
 # from the file itself (which is how setup.sh originally created everything).
 if project_is_ours "ace-${INST}"; then
+    _ROOT_DOWN_ARGS=(down -v --remove-orphans)
+    _ROOT_KEEPS_VOLUME=0
+    if [[ "${KEEP_OLLAMA_MODEL}" -eq 1 ]] && docker volume inspect "${_OLLAMA_MODELS_VOL}" >/dev/null 2>&1; then
+        _ROOT_KEEPS_VOLUME=1
+    elif [[ "${KEEP_LANGFUSE_TRACES}" -eq 1 ]] && docker volume ls --format '{{.Name}}' 2>/dev/null \
+            | grep -qE "^ace-${INST}_langfuse_(postgres_data|clickhouse_data|clickhouse_logs|minio_data|redis_data)$"; then
+        _ROOT_KEEPS_VOLUME=1
+    fi
+    if [[ "${_ROOT_KEEPS_VOLUME}" -eq 1 ]]; then
+        _ROOT_DOWN_ARGS=(down --remove-orphans)
+    fi
     if ( cd "${REPO_ROOT}" && \
          docker compose -f docker-compose.yml \
          --env-file "${ENV_FILE}" \
-         down -v --remove-orphans 2>/dev/null ); then
-        ok "  Root stack stopped and volumes removed."
+         "${_ROOT_DOWN_ARGS[@]}" 2>/dev/null ); then
+        if [[ "${_ROOT_DOWN_ARGS[*]}" == "down --remove-orphans" ]]; then
+            ok "  Root stack stopped; preserved requested data volumes."
+            _remove_project_volumes_except_kept "ace-${INST}"
+            remove_volume "mongodb_data-${INST}"
+        else
+            ok "  Root stack stopped and volumes removed."
+        fi
     else
         warn "  'docker compose down' failed for root stack — falling back to label-based removal."
         _remove_by_label "ace-${INST}"
     fi
+    unset _ROOT_DOWN_ARGS _ROOT_KEEPS_VOLUME
 else
     warn "  Skipping root stack — see ownership error above."
 fi
@@ -810,6 +916,9 @@ _remaining_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -
     || true)"
 if [[ "${KEEP_OLLAMA_MODEL}" -eq 1 ]]; then
     _remaining_volumes="$(echo "${_remaining_volumes}" | grep -vx "${_OLLAMA_MODELS_VOL}" || true)"
+fi
+if [[ "${KEEP_LANGFUSE_TRACES}" -eq 1 ]]; then
+    _remaining_volumes="$(echo "${_remaining_volumes}" | grep -Ev "^(ace-${INST}|ace-langfuse-${INST})_langfuse_(postgres_data|clickhouse_data|clickhouse_logs|minio_data|redis_data)$" || true)"
 fi
 
 _all_remaining="${_remaining_containers}${_remaining_langfuse}${_remaining_volumes}"

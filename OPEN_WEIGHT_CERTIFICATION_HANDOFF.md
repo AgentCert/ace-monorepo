@@ -7896,3 +7896,279 @@ touch-up follow).
 Committed and pushed in all 5 repos; working trees clean; all branches in sync with
 `origin/feature/itbench-scenarios`. Deploy steps above (`setup.sh --restart --local-build`,
 `prepare-images.sh` rebuild of `itbench-experiment`, `q` re-add of teardown steps) not yet done.
+
+---
+
+## 107. Chaos Studio uninstall-step picker — Phase A (2026-09-01, uncommitted / in-progress)
+
+### Problem
+
+Chaos Studio's blank-canvas builder had one-click "Install Application" / "Install Agent"
+sidebar buttons but no equivalent for teardown. The two teardown faults
+(`uninstall-agent` / `uninstall-application`, chaos-charts `faults/kubernetes/`, §104) could
+only be added through the generic "Add fault" drawer, and their `FOLDER` / `NAMESPACE` env
+had to be hand-typed in the Tune Fault drawer with no reference to what the experiment
+actually installs. User asked for: (1) a picker listing the currently-installed
+agents/apps when adding an uninstall step, (2) support for multiple install/uninstall
+successions with matching counts, (3) the uninstall steps as first-class sidebar buttons
+like install.
+
+Asks (1) and (3) are frontend-only and shipped here as **Phase A**. Ask (2) needs a
+unique-template-naming refactor across the frontend YAML service *and* the Go backend's
+single-`appNamespace` / single-`agentFolder` workflow-parameter assumptions — designed in
+full in `innovation.md` §1.16 "Phase B", not implemented.
+
+### Files changed (all under `AgentCert/chaoscenter/web/`, uncommitted)
+
+| File | Change |
+|------|--------|
+| `src/services/experiment/KubernetesYamlService.ts` | New `getInstalledTargets(manifest, kind)` — enumerates install-step targets, annotation (`agentcert.io/install-type`) first, legacy fixed-name / `agentcert-install-{app,agent}` image marker as fallback; returns a de-duped array (Phase-B-ready). `displayName()` in `getFaultsFromExperimentManifest` restructured: `uninstall-agent`/`uninstall-application` nodes now label as `uninstall-<kind>: <FOLDER>` read from the engine artifact env (install-step branch unchanged in behaviour). |
+| `src/views/ExperimentCreationSelectUninstallStep/{ExperimentCreationSelectUninstallStep.tsx,index.ts}` | New drawer view. Lists installed targets as selectable cards + editable folder/namespace `TextInput`s; auto-selects when exactly one; `Add` disabled until both fields non-empty. Reuses `DrawerTypes.InstallStep` sizing. |
+| `src/controllers/ExperimentCreationSelectUninstallStep/{ExperimentCreationSelectUninstallStep.tsx,index.ts}` | New controller. Loads installed targets from the IndexedDB manifest via the handler; `listChaosHub` → default hub; on select: `listChaosFaults` to discover the fault's chart category (not hardcoded), `getChaosFault` for the fault+engine CR, `preProcessChaosEngineAndExperimentManifest`, then stamps `FOLDER`/`NAMESPACE` into `engine.spec.experiments[0].spec.components.env` (set-or-append; runs *after* preprocess because preprocess overwrites `env` from the fault definition), emits `FaultData` with `faultName = getHash(3, 'uninstall-<kind>')`. |
+| `src/views/ExperimentVisualBuilder/ExperimentVisualBuilder.tsx` | Import + `uninstallStepDrawer` state; two new sidebar `<Text>` buttons in the "Setup" group; `handleUninstallStepSelection(faultData)` → `addFaultsToManifest(key, faultData, '', '')` (same path as any fault; inserts before the trailing cleanup step) + refresh steps + `setHasFaults` + `setUnsavedChanges`; drawer render block. |
+| `src/strings/strings.en.yaml` + `src/strings/types.ts` | New keys `uninstallAgent`, `uninstallAgentDescription`, `uninstallApplication`, `uninstallApplicationDescription`, `uninstallNoInstalledTargets`, `uninstallStepFaultNotInHub`, `uninstallStepHubUnavailable`, `uninstallTargetFolder`. |
+
+### Why the picker reads the manifest, not the cluster / agent registry
+
+"Currently installed" = what *this experiment's workflow installs* (the install-step
+templates in the draft manifest), which is what the user is reasoning about when adding a
+matching teardown — not what happens to be running in the cluster right now. So
+`getInstalledTargets` is a pure manifest scan, no API call.
+
+### Interaction with the run-details graph (§97)
+
+`getFaultsFromExperimentManifest`'s new `displayName` output (`uninstall-agent: flash-agent`
+instead of the raw `uninstall-agent-a1b` template name) does **not** affect
+`stepGraphMerge.ts` matching: `stepIdentity()` keys on the node's `identifier` (the template
+name, unchanged), and `normalizeStepKey` already strips a `: <suffix>` display decoration
+anyway. `ExperimentRunDetailsGraph` merge tests still pass (6/6).
+
+### Verification performed
+
+- `yarn lint` — clean for all new/changed files (the 12 repo-wide errors it reports are all
+  pre-existing, in unrelated files).
+- `yarn strings:check` — passes (the 5 errors it reports are pre-existing duplicate-value
+  keys unrelated to this change).
+- `yarn jest src/views/ExperimentRunDetailsGraph` — 6/6 pass.
+- **`yarn typecheck` is not obtainable in this checkout**: `node_modules/@types/node` is
+  v26.1.2, whose `.d.ts` syntax TypeScript 4.4 cannot parse, which aborts `tsc` before it
+  reaches `src/` (verified: an injected deliberate type error is not reported). Neutering
+  `ffi.d.ts` to get past that exposes a `node_modules` that is broadly out of sync with
+  source — `@harnessio/icons` is a version where every `<Icon size=…>` in the repo is a
+  type error, `@apollo/client`'s `OperationVariables` constraint fails across `src/api/`,
+  and `src/strings/types.ts` (a build-time-regenerated file) is stale for many existing
+  keys like `setup` / `configuration`. None of these are caused by or specific to this
+  change; the new code follows the exact `<Icon>` / `getString` / lazy-query patterns of
+  the surrounding committed code. A clean `node_modules` (or the webpack build, which
+  regenerates `strings/types.ts`) is needed to get a real typecheck signal.
+- No live UI run (would need the full stack up).
+
+### Durability
+
+Durability check: confirmed. All changes are in checked-in frontend source
+(`AgentCert/chaoscenter/web/src/...`), picked up by a normal `agentcert-web` image build
+(`./scripts/setup.sh --restart --local-build`, or `scripts/build-and-push.sh`). No live /
+manual patching. `agentcert-web` uses `imagePullPolicy: Always` per the Helm chart, so a
+rebuilt image is pulled on the next pod restart.
+
+### Status
+
+Phase A: code complete, **uncommitted**, not typecheck-verified (environment limitation
+above), not run in a live UI, no unit test added for `getInstalledTargets` (no existing
+test file for `KubernetesYamlService`; deferred to the Phase B test work). Phase B: designed
+in `innovation.md` §1.16, not started.
+
+## 108. "No Langfuse trace" for a freshly-recreated ITBench experiment — root cause is the untagged `clickhouse/clickhouse-server` image resolving to :latest (26.8.x), which broke Langfuse v3's timestamp ingestion so every trace/observation lands at `9999-12-31` and disappears from the UI and the certifier (2026-09-01, uncommitted)
+
+### Symptom
+
+User recreated the `q` ITBench experiment from scratch in the ChaosCenter UI (as workflow
+`w`, cluster `agentcert-alfred`, infra namespace `itbench`, app namespace `bookinfo`) and
+reported still getting **no Langfuse trace**. This was reported as a recurrence of §101, but
+§101 (agent image crash-loop → agent never runs → zero LLM calls) was already fixed — the
+agent *did* run this time.
+
+### What was actually happening
+
+The trace **exists and is complete** — it was never missing:
+
+- Langfuse trace `586c3857-3709-4f33-94de-63b9f48bbba2` (name `w`), project `agentcert`,
+  **28 observations**: 12 `GENERATION`s (`model=azure/gpt4o`, the `sre-agent-comprehensive`
+  CrewAI agent's real LLM calls, tagged `User-Agent: OpenAI/Python`), plus all the
+  control-plane workflow-step / fault spans from the GraphQL `LangfuseTracer`.
+- LiteLLM logs (`ace/deploy/litellm`) confirm the agent's calls arrived and were forwarded:
+  `05:09:39 ... langfuse.py:352 - Langfuse Layer Logging - logging success`.
+
+The problem: **every `timestamp` / `start_time` / `end_time` / `created_at` on that trace
+and all 28 observations — and on all 6 pre-existing traces, and all 110 observations in the
+database — is `9999-12-31 23:59:59.000`.** Confirmed directly in ClickHouse:
+
+```
+SELECT id, name, toString(timestamp), toString(created_at) FROM traces;
+-- every row: 9999-12-31 23:59:59.000
+SELECT type, count(), min(toString(start_time)), max(toString(start_time))
+  FROM observations GROUP BY type;
+-- EVENT 1, GENERATION 12, SPAN 17 — all min==max==9999-12-31 23:59:59.000
+```
+
+A trace stamped year 9999 is outside every time-windowed view (`to = now`), so:
+- it never appears in the Langfuse UI trace list (default "past 24h/7d" range), and
+- the certifier's Langfuse trace fetch (time-range scoped) never sees it.
+
+Hence "no trace", even though the data is all there.
+
+### Root cause — ClickHouse 26.8.x `toDateTime64()` integer-argument regression
+
+`kubectl get deploy -n ace clickhouse -o jsonpath='{.spec.template.spec.containers[0].image}'`
+→ `clickhouse/clickhouse-server` (**no tag**). `SELECT version()` → **`26.8.1.2041`**.
+Docker resolved the untagged image to `:latest`, which is now a ClickHouse **26.8** release.
+
+ClickHouse 26.8 changed how a bare integer argument to `toDateTime64(x, 3)` is interpreted.
+Reproduced in the running server:
+
+```
+SELECT toDateTime64(1788239379.437, 3),  -- 2026-09-01 05:09:39.437   (float: OK)
+       toDateTime64(1788239379437,   3);  -- 9999-12-31 23:59:59.000   (ms-as-int: OVERFLOW)
+```
+
+`date_time_overflow_behavior` = `ignore` (default), `date_time_input_format` = `best_effort`.
+Langfuse v3.225.5's ClickHouse insert path serialises JS millisecond-epoch numbers
+(`Date.now()`-style, e.g. `1788239379437`) for the `DateTime64(3)` timestamp columns. On
+ClickHouse ≤ 25.x this was accepted as milliseconds; on 26.8 it is treated as **whole
+seconds** (→ ~year 58000), overflows the DateTime64 range, and saturates to the maximum
+representable value `9999-12-31 23:59:59`. Every ingested timestamp, from every source
+(LiteLLM's Langfuse SDK *and* the GraphQL `LangfuseTracer`), is destroyed identically.
+
+Langfuse's own version-compat mechanism does **not** cover this — inspected the running
+image (`@langfuse/shared/.../clickhouse/compatibility.js`): v3.225.5 has exactly **one**
+compat rule (`query_plan_optimize_lazy_materialization=0` for CH ≥ 25.4, a *read*-query
+analyzer workaround). Nothing about DateTime input. Langfuse docs state only "v3 supports
+ClickHouse >= 24.3" with no upper bound; in practice 26.x breaks it.
+
+Secondary (not the cause, worth noting): `langfuse-worker` also logged
+`Failed to detect ClickHouse version; continuing without automatic compatibility settings`
+at startup — it came up ~1 s before the ClickHouse pod accepted connections
+(`Redis error connect ECONNREFUSED` / `HTTP request error` at 11:42:47, CH pod started
+11:41:45) and never re-ran detection in 17 h. Only consequence given the single existing
+rule is a missing read-side setting; it does **not** explain the `9999` timestamps.
+
+### Fix (durable, in source, uncommitted)
+
+Pinned the ClickHouse image to a Langfuse-v3-compatible major (`25.8`, the newest LTS a
+full major below the broken 26.x) with an explanatory comment, in all three places the
+untagged image appeared:
+
+| File | Line | Change |
+|------|------|--------|
+| `deploy/helm/ace/values.yaml` | `images.clickhouse` | `clickhouse/clickhouse-server` → `clickhouse/clickhouse-server:25.8` |
+| `deploy/k8s/langfuse.yaml` | clickhouse Deployment container | `image: clickhouse/clickhouse-server` → `:25.8` |
+| `compose/langfuse/docker-compose.yml` | `clickhouse` service | `docker.io/clickhouse/clickhouse-server` → `:25.8` |
+
+Any tag in `24.3` ≤ v < `26` works; the hard constraint is `< 26` until the Langfuse image
+is bumped to v4 (v4 requires CH ≥ 25.12 and has its own migration path — out of scope here).
+`langfuse/langfuse:3` / `langfuse/langfuse-worker:3` left as-is (floating within a major is a
+far smaller risk than an untagged image crossing majors).
+
+Durability check: confirmed all three consumers of this image now carry an explicit
+sub-26 pin, so a from-scratch `setup.sh` / `kind create` / `docker compose` on a fresh host
+pulls a compatible ClickHouse instead of whatever `:latest` happens to be. No script logic
+needed — the pin *is* the durable fix.
+
+### Live remediation still required (destructive — NOT performed, needs user authorization)
+
+The pin does not repair the running cluster on its own:
+
+1. The `langfuse-clickhouse-data` PVC holds a data directory created by CH **26.8.1**.
+   ClickHouse refuses to start an older binary against a newer on-disk format, so 25.8 will
+   not come up on that volume — the PVC must be deleted. Every trace currently stored is
+   the year-9999 garbage described above, so nothing of value is lost. Langfuse's ClickHouse
+   migrations re-run automatically on the fresh volume. Postgres (projects, users, API keys,
+   the `pk-lf-agentcert-local` / `sk-lf-agentcert-local` pair LiteLLM uses) is untouched.
+
+2. Suggested sequence (staged for the user; each step hits the permission classifier):
+   ```
+   kubectl -n ace scale deploy/clickhouse --replicas=0
+   kubectl -n ace delete pvc langfuse-clickhouse-data
+   ./scripts/setup.sh --restart          # helm upgrade → image:25.8, PVC recreated, CH starts clean
+   kubectl -n ace rollout restart deploy/langfuse-worker deploy/langfuse-web
+   ```
+
+3. The `w` trace (and the 5 `q` traces) are unrecoverable — their timestamps are gone, not
+   merely hidden — so Phase 0 bucketing could never use them. A fresh experiment run after
+   the remediation is required to get a usable trace + certification.
+
+### Verification performed
+
+- ClickHouse `SELECT version()` = `26.8.1.2041`; the `toDateTime64` overflow reproduced
+  live (commands above).
+- Trace + observation contents confirmed present via the Langfuse public API and direct
+  ClickHouse queries; all timestamps `9999-12-31`.
+- LiteLLM logs confirm the agent's 12 gpt-4o calls were received and forwarded with
+  "logging success".
+- Langfuse compat code read out of the running worker image — confirmed it has no
+  DateTime-related version handling.
+- `grep -rn clickhouse/clickhouse-server` across the repo — the three files above are the
+  only occurrences; all three now pinned.
+- Not yet applied to the live cluster (destructive PVC delete — awaiting user go-ahead).
+
+## 109. A2A bridge (`a2a-mcp-agent`) now speaks current A2A (`message/send`) with a fallback to legacy `tasks/send` — the AgentBeats-shaped onboarding path was wired to the pre-v0.2 draft only (2026-09-01, uncommitted)
+
+### Symptom / context
+
+While confirming whether ACE's external-agent onboarding path satisfies the AgentBeats
+subject-agent contract (A2A + MCP), an audit of `agents/harness/a2a-mcp-agent/a2a_bridge.py`
+found it hard-codes the JSON-RPC method `tasks/send` for task submission. The A2A protocol
+renamed `tasks/send` -> `message/send` at v0.2 (old name deprecated, being removed);
+the current spec is v0.3.0, which is what the AgentBeats paper (arXiv 2606.13608) targets.
+An external agent built against current A2A publishes a `message/send` handler and returns
+`-32601 Method not found` for `tasks/send`, so ACE's bridge could not drive it. Agent Card
+discovery was already dual-path (`agent-card.json` then `agent.json`); only the RPC method
+name lagged.
+
+### Fix
+
+| File | Change |
+|------|--------|
+| `agents/harness/a2a-mcp-agent/a2a_bridge.py` | Rewrote submission as `_submit_task()`: tries `message/send` (A2A >= v0.2 shape — `message.messageId` + `message.kind`, `parts[].kind`, `configuration.acceptedOutputModes`); on a "missing method" signal (JSON-RPC `-32601`, error text matching `method not found`/`unknown method`/etc., or HTTP 404/405/501) falls back to legacy `tasks/send` (top-level `id`, `parts[].type`). A `message/send` result that is a **Message** (`kind: "message"` / bare `parts`) is used directly with no polling; a **Task** result is polled via `tasks/get` (same method name in both eras). `TERMINAL_STATES` gained `rejected`/`cancelled`; new `WAITING_STATES` (`input-required`, `auth-required`) break the poll loop early instead of burning the timeout. Text extraction now accepts `part.kind == "text"` or `part.type == "text"` and also reads a direct Message's `parts` and the final `status.message.parts`. Output tar gains `a2a_protocol.txt` (which method won + final state). `_rpc` now raises a typed `_RpcError` carrying the JSON-RPC code. |
+| `agents/harness/a2a-mcp-agent/agent-harness.yaml` | Header comment updated: `message/send` first, `tasks/send` fallback, `tasks/get` poll; Agent Card at `agent-card.json` (then `agent.json`). |
+| `agents/harness/README.md` | "Adding a new agent — the A2A/MCP path" and the `a2a_endpoint` field row updated to match. |
+
+### Verification performed
+
+- `python3 -m py_compile a2a_bridge.py` — clean.
+- Mock-server matrix (`scratchpad/mock_a2a_test.py`, stdlib `http.server`, three servers):
+  (A) current spec, `message/send` -> Task -> `tasks/get` completed; (B) legacy, `message/send`
+  -> `-32601` -> `tasks/send` -> Task -> completed, Agent Card via `agent.json`; (C) current
+  spec, `message/send` -> immediate Message. All three: bridge `exit=0`, `agent_data.tar`
+  written, correct `a2a_protocol.txt`, artifact/message text extracted
+  (`diagnosis.json` + `status_message_part_0.txt` for A/B; `message_part_0.txt` for C).
+- No live ITBench run — there is no A2A-server agent deployed in this environment to point
+  it at (all of ACE's own agents — flash-agent, sre-agent-crewai, sre-agent-comprehensive —
+  are one-shot CLIs, not A2A servers; see §110-candidate note below).
+
+### Durability
+
+Durable — the change is entirely in the checked-in bridge script + its two doc files; the
+harness `setup.sh` (venv + `httpx`/`tenacity`) is unchanged and a fresh checkout picks the
+fix up with no extra step. No image rebuild involved (the `a2a-mcp-agent` harness runs the
+script directly from the repo via `agent-harness.yaml`).
+
+### Still open (not done here)
+
+- **None of ACE's own agents are A2A servers.** They are invoked directly by the Argo
+  workflow / `ace-bench.py` and expose no Agent Card or JSON-RPC endpoint. To exercise this
+  onboarding path end-to-end, one agent (candidate: `sre-agent-comprehensive`) needs a thin
+  A2A wrapper: an HTTP server publishing an Agent Card that, on `message/send`, runs
+  `python -m sre_comprehensive --goal "<task text>"` and returns the resulting
+  `agent_output.json`. Estimated ~1 file, ~150 lines (FastAPI or the `a2a` SDK), plus a
+  Dockerfile/chart tweak.
+- **ACE's `RegisterAgent` / `DeployAgentWithHelm` do not verify an A2A surface** (only a
+  `GET /health` 200). AgentBeats "Hosted mode" verifies the Agent Card + JSON-RPC endpoint
+  at registration. An "agent gateway" that does AgentBeats-style registration
+  (fetch card -> probe `message/send` -> record transport) would be a new package.
+
+### Status
+
+Uncommitted. 3 files edited under `agents/harness/a2a-mcp-agent/` + `agents/harness/README.md`.
+Concurrent session is mid-edit on the handoff docs (at §107/§108) — this entry is numbered
+109 to stay clear of that.

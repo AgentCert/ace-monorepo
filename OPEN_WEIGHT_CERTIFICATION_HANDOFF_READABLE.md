@@ -2479,3 +2479,135 @@ All five repos were then pushed (submodules first, then the top level — `bbc7e
 Still to do to make it live: `./scripts/setup.sh --restart --local-build` rebuilds the three affected images; the chaos-charts fault definitions are now on the branch the deployed hub syncs from; and the existing `q` experiment needs its two teardown steps re-added in Studio to pick up the new versions.
 
 Status: committed and pushed in all five repos; working trees clean; branches in sync with the remote.
+
+---
+
+## §107 — Chaos Studio now has "Uninstall Application" / "Uninstall Agent" buttons with a picker (2026-09-01, uncommitted)
+
+### The gap
+
+When you build an experiment from a blank canvas in Chaos Studio, there were one-click sidebar buttons to add "Install Application" and "Install Agent" steps, but nothing equivalent for tearing them back down. The two teardown faults from §104 existed, but you could only reach them through the generic "Add fault" list, and then you had to hand-type which release and namespace to remove — with nothing on screen reminding you what the experiment had installed.
+
+### What was asked for
+
+1. A picker that lists the agents/apps the experiment currently installs, so you can just click the one to remove.
+2. Support for several install/uninstall pairs in a row, with the counts matching up.
+3. The uninstall steps as proper sidebar buttons, like install already is.
+
+Items 1 and 3 are frontend-only and are done here ("Phase A"). Item 2 needs a deeper change — the code currently only allows one install step of each kind, on both the frontend and the Go backend — so it was designed out in full (see the Innovation Log, §1.16 "Phase B") but not built.
+
+### What changed (all in the ChaosCenter web UI, uncommitted)
+
+- Two new buttons in the builder's "Setup" group open a new drawer.
+- The drawer lists every target the experiment installs — worked out by scanning the draft experiment itself, not by asking the cluster — and pre-picks it when there's only one. You can also just type a release name and namespace.
+- Picking one fetches the right teardown fault from the default ChaosHub, fills in its release/namespace, and drops it into the workflow as a normal step (it lands just before the final cleanup step).
+- Teardown steps on the canvas now read `uninstall-agent: <release>` instead of an opaque generated name.
+
+### Checks done
+
+Lint is clean for the new files, the string-file check passes, and the run-details graph tests still pass (the new label doesn't change how steps are matched there). A full TypeScript check could not be run — this checkout's installed dependencies are badly out of step with the source (a too-new `@types/node` stops the type-checker before it even reaches our code, and behind that the icon and GraphQL client libraries are mismatched versions that make large parts of the existing codebase fail type-checking too). The new code copies the exact patterns of the surrounding committed code. It has not been clicked through in a running UI, and no unit test was added (there's no existing test file for that service — folded into the Phase B test work).
+
+### Is it durable?
+
+Yes — everything is in checked-in frontend source and ships with a normal web-image rebuild (`./scripts/setup.sh --restart --local-build`). Nothing was patched into a live container.
+
+### Status
+
+Phase A: code complete, uncommitted, not type-checked (environment problem above) and not yet exercised in a live UI. Phase B: designed in the Innovation Log, not started.
+
+## §108 — "No Langfuse trace" for the recreated ITBench experiment: ClickHouse silently upgraded itself to a version that breaks Langfuse (2026-09-01, uncommitted)
+
+### The symptom
+
+The user recreated the `q` ITBench experiment from scratch (as workflow `w`) and still saw no trace in Langfuse. They thought this was §101 coming back, but §101 was a different bug (the agent crashing before it ran) and that one is fixed — this time the agent ran fine.
+
+### What was really going on
+
+The trace was **there the whole time, and complete**. Langfuse had trace `w` with 28 observations: 12 real LLM calls from the agent (gpt-4o, via LiteLLM) plus all the workflow/fault spans from the control plane. LiteLLM's own logs show the agent's calls arriving and being logged to Langfuse successfully.
+
+The catch: **every timestamp on every trace and observation in the whole database was `9999-12-31 23:59:59`** — the year 9999. Langfuse's UI only shows traces inside a time window that ends "now", and the certifier only pulls traces by time range, so a trace dated 8000 years in the future is invisible to both. It looks exactly like "no trace".
+
+### Why the timestamps were destroyed
+
+The ClickHouse container (Langfuse's trace database) was running image `clickhouse/clickhouse-server` with **no version tag**. Docker fills that in with `:latest`, which had rolled forward to ClickHouse **26.8** — a release much newer than Langfuse v3 was built for.
+
+ClickHouse 26.8 changed how it reads a plain number as a timestamp. Langfuse sends timestamps as milliseconds-since-1970 (a big integer). Older ClickHouse accepted that; 26.8 reads the same number as *seconds*, lands ~56000 years in the future, and — instead of erroring — clamps it to the largest date it can hold, `9999-12-31`. This happens to every timestamp from every source, so all trace data becomes undateable and therefore unfindable.
+
+Langfuse v3's own "handle newer ClickHouse versions" logic doesn't cover this — checked the running image, and its only version-specific tweak is an unrelated read-query workaround. Langfuse's docs just say "v3 needs ClickHouse 24.3 or newer" with no upper limit; in reality 26.x breaks it.
+
+### The fix (in source, uncommitted)
+
+Pinned the ClickHouse image to `clickhouse/clickhouse-server:25.8` (newest long-term-support release that's still a full major version below the broken 26.x), in the three places the untagged image was used:
+
+- `deploy/helm/ace/values.yaml` (the Helm path the user runs)
+- `deploy/k8s/langfuse.yaml` (the plain-kubectl path)
+- `compose/langfuse/docker-compose.yml` (the Docker Compose path)
+
+Each with a comment explaining why it must stay below 26 until Langfuse is moved to v4. Anything from 24.3 up to (not including) 26 works.
+
+### Is it durable?
+
+Yes for new setups — a fresh checkout on a fresh host now pulls a compatible ClickHouse instead of "whatever `latest` is that day", which is the whole bug. The pin itself is the fix; no script logic needed.
+
+### But the running cluster still needs a one-time repair (destructive — NOT done yet, needs the user's OK)
+
+Swapping the image isn't enough on the existing cluster:
+
+- The ClickHouse storage volume was written by version 26.8, and ClickHouse won't start an older version on top of newer files. So that volume (`langfuse-clickhouse-data`) has to be deleted. Everything in it is the year-9999 garbage anyway, so nothing worth keeping is lost. Langfuse rebuilds its ClickHouse tables automatically; the Postgres database (projects, users, the API keys LiteLLM uses) is not touched.
+- Rough sequence, staged for the user to run:
+  ```
+  kubectl -n ace scale deploy/clickhouse --replicas=0
+  kubectl -n ace delete pvc langfuse-clickhouse-data
+  ./scripts/setup.sh --restart
+  kubectl -n ace rollout restart deploy/langfuse-worker deploy/langfuse-web
+  ```
+- The `w` trace and the old `q` traces can't be salvaged — their timestamps are genuinely gone, not just hidden. A fresh experiment run after the repair is needed to get a usable trace and certification.
+
+### Status
+
+Source fix done, uncommitted. Live repair not performed — it deletes a volume, so it needs the user's explicit go-ahead.
+
+## §109 — The A2A bridge now speaks the current protocol, not just the old draft (2026-09-01, uncommitted)
+
+### Background
+
+ACE lets an external agent join a benchmark run without any code changes, as long as it
+"speaks A2A" (Google's agent-to-agent protocol) and gets its tools through MCP. This is the
+same contract UC Berkeley's **AgentBeats** platform uses for a competitor agent, so in
+principle an agent built for one works with the other.
+
+### The problem
+
+A2A is JSON-RPC: every call names an operation in a `method` string, and the string has to
+match exactly on both ends. ACE's bridge (`agents/harness/a2a-mcp-agent/a2a_bridge.py`) was
+hard-wired to `tasks/send` — the name from A2A's **first draft**. A2A renamed that to
+`message/send` at version 0.2, and the current spec (0.3.0, the one AgentBeats targets) uses
+`message/send`. So an agent built to the current spec would answer "method not found" and
+ACE's bridge couldn't drive it. (The Agent Card lookup was already tolerant of both old and
+new locations — only the method name lagged.)
+
+### The fix
+
+The bridge now tries `message/send` first and falls back to `tasks/send` only if the agent
+says it doesn't know that method. It also handles the newer protocol's quirks: a
+`message/send` reply can be a full task to poll *or* a finished answer to use directly; the
+message shape has a couple of extra required fields; and text can come back in more places.
+Task polling (`tasks/get`) has the same name in both versions, so that was left alone.
+Verified with three mock servers — one current-spec, one old-draft, one that answers
+immediately — all three drive to completion and produce the expected result tarball.
+
+### What this does and doesn't buy
+
+It makes the *bridge* bidirectionally compatible. It does **not** make ACE's own agents
+(flash-agent, the CrewAI SRE agents) AgentBeats-ready — those are one-shot command-line
+programs, not A2A servers, so nothing can hand them an A2A task. Running this path
+end-to-end still needs one agent given a thin A2A wrapper (an HTTP server that publishes an
+Agent Card and runs the agent on each `message/send`). Also noted: ACE's agent registry
+only pings `/health`; it never checks that an agent's A2A surface actually works, which is
+something AgentBeats-style registration does.
+
+### Status
+
+Source only, uncommitted — 3 files under `agents/harness/`. No image rebuild needed (the
+harness runs the script straight from the repo). A concurrent session is editing these
+handoff files at §107/§108, so this is numbered 109 to avoid a clash.

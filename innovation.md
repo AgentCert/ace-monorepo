@@ -99,13 +99,106 @@ Surfaced during a discussion of concurrent experiment execution (§3.20): fixing
 `agentcert-stack/litellm-setup/litellm_config.yaml` sets a retry policy (`num_retries: 3`, `retry_after: 2`, `request_timeout: 600`) but no `rpm`/`tpm`/`max_parallel_requests` on any model entry, and no `fallbacks`. Under concurrent load (§3.20) this means provider rate-limit contention surfaces as blind retry-and-wait latency rather than predictable throttling — variance attributable to infrastructure, not agent behavior, contaminating timing metrics the same way as §1.13. LiteLLM natively supports per-model `rpm`/`tpm`/`max_parallel_requests` and multi-deployment load-spreading under one alias (already used incidentally here for two `qwen2.5-32b-instruct` VRAM variants, `litellm_config.yaml:80-94,103-110`) — neither is applied to any cloud provider entry today. Fix direction: set `rpm`/`tpm` to each provider's real account quota, provision a second key/deployment for the primary cloud model to double the effective budget, and size the concurrency threshold in §3.20 (Argo semaphore) against the configured `rpm`/`tpm` rather than an arbitrary N.
 
 ### 1.16 No Uninstall-Step Picker in Chaos Studio; Install-Agent Namespace Not Inherited from Upstream Steps
-**Status: Proposed**
+**Status: Phase A implemented (uninstall-step picker + sidebar buttons); Phase B proposed (multiple install/uninstall pairs)**
 
 Chaos Studio's blank-canvas experiment builder gives users a one-click affordance to add "Install Application" and "Install Agent" steps to a workflow: sidebar buttons (`AgentCert/chaoscenter/web/src/views/ExperimentVisualBuilder/ExperimentVisualBuilder.tsx:250,261`) open a drawer (`.../controllers/ExperimentCreationSelectInstallStep/ExperimentCreationSelectInstallStep.tsx:16-66` + matching view) that lists AgentHub/AppHub catalog entries via the `listAppHubCategories`/`listAgentHubCategories` GraphQL queries and, on selection, calls `KubernetesYamlService.addInstallStepToManifest()` (`.../services/KubernetesYamlService.ts:206-247`) to inject an `install-application`/`install-agent` template step directly into the IndexedDB-stored manifest. No equivalent exists for uninstalling: `grep -rIn "uninstall" src/` across the entire web frontend returns zero matches, and the `kind` type backing this whole mechanism is hardcoded `'application' | 'agent'` in every layer (view, controller, `ExperimentVisualBuilder.tsx`, `ExperimentYamlService.ts:172/178`, `KubernetesYamlService.ts:34/208/255`) — there's no third variant to select. Server-side "uninstall" logic does exist, but only as Helm-release cleanup tied to *deleting an agent/app registration* (`AgentCert/chaoscenter/graphql/server/pkg/agent_registry/service.go:437-458`, `pkg/agent_registry/helm.go:458-516`, `pkg/handlers/helm_handler.go:184-244`) — an admin/REST operation, not a pickable Chaos Studio workflow step, and no GraphQL symbol exposes it either. A user who wants the experiment workflow itself to clean up the app/agent it installed (rather than relying on manual deletion afterward) has to hand-edit the manifest YAML with no catalog assistance.
 
 Separately, the install-agent drawer's namespace field (`ExperimentCreationSelectInstallStep.tsx:112-118`, a plain `<TextInput>` under label `appNameSpace`) is only ever pre-seeded from the selected catalog entry's own static `namespace` field (from `listAgentHubCategories`, controller lines 43/51) — never from whatever namespace was already chosen in an earlier `install-application` step already present in the same workflow. Each drawer instance's namespace state is independent; nothing reads the manifest's existing steps to offer the upstream namespace as a default or selectable option. In practice, installing an agent into the same namespace as the application it's meant to operate against requires the user to already know and manually retype that namespace correctly, with no cross-step consistency check.
 
-Fix direction: extend the `kind` union (e.g. `'application' | 'agent' | 'uninstall-application' | 'uninstall-agent'`, or a separate `action: 'install' | 'uninstall'` field alongside the existing `kind`) through the GraphQL catalog queries, the controller, and `KubernetesYamlService`'s manifest injection so uninstall steps get the same sidebar-button → drawer → manifest-injection flow already built for install; and change the install-agent drawer's namespace field from an independent `<TextInput>` to a selectable list (dropdown or radio) populated by scanning the manifest for any already-added `install-application` step's namespace value, falling back to the catalog default only when no upstream step exists yet.
+**Phase A — implemented (frontend only, this session).** Two new sidebar buttons in the
+Chaos Studio blank-canvas builder ("Uninstall Application" / "Uninstall Agent", in the same
+"Setup" group as the install buttons) open a new drawer
+(`web/src/controllers/ExperimentCreationSelectUninstallStep/` + `.../views/ExperimentCreationSelectUninstallStep/`).
+The drawer lists every target this experiment currently installs — computed by
+`KubernetesYamlService.getInstalledTargets(manifest, kind)`, which scans manifest templates
+matching the `agentcert.io/install-type` annotation first, falling back to the legacy fixed
+template name / `agentcert-install-{app,agent}` image marker — and pre-selects it when
+there is exactly one. Selecting a target (or hand-typing folder + namespace) fetches the
+`uninstall-agent` / `uninstall-application` fault + engine CRs from the default ChaosHub
+(category auto-discovered via `listChaosFaults`), runs them through
+`preProcessChaosEngineAndExperimentManifest`, stamps the chosen release into the engine's
+`FOLDER` / `NAMESPACE` env, and adds it as a normal fault step via `addFaultsToManifest`.
+Canvas labels for these nodes show `uninstall-agent: <folder>` (new branch in
+`getFaultsFromExperimentManifest`'s `displayName`). Files: `KubernetesYamlService.ts`
+(`getInstalledTargets`, `displayName`), `ExperimentVisualBuilder.tsx` (buttons +
+`handleUninstallStepSelection` + drawer render), new controller/view/index pairs,
+`strings.en.yaml` + `types.ts` (`uninstall*` keys). The install-agent namespace-inheritance
+half of this item (para 2 above) is **not** addressed by Phase A — deferred to Phase B.
+Verification limits: this checkout's `node_modules` is badly out of sync with source
+(`@types/node` v26 breaks `tsc` parse; `@harnessio/icons` version mismatch makes every
+`<Icon size=…>` in the repo a type error; `strings/types.ts` is stale for many existing
+keys) so a full `yarn typecheck` is not obtainable here — `yarn lint` is clean for the new
+files, `strings:check` passes, and the `ExperimentRunDetailsGraph` merge tests still pass
+(the new `displayName` output does not change `stepIdentity`, which keys on the
+template-name `identifier`, not the label).
+
+**Phase B — proposed: support N install-application + M install-agent steps and matching
+uninstall steps in one experiment.** Today only one install step per kind is possible:
+`addInstallStepToManifest` (`KubernetesYamlService.ts:206`) matches a template by the fixed
+name `install-application` / `install-agent` and *overwrites* it; canvas node ids are those
+literal strings and `ExperimentVisualBuilder.tsx`'s `ClickNode` handler branches on them;
+`displayName` / `getInstallStepSelection` special-case them; and the Go backend assumes a
+single `appNamespace` + single `agentFolder` workflow parameter (`handler.go`:
+`ensureAgentFolderParam` L862, `applyUninstallAllPatchToWorkflowSpec` L883 emits one
+`uninstall-all` step resolving `{{workflow.parameters.agentFolder}}` +
+`{{workflow.parameters.appNamespace}}`; `ops.ExtractInstallAgentFolder` /
+`ExtractInstallApplicationNamespace` return one value; `chaos_experiment/ops/service.go`
+`applyUninstallAllPatch` + `apply-workload-rbac`-before-`install-application` ordering).
+Implementation steps:
+
+1. **Unique template names, annotation as source of truth.** `addInstallStepToManifest`
+   generates `install-<kind>-<slug(folder)>` (dedupe with `-2`/`-3`), stamps
+   `agentcert.io/install-type: <kind>` + `agentcert.io/install-folder` /
+   `…/install-namespace` annotations, and *appends* instead of overwriting (no-op when the
+   same folder+namespace+kind already present). Ordering rule preserved: each new
+   `install-agent-*` inserted after the last `install-application-*`; multiple apps
+   accumulate at the front in insertion order.
+2. **De-hardcode the frontend fixed names.** `displayName` and a new
+   `getInstallStepKindForNode(manifest, nodeId)` match on the annotation via a
+   name→template lookup, not the literal string; `ExperimentVisualBuilder.tsx`'s
+   `ClickNode` handler uses that helper and re-opens the install drawer pre-filled from
+   *that node's* annotations, updating the template by node id on re-select. Add
+   `removeInstallStepFromManifest(key, templateName)` (drop template + step entry + the
+   `appNamespace` param when removing the last app). `getInstallStepSelection` kept for
+   back-compat (returns first match); `getInstalledTargets` already array-shaped — no change.
+3. **Per-step namespace, not one global param.** Every install/uninstall template already
+   carries its own `-namespace=` arg / annotation; keep seeding `spec.arguments.parameters`
+   `appNamespace` with the *first* app namespace for anything still reading the global, but
+   make downstream code prefer the per-step value. Backend: replace
+   `ExtractInstallAgentFolder` / `ExtractInstallApplicationNamespace` with an
+   `installTargets(spec) []{Template,Kind,Folder,Namespace}` helper in `ops`, shared by
+   `chaos_experiment` and `chaos_experiment_run`.
+4. **`uninstall-all` auto-patch → per-target.** `applyUninstallAllPatchToWorkflowSpec` /
+   `applyUninstallAllPatch` iterate `installTargets(spec)` and bake an explicit
+   folder/namespace list into the teardown script (agent releases before app namespaces),
+   keeping the `kube-*`/`default`/`litmus`/`monitoring` protection `case`. Add
+   `hasExplicitTeardownFor(spec, target)` so that when the user has already added explicit
+   `uninstall-*` fault steps covering every install target (match by annotation/env), the
+   auto-patch is skipped and the user's explicit "matching succession" wins.
+5. **Picker multi-target UX.** When `getInstalledTargets(...).length > 1` the drawer stops
+   auto-selecting; add an "Uninstall all installed <apps|agents>" action (`onSelectMany`
+   loops the fetch+inject per target). Add a non-blocking builder banner (mirrors the
+   existing `faultsMissingTarget` one) when the count of `uninstall-<kind>*` fault nodes ≠
+   the count of install targets of that kind (`getString('uninstallCountMismatch', …)`).
+6. **Tests.** Update `chaos_experiment/ops/service_test.go`
+   (`TestExtractInstallApplicationNamespace`, install-application ordering) and
+   `chaos_experiment_run/handler/service_test.go` (teardown weightage) with 2-app + 2-agent
+   cases; add a `KubernetesYamlService` unit test for `getInstalledTargets` + multi-install
+   naming (no existing test file for this service — new one needed).
+7. **Back-compat.** Legacy fixed-name manifests (no annotation) keep working via the
+   name-based fallback already present in `normalizeInstallTemplates` (Go) and the new
+   annotation-or-name lookups (frontend). No IndexedDB migration (drafts are per-user,
+   short-lived); predefined ChaosHub templates keep their hardcoded names, handled by the
+   fallback.
+
+Files to touch (Phase B): `web/src/services/experiment/KubernetesYamlService.ts`,
+`.../ExperimentYamlService.ts` (abstract sigs), `.../views/ExperimentVisualBuilder/ExperimentVisualBuilder.tsx`,
+`.../controllers/ExperimentCreationSelectInstallStep/*`, `.../controllers/ExperimentCreationSelectUninstallStep/*`,
+`.../strings/strings.en.yaml` (+`types.ts`),
+`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` (+`_test`),
+`AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/handler.go` (+`_test`),
+and probably the sidecar/agent-MCP-URL context injection that keys on the single
+install-agent (overlaps §2.8).
 
 ---
 
@@ -401,6 +494,55 @@ Adding a new agent/app pairing to Chaos Studio currently has no guided path. `Ap
 `scripts/gen-vscode-ports.sh` can discover this checkout's owned ACE ports and generate VS Code settings for them, but it cannot directly delete/recreate rows in the already-open VS Code Ports panel. That live forwarded-port list is owned by the local VS Code client / Remote-SSH extension, not by the remote Linux shell where the script runs. There is no supported `code` CLI command or remote-side state file for a Bash script to mutate those live rows.
 
 The practical workaround is to generate settings that the client reads at connection startup: workspace `remote.portsAttributes` for labels, `remote.restoreForwardedPorts=false` to avoid resurrecting stale forwards, and a generated `.vscode/ace-vscode-ports.user-settings.json` snippet containing `remote.SSH.defaultForwardedPorts` for client-side User settings. After merging that snippet into User settings and reloading/reconnecting Remote-SSH, VS Code can create the current static forwards reliably. Full automation would require a tiny VS Code-side helper/extension that runs in the local/UI extension host and updates User settings through VS Code's configuration API; direct live Ports-panel mutation would rely on internal Remote/Ports commands and should be treated as brittle.
+
+### 6.11 `gen-vscode-ports.sh` Side Effect: "Too Many Random Forwarded Ports"
+**Status: Investigated 2026-09-01 — behaviour is by design; documented here so it isn't re-diagnosed as a bug**
+
+Symptom reported: a large number of seemingly-random ports show up as forwarded in the
+VS Code Ports panel on every Remote-SSH reconnect.
+
+Root cause: `scripts/gen-vscode-ports.sh` (§6.10). It is **not** run automatically — nothing
+in `setup.sh`, no git hook, no `.claude` hook calls it — but a single past run (this checkout:
+~Aug 25) leaves persistent output in three gitignored files under `.vscode/` that VS Code
+re-applies on every connect:
+
+| File | Scope | Effect |
+|------|-------|--------|
+| `.vscode/settings.json` | workspace | `remote.SSH.defaultForwardedPorts` (16 entries) + `remote.autoForwardPorts: true` + `remote.autoForwardPortsSource: "process"` |
+| `.vscode/ace-vscode-ports.user-settings.json` | (snippet to paste into **client-side User settings**) | same 16 forwards, but then applied to *every* window/host, not just this repo |
+| `.vscode/.gen-vscode-ports.state.json` | — | prune-tracking bookkeeping |
+
+Two mechanisms then forward ports:
+1. `remote.SSH.defaultForwardedPorts` — a static list forwarded unconditionally on every
+   connect. This is the bulk (16 rows).
+2. `remote.autoForwardPorts: true` with source `"process"` — VS Code watches for
+   newly-started listening processes and silently forwards them. On this shared multi-user
+   host that can also pick up unrelated ports (other users' services, build/test servers).
+
+The 16 ports are **not stale/wrong** — verified 2026-09-01 against the live
+`agentcert-alfred-control-plane` KinD node, they match its published NodePorts exactly
+(`2002, 3006, 3032, 4003, 8084, 8085, 8089, 14002, 18001, 19091, 27020, 31087, 31088,
+31091, 31688, 32002`). They *look* random because they are `setup.sh`'s UID-derived
+free-port-walk picks (`KIND_HOSTPORT_*` in `.env`), not the tidy documented defaults
+(2001, 8081, …).
+
+How to stop it:
+- Quickest: `rm .vscode/settings.json` (gitignored; regenerate via the script if the labels
+  are wanted again).
+- If the snippet was merged into client User settings: remove
+  `remote.SSH.defaultForwardedPorts`, `remote.autoForwardPorts`,
+  `remote.autoForwardPortsSource`, `remote.portsAttributes` from *Preferences: Open User
+  Settings (JSON)* on the local machine.
+- To keep labels but stop bulk forwarding: set `"remote.autoForwardPorts": false` and delete
+  the `remote.SSH.defaultForwardedPorts` array in `.vscode/settings.json`, keeping only
+  `remote.portsAttributes`.
+- Reload the Remote-SSH window; existing rows: right-click → *Stop Forwarding Port*
+  (`remote.restoreForwardedPorts` is already `false`, so they don't resurrect).
+
+Possible follow-up: have the script default to writing *only* `remote.portsAttributes`
+(labels), and gate the `defaultForwardedPorts` / `autoForwardPorts` block behind an explicit
+`--with-forwards` flag, so a casual run doesn't silently opt the user into 16 unconditional
+forwards plus process-scan auto-forwarding.
 
 ---
 

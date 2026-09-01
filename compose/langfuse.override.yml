@@ -21,7 +21,9 @@
 # host already had unrelated deployments bound to both). Container/volume
 # naming is already handled separately via a per-invocation
 # COMPOSE_PROJECT_NAME (see start_langfuse() in start-local-services.sh) —
-# only the hardcoded ports need overriding here.
+# so only the hardcoded ports needed overriding here, plus (added later) the
+# untagged clickhouse image + a users.d drop-in — same "can't edit the
+# disposable clone" reasoning as the ports. See the clickhouse block below.
 #
 # `!override` (not plain replacement) is required on `ports:`: Compose merges
 # sequence fields across `-f` files by CONCATENATION, not replacement, unless
@@ -39,3 +41,25 @@ services:
     ports: !override
       - "${MINIO_API_PORT:-9090}:9000"
       - "127.0.0.1:${MINIO_CONSOLE_PORT:-9091}:9001"
+  # Upstream's compose leaves clickhouse-server untagged (→ :latest). :latest rolled onto
+  # 26.8.x, which reads a bare number for a DateTime64 column as seconds not ticks in the
+  # JSON/Values insert paths — so Langfuse v3's millisecond-epoch timestamps overflow and
+  # every trace/observation is stamped 9999-12-31 and disappears from the UI and the
+  # certifier (HANDOFF §108). Pin to 26.8 (matches any volume already written locally — no
+  # wipe) and restore the pre-26.8 parse via the drop-in below (needs CH >= 26.8).
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:26.8
+    configs:
+      - source: ace_clickhouse_settings
+        target: /etc/clickhouse-server/users.d/ace-datetime-compat.xml
+
+configs:
+  ace_clickhouse_settings:
+    content: |
+      <clickhouse>
+          <profiles>
+              <default>
+                  <input_format_read_datetime_number_as_raw_value>1</input_format_read_datetime_number_as_raw_value>
+              </default>
+          </profiles>
+      </clickhouse>

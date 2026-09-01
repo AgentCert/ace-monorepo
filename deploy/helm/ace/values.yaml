@@ -45,7 +45,15 @@ images:
   mongodb:        mongo:5
   postgres:       postgres:17
   redis:          redis:7
-  clickhouse:     clickhouse/clickhouse-server
+  # Pin ClickHouse — the untagged image resolved to :latest and rolled onto 26.8.x, whose
+  # changed integer toDateTime64() semantics (JSON/Values paths now read a bare number as
+  # seconds, not ticks) made Langfuse v3's millisecond-epoch inserts overflow and saturate
+  # every trace/observation timestamp to 9999-12-31 — traces then vanished from the UI and
+  # the certifier (HANDOFF §108). We stay on 26.8 (matches the volume already written on
+  # existing clusters, so no PVC wipe) and restore the pre-26.8 parse via the
+  # clickhouse-ace-settings ConfigMap (templates/langfuse.yaml), which needs CH >= 26.8 —
+  # keep this pin >= 26.8 or revisit that ConfigMap. setup.sh warns if :26.8 drifts again.
+  clickhouse:     clickhouse/clickhouse-server:26.8
   minio:          cgr.dev/chainguard/minio
   langfuseWeb:    langfuse/langfuse:3
   langfuseWorker: langfuse/langfuse-worker:3

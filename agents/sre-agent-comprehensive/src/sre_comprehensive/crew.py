@@ -9,13 +9,14 @@ by at least one explicit phase of the protocol.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List, Optional
 
 import litellm
 from crewai import Agent, Crew, LLM, Task
 
-from .mcp_tools import get_all_tools
+from .mcp_tools import get_all_tools, required_evidence_missing
 
 # ---------------------------------------------------------------------------
 # Output schema shared by ITBench evaluators
@@ -280,6 +281,35 @@ _LOG_TOKEN_WASTE = os.environ.get("SRE_AGENT_LOG_TOKEN_WASTE", "").strip().lower
 _STOP_MARKER = "\nObservation:"
 
 
+def _empty_final_answer(text: str) -> bool:
+    compact = text.replace(" ", "").replace("\n", "")
+    return "\"entities\":[]" in compact and "\"propagation_chain\":[]" in compact and "Action:" not in text
+
+
+def _forced_evidence_action() -> str | None:
+    namespace = os.environ.get("TARGET_NAMESPACE", "otel-demo")
+    missing = required_evidence_missing()
+    if not missing:
+        return None
+    tool_name = missing[0]
+    if tool_name == "list_namespaces":
+        action_input = "{}"
+    elif tool_name == "list_pods_in_namespace":
+        action_input = json.dumps({"namespace": namespace}, separators=(",", ":"))
+    elif tool_name == "list_k8s_events":
+        action_input = json.dumps({"namespace": namespace}, separators=(",", ":"))
+    else:
+        action_input = json.dumps(
+            {"api_version": "apps/v1", "kind": "Deployment", "namespace": namespace},
+            separators=(",", ":"),
+        )
+    return (
+        "Thought: I must collect required Kubernetes evidence before I can provide a final answer.\n"
+        f"Action: {tool_name}\n"
+        f"Action Input: {action_input}"
+    )
+
+
 def _build_llm_params(llm: "LLM", messages: List[Dict[str, str]]) -> Dict[str, Any]:
     """Same param set as crewai.LLM.call(), except:
     - `stop` is always omitted — the marker is stripped client-side instead
@@ -351,6 +381,10 @@ class _TruncatingLLM(LLM):
         response = litellm.completion(**params)
         full_text = response["choices"][0]["message"]["content"]
         kept_text = full_text.split(_STOP_MARKER)[0].rstrip()
+        forced_action = _forced_evidence_action() if _empty_final_answer(kept_text) else None
+        if forced_action:
+            print("[sre-comprehensive] rejected premature empty final answer; forcing evidence tool call", flush=True)
+            kept_text = forced_action
         _log_waste(self.model, kept_text, response["usage"].get("completion_tokens"))
         return kept_text
 
@@ -381,7 +415,12 @@ class _StreamingTruncatingLLM(LLM):
             if callable(close):
                 close()
         full_text = "".join(chunks)
-        return full_text.split(_STOP_MARKER)[0].rstrip()
+        kept_text = full_text.split(_STOP_MARKER)[0].rstrip()
+        forced_action = _forced_evidence_action() if _empty_final_answer(kept_text) else None
+        if forced_action:
+            print("[sre-comprehensive] rejected premature empty final answer; forcing evidence tool call", flush=True)
+            return forced_action
+        return kept_text
 
 
 def _build_llm(model: str, base_url: str, api_key: str) -> LLM:

@@ -171,6 +171,28 @@ spec:
 
 # ── ClickHouse ────────────────────────────────────────────────────────────────
 ---
+# ClickHouse >= 26.8 reads a bare unquoted number for a DateTime64 column (in the JSON /
+# Values insert paths Langfuse uses) as whole seconds instead of ticks-at-column-precision.
+# Langfuse v3 sends millisecond epochs, so on 26.8 every ingested timestamp overflows and
+# saturates to 9999-12-31 — traces disappear from the UI and the certifier (HANDOFF §108).
+# This drop-in restores the pre-26.8 behaviour for the `default` profile. Requires
+# ClickHouse >= 26.8 (older servers reject the unknown setting on startup); the image pin
+# below is kept >= 26.8 to match. Remove once the Langfuse image moves to v4.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-ace-settings
+  namespace: ace
+data:
+  ace-datetime-compat.xml: |
+    <clickhouse>
+        <profiles>
+            <default>
+                <input_format_read_datetime_number_as_raw_value>1</input_format_read_datetime_number_as_raw_value>
+            </default>
+        </profiles>
+    </clickhouse>
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -214,7 +236,12 @@ spec:
         fsGroup: 101
       containers:
         - name: clickhouse
-          image: clickhouse/clickhouse-server
+          # Pinned (was untagged → :latest → rolled onto 26.8.x and broke Langfuse v3
+          # timestamp ingestion — every trace stamped 9999-12-31, HANDOFF §108). Kept on
+          # 26.8 to match volumes already written on existing clusters (no PVC wipe); the
+          # pre-26.8 DateTime parse is restored via the clickhouse-ace-settings ConfigMap
+          # above, which needs CH >= 26.8 — keep this pin >= 26.8 or revisit that ConfigMap.
+          image: clickhouse/clickhouse-server:26.8
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8123   # HTTP
@@ -246,6 +273,10 @@ spec:
               mountPath: /var/lib/clickhouse
             - name: logs
               mountPath: /var/log/clickhouse-server
+            - name: ace-settings
+              mountPath: /etc/clickhouse-server/users.d/ace-datetime-compat.xml
+              subPath: ace-datetime-compat.xml
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -253,6 +284,9 @@ spec:
         - name: logs
           persistentVolumeClaim:
             claimName: langfuse-clickhouse-logs
+        - name: ace-settings
+          configMap:
+            name: clickhouse-ace-settings
 ---
 apiVersion: v1
 kind: Service
@@ -441,6 +475,47 @@ spec:
       labels:
         app: langfuse-web
     spec:
+      initContainers:
+        # langfuse-web runs the Prisma DB migrations on startup and exits 1 if the
+        # database is unreachable. On a from-scratch deploy Postgres can take a
+        # couple of minutes to become ready (first-boot data-dir init on the PVC),
+        # which otherwise leaves langfuse-web in CrashLoopBackOff until the backoff
+        # timer happens to line up with Postgres readiness. This gate removes the race.
+        #
+        # pg_isready parses host/port/dbname straight out of $DATABASE_URL — the
+        # same value the container below connects with — so the wait target is
+        # never hardcoded separately from the connection string.
+        - name: wait-for-db
+          image: postgres:17
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -d "$DATABASE_URL" -t 3; do
+                echo "waiting for database to accept connections ($DATABASE_URL)..."
+                sleep 2
+              done
+              echo "database is ready"
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: ace-env
+                  key: POSTGRES_DB
+                  optional: true
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
       containers:
         - name: langfuse-web
           image: langfuse/langfuse:3

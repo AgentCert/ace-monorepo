@@ -21,9 +21,11 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from .crew import build_crew
+from .mcp_tools import collect_minimum_evidence, reset_tool_call_history
 
 
 def _extract_json(text: str) -> dict | None:
@@ -63,6 +65,12 @@ def main() -> None:
     )
     parser.add_argument("--workspace-dir", default="/tmp/agent/workspace")
     parser.add_argument("--output", default=None, help="Path for agent_output.json")
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=int(os.environ.get("AGENT_MAX_RUNTIME_SECONDS", "0") or "0"),
+        help="Bounded scan-loop runtime. 0 keeps legacy one-shot behavior unless SCAN_INTERVAL is set.",
+    )
     args = parser.parse_args()
     if not args.goal:
         parser.error("--goal is required (or set AGENT_GOAL env var)")
@@ -71,17 +79,82 @@ def main() -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     output_path = args.output or str(workspace / "agent_output.json")
 
-    crew = build_crew(
-        goal=args.goal,
-        workspace_dir=str(workspace),
-        model=args.model,
-        output_path=output_path,
-        namespace=args.namespace,
-    )
+    scan_interval = int(os.environ.get("SCAN_INTERVAL", "0") or "0")
+    max_runtime = args.max_runtime_seconds
+    if max_runtime <= 0 and scan_interval > 0:
+        max_runtime = 780
 
-    result = crew.kickoff()
+    deadline = time.monotonic() + max_runtime if max_runtime > 0 else None
+    last_output: dict | None = None
+    iteration = 0
 
-    # Prefer the output_file written by CrewAI; fall back to parsing result.raw
+    while True:
+        iteration += 1
+        print(f"[sre-comprehensive] scan iteration {iteration} namespace={args.namespace}", flush=True)
+        reset_tool_call_history()
+        deterministic_findings: list[dict] = []
+        deterministic_error = ""
+        try:
+            deterministic_findings = collect_minimum_evidence(args.namespace)
+        except Exception as exc:
+            deterministic_error = str(exc)
+            print(f"[sre-comprehensive] deterministic preflight failed: {deterministic_error}", file=sys.stderr, flush=True)
+
+        # The preflight is allowed to remediate obvious failures, but CrewAI must
+        # still collect its own minimum evidence before a final empty answer is accepted.
+        reset_tool_call_history()
+
+        crew = build_crew(
+            goal=args.goal,
+            workspace_dir=str(workspace),
+            model=args.model,
+            output_path=output_path,
+            namespace=args.namespace,
+        )
+
+        try:
+            result = crew.kickoff()
+            output_data = _load_output(output_path, result)
+        except Exception as exc:
+            print(f"[sre-comprehensive] crew execution failed: {exc}", file=sys.stderr, flush=True)
+            output_data = {
+                "entities": deterministic_findings,
+                "propagation_chain": [],
+                "_error": str(exc)[:2000],
+            }
+        if deterministic_findings and not output_data.get("entities"):
+            output_data = {
+                "entities": deterministic_findings,
+                "propagation_chain": [],
+            }
+        if deterministic_error:
+            output_data.setdefault("_preflight_error", deterministic_error[:2000])
+        Path(output_path).write_text(json.dumps(output_data, indent=2))
+        last_output = output_data
+        print(f"[sre-comprehensive] diagnosis written to {output_path}", flush=True)
+
+        if deadline is None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sleep_for = min(scan_interval if scan_interval > 0 else 30, max(int(remaining), 0))
+        if sleep_for <= 0:
+            break
+        print(f"[sre-comprehensive] sleeping {sleep_for}s before next scan", flush=True)
+        time.sleep(sleep_for)
+
+    if last_output is None:
+        last_output = {"entities": [], "propagation_chain": []}
+
+    if os.environ.get("AGENT_IDLE_AFTER_MAX_RUNTIME", "true").strip().lower() in ("1", "true", "yes") and deadline is not None:
+        print("[sre-comprehensive] bounded scan loop complete; idling until workflow cleanup", flush=True)
+        while True:
+            time.sleep(3600)
+
+
+def _load_output(output_path: str, result: object) -> dict:
+
     output_file = Path(output_path)
     output_data: dict | None = None
 
@@ -112,8 +185,7 @@ def main() -> None:
             "_raw_output": raw[:8000],
         }
 
-    output_file.write_text(json.dumps(output_data, indent=2))
-    print(f"[sre-comprehensive] diagnosis written to {output_path}")
+    return output_data
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+# ACE monitored third-party service images — reference digests for the floating-tag
+# drift check in scripts/setup.sh. Columns: <image>\t<sha256 of registry manifest>\t<recorded UTC>
+# Regenerate from a known-good local setup: ./scripts/setup.sh --record-image-baseline
+busybox:1.36	73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662	2026-09-01T05:48:13Z
+cgr.dev/chainguard/minio	1e408150bcf1bff07a2e468b9ac91347d4da261258921faeaedbe2ed7f0818b4	2026-09-01T05:48:13Z
+clickhouse/clickhouse-server:26.8	9f8fa0d51f86611fda226c4085cdafdddce35312a60c934de2e4450d61fcb99a	2026-09-01T05:48:13Z
+langfuse/langfuse:3	a921990b3cf6f62e9452eaf8ab9bea045852375a6883abd1fdbe63afa08defa0	2026-09-01T05:48:13Z
+langfuse/langfuse-worker:3	7d0f28214bd2d1bb03056439f810442b147f0143c7ebf9bdf0f39dc4e47df6cd	2026-09-01T05:48:13Z
+litellm/litellm:v1.82.0-stable	71bf7283767ca436edcfa9f1f26c1743487b5fa29736c61c3eb6977776007c42	2026-09-01T05:48:13Z
+mongo:5	54bcd8da3ea5eec561b68c605046c55c6b304387dc4c2bf5b3a5f5064fbb7495	2026-09-01T05:48:13Z
+postgres:17	67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675	2026-09-01T05:48:13Z
+redis:7	71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7	2026-09-01T05:48:13Z

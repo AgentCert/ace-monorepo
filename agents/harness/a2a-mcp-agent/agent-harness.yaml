@@ -2,9 +2,11 @@
 # tools for environment access.
 #
 # The agent must:
-#   1. Expose an A2A-compatible HTTP endpoint (JSON-RPC 2.0, tasks/send +
-#      tasks/get methods).
-#   2. Advertise its capabilities via GET /.well-known/agent.json (Agent Card).
+#   1. Expose an A2A-compatible HTTP endpoint (JSON-RPC 2.0). The bridge tries
+#      the current `message/send` method first and falls back to the legacy
+#      `tasks/send`; it polls with `tasks/get` in both cases.
+#   2. Advertise its capabilities via GET /.well-known/agent-card.json (Agent
+#      Card); /.well-known/agent.json is also accepted for older agents.
 #   3. Accept MCP server URLs and LLM proxy coordinates from the task message
 #      (delivered in both the text part and the structured metadata field).
 #   4. Route all LLM calls through the provided openai_base_url so that the

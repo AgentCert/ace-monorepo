@@ -39,8 +39,12 @@ certifier, the metrics extractor, or the fault categories.  Only two things
 are needed **on the agent's side**:
 
 1. Expose an A2A-compatible HTTP server:
-   - `GET  /.well-known/agent.json` — Agent Card describing capabilities.
-   - `POST /` — JSON-RPC 2.0 endpoint accepting `tasks/send` and `tasks/get`.
+   - `GET  /.well-known/agent-card.json` — Agent Card describing capabilities
+     (`/.well-known/agent.json` is also accepted).
+   - `POST /` — JSON-RPC 2.0 endpoint. The bridge calls `message/send` (current
+     A2A spec) and falls back to `tasks/send` (pre-v0.2 draft); it polls with
+     `tasks/get`. A `message/send` reply may be a Task (polled) or a Message
+     (used directly).
 2. Read `MCP_URLS`, `OPENAI_BASE_URL`, and `MODEL_ALIAS` from either the
    structured task `metadata` field or the text preamble of the user message,
    and use them to connect to MCP tool servers and the ACE LiteLLM proxy.
@@ -70,7 +74,7 @@ Schema version: **1.0**
 | Field             | Required | Description |
 |-------------------|----------|-------------|
 | `version`         | yes      | Schema version; currently `"1.0"`. |
-| `a2a_endpoint`    | yes      | Base URL of the agent's A2A server (no trailing slash). The bridge appends `/.well-known/agent.json` for the Agent Card and `/` for JSON-RPC calls. |
+| `a2a_endpoint`    | yes      | Base URL of the agent's A2A server (no trailing slash). The bridge fetches the Agent Card from `/.well-known/agent-card.json` (then `/.well-known/agent.json`) and sends JSON-RPC to the Card's `url` (default `/`). |
 | `goal`            | yes      | Natural-language task description. Delivered verbatim as the `text` part of the A2A user message. |
 | `mcp_urls`        | no       | Comma-separated list of MCP server SSE/HTTP endpoints the agent should use for tool access. |
 | `openai_base_url` | no       | LiteLLM proxy URL. The agent must route its LLM calls here so ACE can capture Langfuse traces for certification. |

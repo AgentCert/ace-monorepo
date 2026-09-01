@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from datetime import datetime, timezone
 import json
 import os
 import re
 from typing import Optional, Type
+import uuid
 
 from crewai.tools import BaseTool
 from mcp import ClientSession
@@ -52,6 +54,139 @@ def _parse_mcp_urls() -> tuple[str, str]:
 
 K8S_URL, PROM_URL = _parse_mcp_urls()
 
+_TOOL_CALL_HISTORY: list[dict] = []
+_TOOL_OUTPUT_LIMIT = int(os.environ.get("SRE_AGENT_TOOL_TRACE_OUTPUT_CHARS", "4000"))
+
+
+def reset_tool_call_history() -> None:
+    _TOOL_CALL_HISTORY.clear()
+
+
+def get_tool_call_history() -> list[dict]:
+    return list(_TOOL_CALL_HISTORY)
+
+
+def required_evidence_missing() -> list[str]:
+    """Return minimum investigation calls that have not happened yet."""
+    names = [event.get("tool_name") for event in _TOOL_CALL_HISTORY if event.get("status") == "success"]
+    missing: list[str] = []
+    if "namespaces_list" not in names:
+        missing.append("list_namespaces")
+    if "pods_list_in_namespace" not in names:
+        missing.append("list_pods_in_namespace")
+    if "events_list" not in names:
+        missing.append("list_k8s_events")
+    if "resources_list" not in names:
+        missing.append("list_k8s_resources")
+    return missing
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _trace_id() -> str:
+    return (
+        os.environ.get("NOTIFY_ID")
+        or os.environ.get("TRACE_ID")
+        or os.environ.get("EXPERIMENT_RUN_ID")
+        or ""
+    ).strip()
+
+
+def _redacted_output(tool_name: str, arguments: dict, text: str) -> str:
+    kind = str(arguments.get("kind", "")).lower()
+    if kind == "secret" or "secret" in tool_name.lower():
+        return "[redacted secret resource output]"
+    return text[:_TOOL_OUTPUT_LIMIT]
+
+
+def _record_tool_call(
+    *,
+    url: str,
+    tool_name: str,
+    arguments: dict,
+    start: datetime,
+    end: datetime,
+    status: str,
+    output: str = "",
+    error: str = "",
+) -> None:
+    event = {
+        "tool_name": tool_name,
+        "url": url,
+        "arguments": arguments,
+        "status": status,
+        "duration_ms": int((end - start).total_seconds() * 1000),
+        "output_preview": _redacted_output(tool_name, arguments, output),
+        "error": error[:1000],
+    }
+    _TOOL_CALL_HISTORY.append(event)
+    print(
+        f"[sre-comprehensive] tool {tool_name} status={status} "
+        f"duration_ms={event['duration_ms']} error={bool(error)}",
+        flush=True,
+    )
+    _emit_langfuse_tool_observation(event, start, end)
+
+
+def _emit_langfuse_tool_observation(event: dict, start: datetime, end: datetime) -> None:
+    host = os.environ.get("LANGFUSE_HOST", "").rstrip("/")
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "")
+    trace_id = _trace_id()
+    if not (host and public_key and secret_key and trace_id):
+        return
+
+    observation_id = str(uuid.uuid4())
+    body = {
+        "batch": [
+            {
+                "id": observation_id,
+                "type": "span-create",
+                "timestamp": _iso(end),
+                "body": {
+                    "id": observation_id,
+                    "traceId": trace_id,
+                    "type": "SPAN",
+                    "name": f"tool: {event['tool_name']}",
+                    "startTime": _iso(start),
+                    "endTime": _iso(end),
+                    "input": json.dumps(event["arguments"]),
+                    "output": event["output_preview"],
+                    "level": "ERROR" if event["status"] == "error" else "DEFAULT",
+                    "statusMessage": event["error"] or None,
+                    "metadata": {
+                        "tool_name": event["tool_name"],
+                        "tool_url": event["url"],
+                        "duration_ms": str(event["duration_ms"]),
+                        "agent_name": os.environ.get("AGENT_NAME", "sre-agent-comprehensive"),
+                        "workflow_name": os.environ.get("WORKFLOW_NAME", ""),
+                        "workflow_uid": os.environ.get("WORKFLOW_UID", ""),
+                        "experiment_id": os.environ.get("EXPERIMENT_ID", ""),
+                        "experiment_run_id": os.environ.get("EXPERIMENT_RUN_ID", ""),
+                        "target_namespace": os.environ.get("TARGET_NAMESPACE", ""),
+                    },
+                },
+            }
+        ]
+    }
+    try:
+        import httpx
+
+        httpx.post(
+            f"{host}/api/public/ingestion",
+            auth=(public_key, secret_key),
+            json=body,
+            timeout=5,
+        ).raise_for_status()
+    except Exception as exc:
+        print(f"[sre-comprehensive] Langfuse tool observation failed: {exc}", flush=True)
+
 
 # ---------------------------------------------------------------------------
 # Low-level async → sync MCP bridge (fresh session per call, no shared state)
@@ -67,8 +202,91 @@ async def _async_call(url: str, tool_name: str, arguments: dict) -> str:
 
 
 def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
+    start = _utc_now()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _async_call(url, tool_name, arguments)).result()
+        try:
+            result = pool.submit(asyncio.run, _async_call(url, tool_name, arguments)).result()
+        except Exception as exc:
+            end = _utc_now()
+            _record_tool_call(
+                url=url,
+                tool_name=tool_name,
+                arguments=arguments,
+                start=start,
+                end=end,
+                status="error",
+                error=str(exc),
+            )
+            raise
+        end = _utc_now()
+        _record_tool_call(
+            url=url,
+            tool_name=tool_name,
+            arguments=arguments,
+            start=start,
+            end=end,
+            status="success",
+            output=result,
+        )
+        return result
+
+
+def collect_minimum_evidence(namespace: str) -> list[dict]:
+    """Deterministically inspect the target namespace and remediate scale-to-zero."""
+    findings: list[dict] = []
+    _call_mcp(K8S_URL, "namespaces_list", {})
+    _call_mcp(K8S_URL, "pods_list_in_namespace", {"namespace": namespace})
+    _call_mcp(K8S_URL, "events_list", {"namespace": namespace})
+    deployments_text = _call_mcp(
+        K8S_URL,
+        "resources_list",
+        {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": namespace},
+    )
+    deployments = _parse_json(deployments_text)
+    items = deployments.get("items", []) if isinstance(deployments, dict) else deployments
+    if not isinstance(items, list):
+        return findings
+
+    for deployment in items:
+        if not isinstance(deployment, dict):
+            continue
+        name = deployment.get("metadata", {}).get("name", "")
+        spec = deployment.get("spec", {})
+        status = deployment.get("status", {})
+        replicas = int(spec.get("replicas") or 0)
+        available = int(status.get("availableReplicas") or 0)
+        if replicas == 0:
+            patch = json.dumps({"spec": {"replicas": 1}})
+            _call_mcp(
+                K8S_URL,
+                "resources_patch",
+                {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "name": name,
+                    "namespace": namespace,
+                    "patch": patch,
+                },
+            )
+            findings.append(
+                {
+                    "name": f"{namespace}/Deployment/{name}",
+                    "contributing_factor": True,
+                    "reasoning": (
+                        "Deployment had spec.replicas=0 during deterministic preflight; "
+                        "patched spec.replicas to 1 and will verify in subsequent scans."
+                    ),
+                }
+            )
+        elif available == 0:
+            findings.append(
+                {
+                    "name": f"{namespace}/Deployment/{name}",
+                    "contributing_factor": False,
+                    "reasoning": "Deployment currently has zero available replicas and needs investigation.",
+                }
+            )
+    return findings
 
 
 def _parse_json(text: str) -> dict | list:

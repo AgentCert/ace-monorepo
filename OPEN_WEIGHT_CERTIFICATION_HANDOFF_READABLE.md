@@ -2611,3 +2611,150 @@ something AgentBeats-style registration does.
 Source only, uncommitted — 3 files under `agents/harness/`. No image rebuild needed (the
 harness runs the script straight from the repo). A concurrent session is editing these
 handoff files at §107/§108, so this is numbered 109 to avoid a clash.
+
+---
+
+## §110 — Namespace-scoped infra registration now gives `litmus-admin` cross-namespace app access without making it cluster-admin (2026-09-01)
+
+The clean RBAC design from §99 needed to move one level earlier. The per-run service-account idea was useful, but that path is currently disabled because not every ACE fault family fits it yet; the experiments still run their authored `chaosServiceAccount: litmus-admin`. So the durable boundary is the manifest a user gets when they register a namespace-scoped ChaosCenter infrastructure.
+
+That manifest now creates a reusable `litmus-admin-target-namespace-role` containing the namespaced workload, Litmus, SDK, and teardown permissions ITBench faults need. It does not bind that role cluster-wide. Instead, the manifest renderer reads the known ACE application namespaces from the app-charts catalog and emits one RoleBinding inside each target namespace (`book-info`, `otel-demo`, `sock-shop`, and whatever future app charts declare). A RoleBinding can point at a ClusterRole, but the grant only applies inside the RoleBinding's namespace, which is the sandboxing behavior wanted here.
+
+The generated manifest also creates those target namespaces idempotently before the RoleBindings, so `kubectl apply -f <generated manifest>` does not fail on a fresh cluster before the sample apps are installed. The old setup-script hook that reapplied the broad `litmus-admin` ClusterRoleBinding has been removed, so a fresh setup no longer quietly undoes the sandbox.
+
+Validation: the focused Go renderer test passes, `setup.sh` still parses, and diagnostics on the touched Go files are clean. No live Kubernetes resources were changed. Durability check: durable in source for newly generated namespace infra manifests; existing infras need the new GraphQL image rebuilt/redeployed and their manifest re-downloaded/re-applied before deleting any old live broad `litmus-admin` binding.
+
+## §111 — The comprehensive SRE agent looked silent in the latest `q` run because it was looking in the wrong namespace (2026-09-01)
+
+The latest `q` run did not actually hang waiting for an answer from `sre-agent-comprehensive`. The workflow finished, and the agent container did produce a final JSON file, but the result was empty: `entities=[]` and `propagation_chain=[]`. In Langfuse this was easy to miss because the large CrewAI prompt/output showed up as an attachment-style block (`#attachment:Pasted text #1`) rather than as a compact answer in the trace list.
+
+The useful clue was in the agent pod log. The run installed Bookinfo into `book-info` and deployed the agent into `book-info`, but the task prompt the agent received still told it to inspect `otel-demo`. That happened because the comprehensive SRE agent is not the flash agent: its Python entrypoint reads `TARGET_NAMESPACE`, while the existing install path only reliably provided `MCP_URLS` and `AGENT_SCOPE_NAMESPACE`. The chart did not pass `TARGET_NAMESPACE` into the container, so the CLI fell back to its built-in default of `otel-demo`. Since the actual fault was in Bookinfo, the agent looked at the wrong place and returned an empty, technically valid answer.
+
+The source fix is now in place. GraphQL injects `agent.config.TARGET_NAMESPACE={{workflow.parameters.appNamespace}}` into install-agent runs, and the `sre-agent-comprehensive` Helm chart writes that value into its ConfigMap and exposes it as the container's `TARGET_NAMESPACE` env var. The chart keeps `otel-demo` as its direct-use default, but AgentCert-launched experiments now override it with the run's actual app namespace.
+
+Validation done: rendering the chart with `--set agent.config.TARGET_NAMESPACE=book-info` now produces `TARGET_NAMESPACE: "book-info"` and wires that key into the agent container. The focused GraphQL tests for the edited install-agent injection package and nearby workflow handler package both pass. No live Kubernetes object was changed during this diagnosis. Durability check: durable in source, but a future `q` rerun will only pick it up after the GraphQL image is rebuilt/redeployed and the updated `agent-charts` content is available to the install-agent image. Status: uncommitted source change; the completed `q-1788252923303` run was not rerun after this fix.
+
+## §112 — The uninstall-agent step was red because cluster-scoped infrastructure was still using an old, too-small `litmus-admin` role (2026-09-01)
+
+The latest `q` workflow had a confusing split result: Argo showed the `uninstall-agent` pod as completed, but Litmus marked the step as an error. The Litmus result was the truthful one. The uninstall binary tried to remove the `sre-agent-comprehensive` Helm release from `book-info`, but the `itbench:litmus-admin` service account was not allowed to delete deployments or list the Helm-owned resources it needed to enumerate. The application cleanup step hit the same class of problem when it tried to delete the `book-info` namespace.
+
+The durable bug was in the cluster-scoped chaos infrastructure manifest. Cluster-scoped registration uses `manifests/cluster/2b_litmus_admin_rbac.yaml`, and that file still had a narrow default Litmus role instead of the permissions actually declared by ACE's fault catalog. The cluster-scoped role now covers the full catalog union: pod lifecycle/log/exec/eviction/ephemeral-container access, events, services, endpoints, configmaps, secrets, service accounts, PVCs, quotas, app workloads, rollback, jobs/cronjobs, HPAs, network policies, ingresses, PDBs, namespaced RBAC, Litmus CRDs, and the cluster-only resources needed by cluster faults and teardown (`namespaces`, `nodes`, cluster RBAC, and priority classes). Because this file is only rendered for `infraScope=cluster`, those cluster-wide grants do not get added to namespace-scoped infra registrations.
+
+The namespace-scoped path was checked at the same time. Its design still avoids a broad cluster binding: it grants `litmus-admin` into only the infra namespace and known target app namespaces through RoleBindings. I updated those namespace-mode roles to cover every namespaced permission in the same fault catalog while still leaving out the cluster-only resources that a namespace-scoped setup cannot safely grant.
+
+A new focused Go regression test now parses every `chaos-charts/faults/**/fault.yaml` and compares the generated RBAC against the permissions the faults declare. Cluster mode must cover the full union; namespace mode must cover the namespaced subset. Validation passed, both edited YAML manifests passed `kubectl apply --dry-run=client`, and `go test ./pkg/chaos_infrastructure` is clean after formatting.
+
+No live Kubernetes RBAC was applied here. Durability check: durable in source for future generated infrastructure manifests, but the running cluster will not pick this up until the updated GraphQL image is active and the chaos infrastructure manifest is re-downloaded/re-applied or the infra is re-registered. The completed `q-1788252923303` run was not rerun.
+
+## §113 — `sre-agent-comprehensive` now stays alive for the fault window, refuses no-tool empty answers, and writes MCP tool activity into Langfuse (2026-09-01)
+
+The earlier namespace fix explained why the comprehensive SRE agent looked in `otel-demo` during a Bookinfo run. A second problem remained: even with the right namespace, the agent process was shaped like a one-shot CLI while the chart deployed it as a Kubernetes `Deployment`. It called CrewAI once, wrote output, exited, and Kubernetes restarted it. That produced the pairs of paid `litellm-acompletion` calls seen in Langfuse, then backoff, instead of a scanner that stayed active while the fault was injected.
+
+The other half of the failure was inside the CrewAI/ReAct exchange. The model was supposed to answer with `Thought`, `Action`, and `Action Input`, but it immediately returned an empty final JSON object. CrewAI's repair prompt then allowed the model to say it did not need any more tools, so it kept returning `entities=[]` / `propagation_chain=[]`. Langfuse was correctly recording real paid model calls, but there were no Kubernetes or Prometheus MCP calls to record because the model never got that far.
+
+The agent now has a bounded scan loop. When `SCAN_INTERVAL` or `AGENT_MAX_RUNTIME_SECONDS` is configured, it keeps scanning through a bounded runtime window, writes the latest `agent_output.json` after each iteration, and then idles instead of exiting into a Deployment CrashLoop. Direct one-shot harness runs still work because they do not have to set `SCAN_INTERVAL`.
+
+Each scan now starts with deterministic minimum evidence collection: list namespaces, list pods in the target namespace, list events, and list Deployments. If it sees a Deployment with `spec.replicas=0`, it immediately patches it back to `1` and records that Deployment as the causal entity. That gives the known scale-to-zero fault a reliable remediation path even if the model's first tool-use attempt is weak.
+
+CrewAI also now has a hard guard against the exact empty-answer failure. If the model returns an empty final JSON before successful evidence tool calls exist, the LLM wrapper replaces that answer with the next required ReAct action: `list_namespaces`, then target-namespace pods, then target-namespace events, then target-namespace Deployments. In other words, an empty first answer is no longer accepted as a valid result before the agent has actually looked at the cluster.
+
+For observability, every MCP wrapper call now records stdout timing and, when `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `NOTIFY_ID` are present, sends a Langfuse ingestion `span-create` event named like `tool: resources_patch` into the same trace as the LLM calls. Secret resource output is redacted before it is sent. The chart now exposes the needed trace context, Langfuse host/keys, target namespace, and bounded-loop settings to the agent container, and GraphQL injects those values from the experiment workflow and its own environment.
+
+Validation done: the Python files compile and Pylance reports no syntax errors; small runtime probes verified empty JSON becomes `Action: list_namespaces`, a mocked `details-v1` scale-to-zero response triggers a `resources_patch` back to `1`, and the Langfuse payload uses `/api/public/ingestion` with event type `span-create`. The Helm chart renders the new env wiring for `book-info`, and `go test ./pkg/chaos_experiment/ops` passes after formatting.
+
+Durability check: durable in source, but not active in the live cluster until the GraphQL image, updated agent chart content, and updated `sre-agent-comprehensive` image are rebuilt/redeployed. No live Kubernetes object was changed here, and the completed `q-1788252923303` run was not rerun. Status: uncommitted source changes plus this handoff update; unrelated existing worktree changes were left alone.
+
+## §114 — Manual experiment runs now have an agent-model picker in Chaos Studio (2026-09-01)
+
+The Litmus Chaos UI did not previously choose the model for a run. Manual experiment launch sent only the project and experiment IDs to GraphQL, and the backend injected whichever model alias was configured in its environment: first `FLASH_AGENT_MODEL`, then `MODEL_ALIAS`, then `AZURE_OPENAI_DEPLOYMENT`. So if an API key hit a rate limit, the operator had to change environment/config and redeploy to move the agent to local Ollama.
+
+The UI now asks the backend for configured model aliases and shows them next to the run controls in Chaos Studio. Ollama appears as the LiteLLM alias derived from `OLLAMA_MODEL` (`qwen2.5:32b-instruct` becomes `qwen2.5-32b-instruct`). Azure, Gemini, and OpenRouter aliases appear only when their corresponding keys/config are present. The current backend default is marked in the selector.
+
+When the operator runs an experiment manually, the selected alias is passed through `runChaosExperiment(modelAlias: ...)`. GraphQL then reinjects the install-agent Helm values for that run and sets `agent.config.MODEL_ALIAS` to the selected alias. Existing saved, cron, create-and-run, and multi-run paths still pass no override and keep using the environment default.
+
+Validation done: focused Go tests for the workflow injection packages pass, the GraphQL resolver package compiles, and the web build completes successfully with only the existing warning. `go generate ./...` initially reintroduced malformed `GetEnvironmentVariables` text into `agent_registry.resolvers.go`; that was fixed by moving existing non-resolver helpers into `agent_registry_helpers.go` and shortening the resolver doc comment to one line. A final `go generate ./...` now completes cleanly.
+
+Durability check: durable in source for future GraphQL and web image builds. No live cluster, Docker, or database resources were touched. A running deployment needs rebuilt/redeployed GraphQL and web images before the picker appears and before selected aliases affect launched experiments.
+
+---
+
+## §115 — The §114 model picker blanked out Chaos Studio; one import line was the cause (2026-09-01)
+
+Right after the agent-model picker landed (§114), opening Chaos Studio to create or edit an experiment showed a completely blank page — no spinner, no layout. And once it had blanked, the browser Back button led back to a blank experiment page that only came back after a full refresh.
+
+The cause was a single import in `ChaosStudio.tsx`. §114 added the new `listAgentModelOptions` query hook to the file's existing `import type { ... }` line, next to the type-only names. But that hook is real runtime code, not a type. The web build transpiles each file on its own and strips `import type` lines wholesale, so at runtime the hook was `undefined`, and calling it while rendering the page threw. Because that component has no error boundary around it, the throw wiped the whole React tree (the blank page) and left the router unable to recover without a reload.
+
+`npm run build` didn't catch it because the build skips type checking; `tsc` would have caught it immediately.
+
+The fix moves `listAgentModelOptions` to its own regular `import { listAgentModelOptions } from '@api/core';` so it survives as real code.
+
+Validation: `tsc --noEmit` no longer reports the error, and the export chain from `runChaosExperiment.ts` out through `@api/core` checks out. Not yet confirmed against a live UI — that needs a web image rebuild (`./scripts/setup.sh --restart --local-build`) or a local `npm start`. Worth following up: wire `npm run typecheck` into the web build so this class of mistake fails the build instead of shipping.
+
+Durability check: durable in source; no live resources touched. A running deployment keeps showing the blank page until the web image is rebuilt.
+
+---
+
+## §116 — A newly registered chaos infrastructure didn't show up until you left the environment and came back (2026-09-01, uncommitted)
+
+Registering a chaos infrastructure (Environments → *itbench* → Enable Chaos → run through the
+wizard → Done) left the infra list unchanged. The new entry only appeared after going back to
+the Environments page and clicking into the environment again. Seen with a cluster-scoped
+registration, but the code doesn't treat the two scopes differently here.
+
+Three separate things were wrong, each enough on its own to hide the new row:
+
+- **The "Done" button's refresh was cancelled by its own next line.** Done asked the list to
+  refetch, then immediately — on the next line — restarted the 5-second background poll. In this
+  version of the Apollo data library, starting the poll like that supersedes the refetch that's
+  still in flight, so the list never actually re-fetched.
+- **The background poll wasn't doing anything either.** The list is set to poll every 5 seconds,
+  but with its particular cache setting Apollo needs an extra flag
+  (`notifyOnNetworkStatusChange`) before it will hand poll results back to the screen. Without it
+  the requests go out and the screen ignores them. Remounting the query — which is what leaving
+  and re-entering the environment does — was the only way to get fresh data.
+- **The list has no sort order.** The server returns infrastructures in whatever order the
+  database happens to hold them, five per page. A brand-new one goes to the end, so once an
+  environment has five or more, the new one is on a later page and invisible regardless.
+
+Fixes: the server now sorts the list newest-first (by creation time, so status heartbeats don't
+keep reshuffling it); the list screen sets the flag that makes polling and refetch actually
+update the view, and no longer flashes a full-page spinner over the table during those
+background refreshes; and the Done button now waits for the refetch to finish before restarting
+the poll and closing the modal.
+
+Validation: `go build` / `go test` for the infrastructure package are clean; eslint on the two
+touched frontend folders is clean; `tsc` shows no new errors (the only `tsc` failures are a
+pre-existing library/type-version mismatch inside `node_modules`).
+
+Durability check: all three land in checked-in `AgentCert` source and survive a from-scratch
+setup. They need the `graphql` and `web` images rebuilt to show up on a running cluster
+(`./scripts/setup.sh --restart --local-build`). No live cluster, Docker, or database resource
+was touched.
+
+---
+
+## §117 — Everything from §107–§116 is now committed and pushed (2026-09-01)
+
+The prior sessions built §107–§116 but left it all uncommitted in the working tree. This session
+committed and pushed it to `feature/itbench-scenarios` on the AgentCert-org repos and bumped the
+superproject submodule pointers.
+
+- **chaos-charts** `66ba492 → 60aa9fd` — the litmus-admin teardown RBAC gaps (§112).
+- **agent-charts** `854d53c → 0ed1a15` — sre-agent-comprehensive trace correlation, Langfuse tool
+  spans, bounded runtime, target namespace (§111, §113).
+- **AgentCert** `047e8a7 → d760ac7` — the agent-model picker (§114), the blank-page fix (§115),
+  the infra-list refresh (§116), the namespace/cluster teardown RBAC (§110, §112), the
+  TARGET_NAMESPACE injection (§111), and a probeRef annotation-parsing fix that unblocks the
+  ITBench teardown/uninstall steps.
+- **superproject** — the ClickHouse pin + Langfuse manifests (§108/§110), the A2A bridge (§109),
+  the `agents/sre-agent-comprehensive/` code (§111/§113), the image-digest drift check and
+  `deploy/image-baseline.tsv` (§107 follow-up), and the docs.
+
+Checked this session: the graphql server builds and its touched-package tests pass; the web and
+graphql images were already rebuilt and running; a secret scan of every staged diff came back
+clean (only env-var references, no literal credentials); all three pushed submodules point at
+`github.com/AgentCert/…` in both `.gitmodules` and their checked-out remote.
+
+One caveat carried over from §115: the blank-page fix is committed, but a running cluster still
+needs `kubectl rollout restart deployment/web -n ace` after the image rebuild — `--local-build`
+was seen rebuilding the web image without cycling the pod.

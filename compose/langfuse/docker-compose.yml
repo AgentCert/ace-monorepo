@@ -101,7 +101,14 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-agentcert-admin}
 
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server
+    # Pinned (was untagged → :latest → rolled onto 26.8.x and broke Langfuse v3 timestamp
+    # ingestion: 26.8 reads a bare number for a DateTime64 column as seconds not ticks, so
+    # Langfuse's millisecond epochs overflow and every trace/observation is stamped
+    # 9999-12-31 and vanishes from the UI and the certifier — HANDOFF §108). Kept on 26.8
+    # (matches volumes already written on existing setups — no wipe); the pre-26.8 parse is
+    # restored by the `ace_clickhouse_settings` config below, which needs CH >= 26.8, so
+    # keep this pin >= 26.8. scripts/setup.sh warns if this tag drifts again.
+    image: docker.io/clickhouse/clickhouse-server:26.8
     restart: always
     profiles: ["langfuse"]
     user: "101:101"
@@ -109,6 +116,9 @@ services:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    configs:
+      - source: ace_clickhouse_settings
+        target: /etc/clickhouse-server/users.d/ace-datetime-compat.xml
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
@@ -174,6 +184,21 @@ services:
       PGTZ: UTC
     volumes:
       - langfuse_postgres_data:/var/lib/postgresql/data
+
+configs:
+  # ClickHouse >= 26.8 changed how a bare number is read for a DateTime64 column in the
+  # JSON/Values insert paths (seconds, not ticks); this restores the pre-26.8 behaviour so
+  # Langfuse v3's millisecond-epoch timestamps ingest correctly. See the clickhouse
+  # service comment and HANDOFF §108. Inline content — no host path, resolved by Compose.
+  ace_clickhouse_settings:
+    content: |
+      <clickhouse>
+          <profiles>
+              <default>
+                  <input_format_read_datetime_number_as_raw_value>1</input_format_read_datetime_number_as_raw_value>
+              </default>
+          </profiles>
+      </clickhouse>
 
 volumes:
   langfuse_postgres_data:

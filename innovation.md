@@ -209,8 +209,10 @@ install-agent (overlaps §2.8).
 New ACE-native agent for the `itbench_sre` pipeline. Eight-step investigation protocol via CrewAI + MCP streamable-HTTP: list namespaces → pod health → events → NetworkPolicies → policy specs → Prometheus PromQL → delete faulty resources → verify recovery. Connects to live Kubernetes (:18081) and Prometheus (:31085) MCP servers; runs with `--network=host`.
 
 ### 2.2 A2A JSON-RPC 2.0 Bridge (`a2a-mcp-agent`)
-**Status: Implemented**
-Universal harness-side adapter for any A2A-compatible agent. Reads `scenario_data.json`, fetches an Agent Card from `/.well-known/agent-card.json`, sends `tasks/send`, polls `tasks/get` to terminal, packages result into `agent_data.tar`. Uses httpx + tenacity for retries.
+**Status: Implemented (dual-protocol as of 2026-09-01)**
+Universal harness-side adapter for any A2A-compatible agent. Reads `scenario_data.json`, fetches an Agent Card from `/.well-known/agent-card.json` (falling back to `/.well-known/agent.json`), submits the task, polls `tasks/get` to a terminal state, packages the result into `agent_data.tar`. Uses httpx + tenacity for retries.
+
+Task submission is now **protocol-version tolerant**: it calls the current A2A method `message/send` first and falls back to the legacy `tasks/send` only on a "method not found" signal (JSON-RPC `-32601`, matching error text, or HTTP 404/405/501) — a real error (bad params, agent 500) is not masked by the fallback. A `message/send` reply may be a **Task** (polled via `tasks/get`) or a **Message** (used directly, no polling). `TERMINAL_STATES` gained `rejected`; `input-required` / `auth-required` break the poll early instead of burning the timeout; text extraction accepts `part.kind == "text"` or `part.type == "text"` and also reads a direct Message's parts and the final `status.message.parts`. The output tar gains `a2a_protocol.txt` (method used + final state). Verified with a three-server mock matrix (current-spec Task→poll, legacy `-32601`→`tasks/send`, immediate Message). Rationale: A2A renamed `tasks/send` → `message/send` at v0.2; the current spec is v0.3.0, which is what the AgentBeats platform targets — the bridge was wired to the pre-v0.2 draft only. See `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` §109.
 
 ### 2.3 FLASH Agent on Open-Weight Local GPU (Qwen2.5:7b-instruct)
 **Status: Implemented**
@@ -241,6 +243,33 @@ At least one other onboarded agent chart, `sre-agent-comprehensive`, uses a stru
 Discovered while confirming durability of the MCP-URL-hardcoding fix from this session's `2exp`/ITBench-scenario-registration work: that fix (templating the MCP server URLs off `{{workflow.parameters.appNamespace}}` instead of a literal namespace) is itself agent-agnostic and fully durable — it lives in the same function and applies to any install-agent step regardless of agent. The problem here is a separate, pre-existing characteristic of the function (not introduced by that fix): the entire arg-injection block was already scoped to flash-agent's value schema before this session, with no branching on which agent is actually being installed.
 
 Fixing properly would mean either: (a) branching the injected arg set on `agentFolder`'s declared value schema, sourced from `agenthub`'s per-agent CSV metadata — the same mechanism `applyInstallAgentTemplateOverridesFromMetadata` already uses to resolve per-agent image/pull-policy — or (b) having each onboarded agent chart declare its own Helm value-key mapping (MCP URLs env var name, model alias key, sidecar config key, etc.) that this function reads generically instead of hardcoding flash-agent's specific keys.
+
+### 2.9 AgentBeats Interoperability — Onboarding Path & Adaptation Gaps
+**Status: Bridge fix implemented (§2.2); onboarding adaptations proposed**
+
+**AgentBeats** (UC Berkeley RDI, arXiv 2606.13608) proposes the "Agentified Agent Assessment" paradigm: a subject ("purple") agent participates by (i) speaking **A2A** for the task, (ii) acting as an **MCP client** against a judge-provisioned MCP server/gateway reached by a static URL, and (iii) registering in one of three modes — *Local* (codebase in a dir), *Remote* (provider runs their own A2A service, submits the URL), *Hosted* (submit a repo/image; the platform instantiates it and **verifies the A2A service runs**). Tools/environment are set up by the judge; access is revoked on completion/timeout.
+
+**What ACE already implements of this contract:**
+
+| AgentBeats concept | ACE mechanism |
+|---|---|
+| Judge / "green agent" | The certifier's Phase 2 **LLM Council** (k judges + meta-judge) plus the full report pipeline, run **offline** over the run's Langfuse trace. No interactive A2A judge is needed — and ACE's is stronger for certification: deterministic stats + council consensus across *N* runs, not a single judged episode. |
+| Hosted mode | `deployAgentWithHelm(request: {chartData \| default chart, helmEnvVars})` — `pkg/agent_registry/helm.go:DeployWithHelm` extracts the chart, `helm install`s into the target namespace, injects env vars (secrets→Secret, rest→ConfigMap), registers via `RegisterAgent`, sets status `ACTIVE`. Wired end-to-end incl. the `AgentOnboarding` UI. `agenthub` = the browsable agent catalog. |
+| Remote mode | `registerAgent(input: {endpoint: {url, endpointType, healthPath, readyPath}})` — `pkg/agent_registry/service.go:RegisterAgent`: if `endpoint` is set it is used verbatim (no Helm), then DB record + Langfuse sync + the 5-min health-check scheduler + `REGISTERED→VALIDATING→ACTIVE` state machine. Backend mutation and the `useRegisterAgent` frontend API binding both exist. |
+| MCP tool provisioning by URL | The experiment launch selects the MCP set (Kubernetes MCP + Prometheus MCP for the target namespace) and passes `mcp_urls` in the task message. Static-per-run rather than a dynamic gateway, but delivers the same "here are your tool servers." |
+| Driver (submit task via A2A, poll to terminal) | The `a2a-mcp-agent` bridge — now `message/send` + `tasks/send` fallback (§2.2). |
+| Per-run isolated environment + teardown | The Argo Workflow installs app + agent in a namespace and tears both down; "revoke access on completion" maps to the existing cleanup step. |
+
+**Adaptation gaps for full AgentBeats-conformant onboarding (all on existing pieces, ~3–5 days total):**
+
+1. **A2A-aware verification at registration** (~1–2 days, the highest-leverage item). `EndpointType` is `REST | GRPC` only, and `ValidateAgentHealth` does a bare `GET {url}/health`. For an A2A agent, verification should instead fetch `/.well-known/agent-card.json`, confirm the JSON-RPC endpoint answers a `message/send` probe, and store the Card + resolved RPC URL + `preferredTransport` on the `Agent` record. Contained to `pkg/agent_registry` (`validator.go`, `service.go`, `model.go`, `definitions/shared/agent_registry.graphqls` + gqlgen regen). This is what turns "registered + `/health` 200" into AgentBeats' "verify the A2A service runs correctly."
+2. **Finish the `OnboardingMethod.APIS` UI path** (~0.5–1 day, frontend). `AgentOnboarding.tsx` scaffolds three methods (`HELM_CHART`, `APIS`, `FAAS`) with label/file helpers, but the submit branch only handles `HELM_CHART`; `registerAgent` (endpoint-only) is never called by any view. Wire the "APIs" radio to `useRegisterAgent` with an endpoint form.
+3. **Feed the registered endpoint into the A2A run** (~0.5 day). Whatever emits `scenario_data.json` for an `a2a-mcp-agent` experiment should read the registered agent's `endpoint.url` instead of requiring `a2a_endpoint` to be hand-set.
+4. **Make `containerImage` optional in `RegisterAgentInput`** for endpoint-only registration (trivial — `deployAgentWithHelm` already passes a `litmus/agent` placeholder).
+
+**None of ACE's own agents are A2A servers.** `flash-agent`, `sre-agent-crewai`, and `sre-agent-comprehensive` are one-shot CLIs invoked directly by the Argo workflow / `ace-bench.py` — no Agent Card, no JSON-RPC endpoint. Exercising this onboarding path end-to-end needs one agent given a thin A2A wrapper: an HTTP server that publishes an Agent Card and, on `message/send`, runs the CLI (e.g. `python -m sre_comprehensive --goal "<task text>"`) and returns its `agent_output.json` as a Task artifact. Estimated ~½–1 day (~100 lines using the `a2a-sdk`, or ~250 hand-rolled) plus a Dockerfile env switch and a Deployment/Service manifest; the agent's reasoning code is reused untouched and LLM-call tracing keeps working because the agent already routes through the LiteLLM proxy URL.
+
+**Net:** full AgentBeats-conformant onboarding is adaptation of existing subsystems (`agent_registry` + `agenthub` + the bridge + the certifier-as-judge), not a new gateway. Nothing is needed for the judge, the MCP contract, environment isolation, or the driver.
 
 ---
 
@@ -563,6 +592,55 @@ The chaos-charts default directory was hardcoded to `/srv/projects/ace-monorepo/
 **Status: Proposed**
 Instead of broadening the `ALLOWED_ORIGINS` regex to match in-cluster Kubernetes service hostnames, add an `Origin` header directly in the subscriber's WebSocket dial code. Safer because it authenticates rather than bypasses the origin check.
 
+### 7.5 Per-Experiment Chaos RBAC Sandbox (development scaffold — currently disabled)
+**Status: Scaffold present on `feature/itbench-scenarios`, gated OFF. All faults run under `litmus-admin`, matching `main`.**
+
+**Current behaviour.** Every chaos experiment — ITBench SDK faults, node faults, the
+generic pod-level LitmusChaos catalog, and the `uninstall-agent` / `uninstall-application`
+teardown steps — runs under its authored `chaosServiceAccount: litmus-admin`: one standing,
+cluster-wide ServiceAccount / ClusterRole / ClusterRoleBinding
+(`chaos-charts/service-accounts/litmus-admin-rbac.yaml`). This is upstream LitmusChaos's
+model and what ACE `main` does (`main`'s GraphQL handler has no `chaosServiceAccount`
+rewrite). It is applied into the active infra namespace on every `setup.sh` run by
+`ensure_litmus_admin_cluster_rbac()` — previously applied by nothing, so it was lost on every
+cluster recreate (§31/§96 recurrence). Its rule set was extended with `configmaps: delete`,
+`horizontalpodautoscalers: delete`, `ingresses`, and `poddisruptionbudgets` so the
+Helm-release teardown sweep runs without RBAC denials — i.e. `litmus-admin` genuinely covers
+every fault ACE runs today.
+
+**The sandbox (aspirational, `handler.perExperimentChaosRBACEnabled = false`).** §99 built,
+but did not finish, a per-experiment sandbox: at run-submission time GraphQL would rewrite
+each ChaosEngine's `chaosServiceAccount` to an ephemeral `ace-chaos-<run-id>`, backed by a
+shared `ace-per-experiment-chaos-runner` ClusterRole (namespaced Litmus + workload verbs
+only) bound through **namespaced RoleBindings** in just the infra namespace plus the app
+namespace(s) that run targets, and deleted on terminal experiment events.
+
+- **Why it's worth finishing:** blast-radius containment on a shared multi-tenant cluster
+  (a run targeting `bookinfo` structurally cannot touch `sock-shop` or `ace` — the
+  RoleBinding doesn't exist there); least privilege per run; no standing
+  near-cluster-admin credential; per-run auditability via `agentcert.io/chaos-sa=<sa>`
+  labels; deployable where admission policy rejects a permanent broad ClusterRoleBinding.
+- **Why it's off:** its rule set (`perExperimentChaosRules`) only covers the generic
+  pod-level faults. Node faults need cluster-scoped `nodes` verbs a namespaced RoleBinding
+  *structurally* cannot grant; teardown needs `namespaces` delete + cluster-RBAC delete;
+  several ITBench faults touch `nodes`/`priorityclasses`. Live proof: run
+  `w-1788239055041`'s teardown pods logged `forbidden` on `configmaps`/`roles`/
+  `clusterroles`/`ingresses`/`namespaces`, `uninstall-application` verdict `Error`, and the
+  `bookinfo` namespace + agent ClusterRole/ClusterRoleBinding were left behind.
+
+**Scaffold to complete it.** Kept in place under the disabled flag:
+`perExperimentChaosServiceAccountName`, `perExperimentChaosRules`,
+`ensurePerExperimentChaosRBAC`, `cleanupPerExperimentChaosRBAC`,
+`per_experiment_rbac_test.go`, and `utils.UsesUnscopedChaosServiceAccount` — which marks the
+families (teardown, node, ITBench) that must stay on `litmus-admin` even after the sandbox is
+re-enabled, so the eventual model is: sandbox for the pod-level catalog, `litmus-admin` for
+the rest. Flipping `perExperimentChaosRBACEnabled` to `true` resumes the rewrite for
+everything the helper doesn't exempt; completing it means extending `perExperimentChaosRules`
+(or adding a per-run cluster-scoped grant) to cover whatever families are moved off the
+exempt list.
+
+See `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` §99 / §106.
+
 ---
 
 ## 8. Upstream Contributions (Open To-Dos)
@@ -621,13 +699,14 @@ The chaos-operator on the cluster populates a combined `TARGETS` var instead of 
 | 1.15 | LiteLLM rate-limit controls unconfigured | LLM Config | Proposed |
 | 1.16 | No uninstall-step picker in Chaos Studio; install-agent namespace not inherited | Control Plane | Proposed |
 | 2.1 | sre-agent-crewai (ACE-built CrewAI SRE agent) | Agents | Implemented |
-| 2.2 | A2A JSON-RPC 2.0 bridge | Agents | Implemented |
+| 2.2 | A2A JSON-RPC 2.0 bridge (dual-protocol: `message/send` + `tasks/send` fallback) | Agents | Implemented |
 | 2.3 | Open-weight model certification (Qwen2.5 7B local GPU) | Agents | Implemented |
 | 2.4 | `{{include:}}` processing in Zero's prompt system | Agents | Implemented |
 | 2.5 | Prometheus + K8s MCP for live SRE mode | Agents | Implemented |
 | 2.6 | Agent sidecar as sole `experiment_run_id` injection point | Agents | Implemented |
 | 2.7 | `sre_react_online.md` composite entry-point | Agents | Proposed (deferred) |
 | 2.8 | `injectExperimentContextArgs` hardcodes flash-agent value schema for any agent | Agents | Proposed |
+| 2.9 | AgentBeats interoperability — onboarding path (Remote/Hosted already present) + adaptation gaps | Agents | Bridge fix implemented; adaptations proposed |
 | 3.1 | Instance-scoped shared-host isolation | Infrastructure | Implemented |
 | 3.2 | KinD eviction absolute byte floor thresholds | Infrastructure | Implemented |
 | 3.3 | `compose-up-guard.sh` safety wrapper | Infrastructure | Implemented |

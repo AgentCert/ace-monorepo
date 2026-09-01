@@ -226,11 +226,19 @@ agent_is_available() {
 #                       you're rebuilding) — it restores normal Docker layer caching. Do not
 #                       default to this for a build whose result matters (verifying an actual
 #                       fix landed, cutting a build to hand off, etc.).
+#   --record-image-baseline  resolve the current registry digests of the monitored
+#                       third-party service images and (re)write deploy/image-baseline.tsv,
+#                       then exit. Run this once after confirming a new set of pinned
+#                       versions works, so fresh checkouts on other hosts compare against
+#                       it. Every normal run also warns when a floating tag (:latest, a
+#                       bare major, no tag) has drifted since this host's last setup —
+#                       silence that with ACE_SKIP_IMAGE_DRIFT_CHECK=1.
 SETUP_MODE="setup"
 BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
 ROOTLESS_DOCKER_ACTION=0
 ALLOW_BUILD_CACHE=0
 AGENT_FLAG=""
+RECORD_IMAGE_BASELINE=0   # --record-image-baseline: refresh deploy/image-baseline.tsv from what this host resolves now
 for _arg in "$@"; do
     case "$_arg" in
         --restart)            SETUP_MODE="restart" ;;
@@ -239,6 +247,7 @@ for _arg in "$@"; do
         --rootless-docker)     ROOTLESS_DOCKER_ACTION=1 ;;
         --allow-build-cache)   ALLOW_BUILD_CACHE=1 ;;
         --agent=*)             AGENT_FLAG="${_arg#--agent=}" ;;
+        --record-image-baseline) RECORD_IMAGE_BASELINE=1 ;;
     esac
 done
 unset _arg
@@ -789,6 +798,133 @@ if [[ "${_current_chaos}" != "${_expected_chaos}" ]]; then
     ok "Set CHAOS_CHARTS_ROOT=${_expected_chaos}"
 fi
 unset _expected_chaos _current_chaos
+
+# --- Floating-tag image drift warning --------------------------------------
+# The third-party service images in deploy/helm/ace/values.yaml that are pinned
+# only to a mutable tag (:latest, a bare major/minor, or no tag at all) can
+# silently change what they resolve to between one setup and the next. That is
+# exactly how the ClickHouse container rolled from 25.x onto 26.8 and broke
+# Langfuse trace ingestion — every trace landed with timestamp 9999-12-31 and
+# vanished from the UI and the certifier (OPEN_WEIGHT_CERTIFICATION_HANDOFF.md
+# §108).
+#
+# On every run (both --setup and --restart) this resolves each such image's
+# current registry manifest digest and compares it against, in order:
+#   1. this host's record from its last setup  → .tmp/image-digests-<inst>.tsv
+#   2. failing that (fresh host/checkout), the checked-in reference list
+#      → deploy/image-baseline.tsv  (generated from a known-good local setup)
+# and warns about anything that moved. Best-effort and non-fatal: silently
+# skipped offline or when the registry can't be reached. Disable entirely with
+# ACE_SKIP_IMAGE_DRIFT_CHECK=1. After confirming a new set of versions is good,
+# refresh the checked-in reference list with:
+#   ./scripts/setup.sh --record-image-baseline
+IMAGE_BASELINE_FILE="${REPO_ROOT}/deploy/image-baseline.tsv"
+_inst_for_state="$(cur ACE_INSTANCE_NAME)"; _inst_for_state="${_inst_for_state:-unconfigured}"
+IMAGE_DIGEST_STATE_FILE="${REPO_ROOT}/.tmp/image-digests-${_inst_for_state}.tsv"
+unset _inst_for_state
+
+# Prints "<image><TAB><digest>" for each monitored image: every value in the
+# `images:` map of the helm values file that is not one of the repo's own
+# agentcert/* builds. <digest> is the sha256 of the tag's current registry
+# manifest (empty when it can't be resolved).
+_resolve_monitored_image_digests() {
+    local values_file="${REPO_ROOT}/deploy/helm/ace/values.yaml"
+    [[ -r "${values_file}" ]] || return 0
+    local imgs img
+    imgs="$(sed -n '/^images:/,/^[^[:space:]#]/p' "${values_file}" \
+            | sed -n 's/^[[:space:]]\+[a-zA-Z0-9_-]\+:[[:space:]]*\([^[:space:]#]\+\).*/\1/p' \
+            | { grep -v '^agentcert/' || true; } | sort -u)"
+    [[ -n "${imgs}" ]] || return 0
+    # Resolve all of them in parallel — each is an independent registry round-trip.
+    _one_image_digest() {
+        # `imagetools inspect --raw` emits the raw manifest (index) bytes for the
+        # tag; its sha256 is that tag's current digest. `docker manifest inspect`
+        # is the fallback. `timeout` guards a hanging/unreachable registry. Every
+        # step is `|| d=""` so an offline run just yields an empty digest here
+        # (not a `set -e` abort).
+        local i="$1" d=""
+        d="$(timeout 25 docker buildx imagetools inspect "${i}" --raw 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')" || d=""
+        [[ -n "${d}" ]] || d="$(timeout 25 docker manifest inspect "${i}" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')" || d=""
+        printf '%s\t%s\n' "${i}" "${d}"
+    }
+    for img in ${imgs}; do _one_image_digest "${img}" & done
+    wait || true
+    unset -f _one_image_digest
+}
+
+check_image_drift() {
+    [[ "${ACE_SKIP_IMAGE_DRIFT_CHECK:-0}" == 1 ]] && return 0
+    command -v docker >/dev/null 2>&1 || return 0
+
+    local current=""
+    current="$(_resolve_monitored_image_digests)" || current=""
+    [[ -n "${current}" ]] || return 0
+    # If not one image resolved, we're almost certainly offline — stay quiet.
+    awk -F'\t' 'NF>=2 && $2!=""{f=1} END{exit f?0:1}' <<<"${current}" || return 0
+
+    local baseline_src="" ref_label=""
+    if [[ -r "${IMAGE_DIGEST_STATE_FILE}" ]]; then
+        baseline_src="${IMAGE_DIGEST_STATE_FILE}"
+        ref_label="this host's last setup"
+    elif [[ -r "${IMAGE_BASELINE_FILE}" ]]; then
+        baseline_src="${IMAGE_BASELINE_FILE}"
+        ref_label="the repo's checked-in baseline (deploy/image-baseline.tsv)"
+    fi
+
+    local drift=0 img cur_dig old_dig
+    while IFS=$'\t' read -r img cur_dig; do
+        [[ -n "${img}" && -n "${cur_dig}" ]] || continue
+        old_dig=""
+        if [[ -n "${baseline_src}" ]]; then
+            old_dig="$(awk -F'\t' -v i="${img}" '$1==i{print $2; exit}' "${baseline_src}")" || old_dig=""
+        fi
+        [[ -n "${old_dig}" && "${old_dig}" != "${cur_dig}" ]] || continue
+        if [[ ${drift} -eq 0 ]]; then
+            echo
+            warn "Floating-tag image drift vs ${ref_label}:"
+            drift=1
+        fi
+        echo -e "    ${YELLOW}${img}${NC}"
+        echo -e "      ${DIM}was ${old_dig:0:16}…   now ${cur_dig:0:16}…${NC}"
+        case "${img}" in
+            *clickhouse-server*)
+                echo -e "      ${DIM}CH >= 26.8 changed JSON-insert DateTime parsing; the clickhouse-ace-settings${NC}"
+                echo -e "      ${DIM}drop-in (templates/langfuse.yaml) restores it and needs CH >= 26.8 — HANDOFF §108/§110.${NC}" ;;
+            *langfuse/langfuse*)
+                echo -e "      ${DIM}A Langfuse major bump changes the supported ClickHouse range and the DB schema.${NC}" ;;
+        esac
+    done <<<"${current}" || true
+
+    if [[ ${drift} -eq 1 ]]; then
+        echo -e "    ${DIM}A mutable tag moved under you. If the stack misbehaves, suspect this first.${NC}"
+        echo -e "    ${DIM}Once the new versions are confirmed good: ./scripts/setup.sh --record-image-baseline${NC}"
+        echo
+    elif [[ -n "${baseline_src}" ]]; then
+        ok "Service image digests unchanged since ${ref_label}."
+    fi
+
+    # Always refresh this host's record so the next run compares against "now".
+    mkdir -p "$(dirname "${IMAGE_DIGEST_STATE_FILE}")"
+    { printf '# <image>\t<sha256 of registry manifest>   (written by setup.sh %s)\n' "$(date -u +%FT%TZ)"
+      awk -F'\t' 'NF>=2 && $2!=""' <<<"${current}"; } > "${IMAGE_DIGEST_STATE_FILE}"
+
+    # Seed the checked-in reference list the first time (fresh checkout with no
+    # baseline yet) or rewrite it on explicit --record-image-baseline.
+    if [[ "${RECORD_IMAGE_BASELINE:-0}" == 1 || ! -e "${IMAGE_BASELINE_FILE}" ]]; then
+        local _now; _now="$(date -u +%FT%TZ)"
+        { printf '# ACE monitored third-party service images — reference digests for the floating-tag\n'
+          printf '# drift check in scripts/setup.sh. Columns: <image>\\t<sha256 of registry manifest>\\t<recorded UTC>\n'
+          printf '# Regenerate from a known-good local setup: ./scripts/setup.sh --record-image-baseline\n'
+          awk -F'\t' -v d="${_now}" 'NF>=2 && $2!=""{printf "%s\t%s\t%s\n",$1,$2,d}' <<<"${current}"
+        } > "${IMAGE_BASELINE_FILE}"
+        ok "Recorded image baseline → deploy/image-baseline.tsv ($(awk -F'\t' 'NF>=2 && $2!=""{n++} END{print n+0}' <<<"${current}") images)"
+    fi
+}
+check_image_drift
+if [[ "${RECORD_IMAGE_BASELINE:-0}" == 1 ]]; then
+    say "Done (--record-image-baseline)."
+    exit 0
+fi
 
 # Self-heal FLASH_AGENT_MODEL if it points at a provider that isn't actually
 # configured (or whose credentials are still a copy-pasted placeholder, e.g.

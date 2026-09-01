@@ -153,6 +153,29 @@ spec:
 
 # ── ClickHouse ─────────────────────────────────────────────────────────────────
 ---
+# ClickHouse >= 26.8 reads a bare unquoted number for a DateTime64 column (in the JSON /
+# Values insert paths Langfuse uses) as whole seconds instead of ticks-at-column-precision.
+# Langfuse v3 sends millisecond epochs, so on 26.8 every ingested timestamp overflows and
+# saturates to 9999-12-31 — traces disappear from the UI and the certifier (HANDOFF §108).
+# This drop-in restores the pre-26.8 behaviour for the `default` profile. Requires
+# ClickHouse >= 26.8 (older servers reject the unknown setting on startup); the
+# .Values.images.clickhouse pin is kept >= 26.8 to match. Remove this once the Langfuse
+# image moves to v4 (its client sends timestamps in a form that does not hit this).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-ace-settings
+  namespace: {{ include "ace.namespace" . }}
+data:
+  ace-datetime-compat.xml: |
+    <clickhouse>
+        <profiles>
+            <default>
+                <input_format_read_datetime_number_as_raw_value>1</input_format_read_datetime_number_as_raw_value>
+            </default>
+        </profiles>
+    </clickhouse>
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -228,6 +251,10 @@ spec:
               mountPath: /var/lib/clickhouse
             - name: logs
               mountPath: /var/log/clickhouse-server
+            - name: ace-settings
+              mountPath: /etc/clickhouse-server/users.d/ace-datetime-compat.xml
+              subPath: ace-datetime-compat.xml
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -235,6 +262,9 @@ spec:
         - name: logs
           persistentVolumeClaim:
             claimName: langfuse-clickhouse-logs
+        - name: ace-settings
+          configMap:
+            name: clickhouse-ace-settings
 ---
 apiVersion: v1
 kind: Service
@@ -361,24 +391,7 @@ spec:
             - secretRef:
                 name: {{ .Values.secretName }}
           env:
-            - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_USER
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_PASSWORD
-            - name: POSTGRES_DB
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_DB
-                  optional: true
-            - name: DATABASE_URL
-              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            {{- include "ace.langfuse.dbEnv" . | nindent 12 }}
             - name: CLICKHOUSE_MIGRATION_URL
               value: "clickhouse://clickhouse:9000"
             - name: CLICKHOUSE_URL
@@ -413,6 +426,31 @@ spec:
       labels:
         app: langfuse-web
     spec:
+      initContainers:
+        # langfuse-web runs the Prisma DB migrations on startup and exits 1 if the
+        # database is unreachable — on a from-scratch deploy Postgres can take a
+        # couple of minutes to become ready (first-boot data-dir init on the PVC),
+        # which otherwise leaves langfuse-web in CrashLoopBackOff until the backoff
+        # timer happens to line up with Postgres readiness. This gate removes the race.
+        #
+        # It polls the exact target the app connects to: pg_isready parses host,
+        # port and dbname straight out of $DATABASE_URL (same value block as the
+        # main container, via the ace.langfuse.dbEnv helper), so there is no
+        # separately-hardcoded "postgres:5432" to drift.
+        - name: wait-for-db
+          image: {{ .Values.images.postgres }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -d "$DATABASE_URL" -t 3; do
+                echo "waiting for database to accept connections ($DATABASE_URL)..."
+                sleep 2
+              done
+              echo "database is ready"
+          env:
+            {{- include "ace.langfuse.dbEnv" . | nindent 12 }}
       containers:
         - name: langfuse-web
           image: {{ .Values.images.langfuseWeb }}
@@ -423,24 +461,7 @@ spec:
             - secretRef:
                 name: {{ .Values.secretName }}
           env:
-            - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_USER
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_PASSWORD
-            - name: POSTGRES_DB
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secretName }}
-                  key: POSTGRES_DB
-                  optional: true
-            - name: DATABASE_URL
-              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            {{- include "ace.langfuse.dbEnv" . | nindent 12 }}
             - name: CLICKHOUSE_MIGRATION_URL
               value: "clickhouse://clickhouse:9000"
             - name: CLICKHOUSE_URL

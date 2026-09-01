@@ -7208,3 +7208,655 @@ but the audit it prompted found and fixed a genuine, previously-silent script bu
 ### Status
 
 Committed together with this handoff entry.
+
+
+## 96. The `q` ITBench experiment: (a) cross-namespace chaos faults 403 because the checked-in `litmus-admin` cluster RBAC is never applied by any bring-up step, and (b) every run poisons its own KinD node image — the `uninstall-*` fault CRDs carry `imagePullPolicy: Always`, so each run's cleanup re-pulls the stale Docker Hub `agentcert/agentcert-install-*:latest` over the good local build, and the next run's `install-application` (`Never`) then dies on `/charts/bookinfo` missing (2026-08-31, uncommitted)
+
+### Symptom(s)
+
+1. `q` experiment run #3 (`experiment_run_id 1a1df250…`, workflow `q-1788135989792`), fault
+   `scaled-to-zero-kubernetes-workload` against `deployment:bookinfo:[app=details]`, failed with
+   `chaosLogs`:
+   `Chaos injection failed, err: failed listing deployments in ns=bookinfo label=app=details:
+   deployments.apps is forbidden: User "system:serviceaccount:itbench:litmus-admin" cannot list
+   resource "deployments" in API group "apps" in the namespace "bookinfo"`.
+   ChaosResult `verdict: Error`, `probeSuccessPercentage: 0`, run `phase: Error`. (The Argo
+   workflow itself still reported `Succeeded` — the `litmus-checker` step only waits for
+   `ENGINE COMPLETED`, it does not inspect the verdict.)
+2. Immediately-subsequent `q` runs (`q-1788136950768`, `q-1788137164174`, ~00:40 and 00:46)
+   failed one step earlier, at `install-application`, with
+   `Configuration error: chart folder not found: /charts/bookinfo` — the exact §95 symptom,
+   recurring six days after §95's `kind load` fix.
+
+### Root cause 1 — cross-namespace RBAC never applied (recurrence of §31 "Bug 9")
+
+The `itbench` chaos infrastructure is registered `infra_scope: "namespace"` (confirmed:
+`db.chaosInfrastructures.findOne({infra_id:"28fb218b-…"}).infra_scope`). Namespace-scoped infra
+makes ChaosCenter apply only `graphql/server/manifests/namespace/2a_litmus_admin_rbac.yaml` — a
+namespaced `Role` in `itbench`. Its `apps/deployments` grant is confined to `itbench`. ITBench
+scenario workflows run chaos in `adminModeNamespace: itbench` but the ChaosEngine's
+`chaosServiceAccount: litmus-admin` targets `appinfo.appns: bookinfo` — so `itbench:litmus-admin`
+needs deployment access **in `bookinfo`**, which a namespaced Role can never grant. Verified:
+`kubectl auth can-i list deployments --as=system:serviceaccount:itbench:litmus-admin -n bookinfo`
+→ `no`; `kubectl get clusterrole/clusterrolebinding litmus-admin-cluster-role*` → `NotFound`.
+
+§31 already diagnosed this exact class and landed the durable ClusterRole/ClusterRoleBinding in
+`chaos-charts/service-accounts/litmus-admin-rbac.yaml` (committed, `3ec0947`), plus a live apply
+to `kind-agentcert-alfred`. **The live apply was lost when this cluster was recreated
+2026-08-25, and nothing in the bring-up path re-applies the file** — `grep -rn litmus-admin-rbac`
+across `scripts/`, `deploy/`, `AgentCert/`, `agents/harness/` returns only docs and the file
+itself. `chaos-charts/README.md` says "apply … once per cluster" but no automation does it. So
+every from-scratch cluster is missing it.
+
+### Root cause 2 — `uninstall-*` faults re-pull the stale Hub image and clobber the node
+
+`INSTALL_APP_IMAGE_SOURCE`/`INSTALL_AGENT_IMAGE_SOURCE` = `local` (built on host, `kind load`ed,
+**never pushed**). Docker Hub `agentcert/agentcert-install-app:latest` is a
+2026-06-25 build whose bundled `/charts/` contains **only `sock-shop`** (`sha256:e55bb4a1…`,
+id `6fb6dbfe159c4`, 41.8 MB). The current host build (`sha256:74592353…`, 2026-08-25) has
+`bookinfo`/`otel-demo`/`sock-shop`.
+
+- The Argo `install-application` / `install-agent` **workflow templates** correctly use
+  `imagePullPolicy: Never` (JSON `"imagePullPolicy":"Never"` in the stored manifest) → node-local
+  image only.
+- But the `uninstall-application` and `uninstall-agent` **ChaosExperiment CRDs**
+  (`chaos-charts/faults/kubernetes/uninstall-*/fault.yaml:86`, and the embedded `raw.data` blobs
+  in the stored `q` revision) hardcode `imagePullPolicy: Always`.
+
+`containerd` journal on `agentcert-alfred-control-plane` proves the mechanism: run
+`q-1788135989792`'s `uninstall-application-jhygey` job at `00:34:01` and `00:36:03` did
+`PullImage "docker.io/agentcert/agentcert-install-app:latest"` and pulled
+`repo digest …e55bb4a1…` (the stale Hub image), replacing the good local image under the `:latest`
+tag on the node. The 00:26 `install-application` step had run 22 s and succeeded (good image
+present then); every run after 00:36 hit `os.Stat("/charts/bookinfo")` in
+`app-charts/install-app/main.go:validateConfig` → `chart folder not found` → exit 1 →
+workflow `Failed`. **Each `q` run poisons the node for the next one.** This is why §95's
+one-time `kind load` didn't hold — §95 correctly noted "rebuilding on the host requires a
+follow-up `kind load`, that's how KinD works", but missed that a workflow step was actively
+*undoing* the load on every run.
+
+### Fixes
+
+**Source (durable):**
+
+| File | Change | Why |
+|------|--------|-----|
+| `scripts/setup.sh` | New `ensure_litmus_admin_cluster_rbac()`, called right after `sync_subscriber_secret` in **both** `k8s_deploy` (step 9c-2) and `helm_deploy` (step 5d-2). Resolves the infra namespace from MongoDB the same way `sync_subscriber_secret` does (newest `is_registered:true` infra, fallback `litmus`); `sed`s `namespace: litmus` → that namespace in `chaos-charts/service-accounts/litmus-admin-rbac.yaml`; `kubectl apply` (idempotent); verifies with `kubectl auth can-i list deployments --as=…:litmus-admin -A`. Best-effort — `warn` + `return 0` on any failure, never aborts setup. Locates the manifest at `${REPO_ROOT}/chaos-charts/service-accounts/…` with a `$(cur CHAOS_CHARTS_ROOT)/…` fallback. | Closes the "applied live once, lost on recreate" gap — a fresh `setup.sh --setup`/`--restart` now installs the cluster-wide `litmus-admin` grant automatically. Root cause 1. |
+| `chaos-charts/faults/kubernetes/{install,uninstall}-{application,agent}/fault.yaml` (4 files) | `imagePullPolicy: Always` → `IfNotPresent` on the `agentcert/agentcert-install-*` container | For a locally-built, never-pushed image, `Always` guarantees the node build is overwritten by whatever stale copy is on Docker Hub. `IfNotPresent` uses the `kind load`ed image and only pulls if genuinely absent. Root cause 2. |
+| `chaos-charts/faults/kubernetes/experiments.yaml` | same, 4 occurrences (the aggregated install/uninstall app+agent definitions) | same |
+| `chaos-charts/experiments/*/experiment.yaml` + `*_cron.yaml` (11 files: `bookinfo-itbench`, `itbench-2scenario-5run` ×2, `otel-demo-itbench`, `otel-demo-itbench-starter`, `sock-shop`, `sock-shop-parallel` ×2, `sock-shop-sequential` ×2, `sock-shop-single`, `sre-agent-comprehensive-itbench-single`) | `imagePullPolicy: Always` → `IfNotPresent` **only** on lines immediately following an `image:` line for `agentcert/agentcert-install-app` or `-install-agent` (20 lines total across all 16 files; applied via a targeted regex, not a blanket sed — litmus helper images that legitimately want `Always` were untouched) | Same bug in every pre-baked experiment template that has an `install-agent` step. `install-application` in several of these was already `IfNotPresent`. |
+
+**Live (this cluster) — applied after explicit user confirmation in this session:**
+1. `sed 's/namespace: litmus/namespace: itbench/' chaos-charts/service-accounts/litmus-admin-rbac.yaml | kubectl apply -f -` created `clusterrole.rbac.authorization.k8s.io/litmus-admin` and `clusterrolebinding.rbac.authorization.k8s.io/litmus-admin` bound to `system:serviceaccount:itbench:litmus-admin`.
+2. `kubectl -n ace exec mongodb-0 -- mongosh … updateOne({name:"q"}, $set revision.<last>.experiment_manifest)` replaced the 2 `imagePullPolicy: Always` occurrences in the stored `q` experiment revision's embedded `agentcert-install-*` snippets with `IfNotPresent`.
+
+**Live (this cluster) — done this session:**
+`kind load docker-image agentcert/agentcert-install-app:latest agentcert/agentcert-install-agent:latest --name agentcert-alfred` — node now serves `install-app` id `ed397e6e6702` (charts: `bookinfo`, `otel-demo`, `sock-shop`, verified via `ctr -n k8s.io run --rm … ls /charts`) and `install-agent` id `07794cae05f2`. Old images now dangling (`<none>`).
+
+### Verification performed
+
+- Root cause 1: `kubectl auth can-i` (no, pre-fix), `db.chaosInfrastructures … .infra_scope` = `namespace`, `kubectl get clusterrole litmus-admin-cluster-role` = NotFound, ChaosResult `errorOutput.reason` in `db.chaosExperimentRuns` execution_data matches the fault-pod log verbatim.
+- Root cause 2: `containerd` journal `PullImage … install-app:latest` entries at 00:34/00:36 with `repo digest …e55bb4a1…`; `docker run --entrypoint sh <hub-image> -c 'ls /charts'` = `sock-shop` only vs host `:latest` = 3 charts; `install-application` node durations (22 s success at 00:26 vs 2 s exit-1 at 00:46) in `db.chaosExperimentRuns` execution_data; `kubelet` DiskPressure=False and no ImageGCFailed events (ruled out §95-style eviction).
+- `bash -n scripts/setup.sh` — clean. `python3 -c "yaml.safe_load(...)"` on all 4 `faults/kubernetes/{,un}install-*/fault.yaml` — parse OK. `git diff --stat` on chaos-charts = 16 files, 20/20 lines, all `Always`→`IfNotPresent` on install-image lines only.
+- Post `kind load`: `ctr -n k8s.io run --rm … ls /charts` on the node confirms chart contents, not just tag presence.
+- Post live fix: `kubectl auth can-i list deployments --as=system:serviceaccount:itbench:litmus-admin -n bookinfo` → `yes`; `kubectl auth can-i patch deployments/scale --as=system:serviceaccount:itbench:litmus-admin -n bookinfo` → `yes`; `kubectl auth can-i list deployments --as=system:serviceaccount:itbench:litmus-admin -A` → `yes`. `kubectl get clusterrolebinding litmus-admin -o yaml` shows subject `namespace: itbench`, `name: litmus-admin`, roleRef `ClusterRole/litmus-admin`.
+- Post Mongo patch: stored `q` experiment manifest now has `install_image_always_count=0`, `install_image_ifnotpresent_count=2` for `agentcert-install-{app,agent}:latest` snippets.
+- **Not** re-run end-to-end: `q` has not been re-run from the UI after the live RBAC + Mongo manifest patch. The source changes in `chaos-charts` are a submodule working-tree edit, not yet committed/pushed to the AgentCert org repo (same outstanding constraint as §27/§31).
+
+### Durability
+
+Durability check performed:
+- **Root cause 1 — durable.** `ensure_litmus_admin_cluster_rbac()` lands in `scripts/setup.sh` and runs on every `--setup`/`--restart` in both deploy paths; a fresh checkout/host/cluster picks it up with no manual step. (Prior state: the ClusterRole file existed in `chaos-charts` since §31 but was applied by nothing.)
+- **Root cause 2 — durable for experiments built via the UI/ChaosHub after this lands** (the workflow builder reads the fault CRDs from `chaos-charts/faults/kubernetes/*/fault.yaml`), and for the 11 pre-baked experiment templates. **Not retroactive** for already-stored experiment revisions in MongoDB (e.g. `q`) — those need the one-time `fix-q-and-rbac.sh` Mongo patch, or re-creation from corrected source. A stronger fix (push `install-app`/`install-agent` to Docker Hub from `build-and-push.sh` so Hub `:latest` stops being months stale, making `Always` harmless again) is noted but not done — deliberately out of scope here.
+
+### Status
+
+Uncommitted / in progress. `scripts/setup.sh` + 16 `chaos-charts` files edited in the working
+tree; live `kind load`, live RBAC apply, and live Mongo `q` manifest patch are done and verified;
+`q` not yet re-run.
+
+
+## 97. ChaosCenter run-graph rendered the entire `q` workflow twice (a second full copy of every step after `uninstall-all`) — a real bug in ACE's manifest/runtime step-merge in `ExperimentRunDetailsGraph`, not a double execution (2026-08-31, uncommitted)
+
+### Symptom
+
+While chasing §96, the user reported the ChaosCenter experiment-run view for `q` showing "a
+single line, but with the workflow repeated twice. After what should be the last step
+(uninstall-all)" — i.e. `install-application → … → uninstall-all` and then the whole sequence
+again.
+
+### Not a double execution — confirmed at the data layer
+
+- Argo: one `Workflow` object per run, 19 nodes, a single linear chain
+  `[0]→install-application→[1]→install-agent→…→[8]→uninstall-all`. No multi-parent node, no
+  `retryStrategy`, no `onExit`, no duplicate template names in `spec.templates` (11 templates,
+  all distinct).
+- `db.chaosExperimentRuns`: one document per trigger, `run_sequence` 1..6, distinct
+  `experiment_run_id`/`notify_id`; each `execution_data` = the same 19 nodes, one `phase`, one
+  `finishedAt`.
+- One `subscriber`, one `workflow-controller`, no CronWorkflows, `instanceID` == `infra_id`.
+
+### Root cause — `ExperimentRunDetailsGraph.tsx` step-merge (ACE-added code)
+
+The run view overlays live Argo status onto the manifest's ordered step list:
+
+1. `graphData = transformArgoData(executionData.nodes)` (`src/utils/transformArgoData.ts`) — for a
+   linear `Steps` workflow this yields a flat array of the fault/step Pod nodes, and it sets each
+   entry's `id` **and `identifier`** to the Argo node *key* (`"<wfname>-<hash>"`), with `name` = the
+   short step name.
+2. `steps` (prop) = `KubernetesYamlService.getFaultsFromExperimentManifest(manifest, false)` — one
+   entry per `spec.templates[0].steps` group, `identifier` = the Argo *template name*.
+3. The merge:
+   ```ts
+   const mergedFromManifest = deepCopySteps.map(step => {
+     const runtime = runtimeByStepKey.get(stepIdentity(step));   // key by step name — OK
+     return runtime ? merge({}, step, runtime) : step;           // runtime.identifier (hash) wins
+   });
+   const manifestKeys = new Set(mergedFromManifest.map(step => stepIdentity(step)));  // ← hashes now
+   const runtimeOnlySteps = deepCopyGraphData.filter(step => !manifestKeys.has(normalizeStepKey(step.name)));
+   const mergedSteps = [...mergedFromManifest, ...runtimeOnlySteps];
+   ```
+   `merge({}, step, runtime)` lets `runtime.identifier` (the `"<wf>-<hash>"` key) overwrite the
+   manifest step's `identifier` (the template name). `manifestKeys` is then rebuilt from those
+   merged objects via `stepIdentity` → a set of **hash strings**. The `runtimeOnlySteps` filter
+   compares that set against `normalizeStepKey(runtimeNode.name)` (real step names) → never a
+   match → **every runtime node passes the filter and the whole workflow is appended a second
+   time** after `mergedFromManifest` (hence "after uninstall-all"). For a full 9-step run:
+   `mergedSteps.length` = 18. Reproduced exactly against the real `execution_data` for run
+   `5ef09015…` in a standalone Node script (`scratchpad/repro.mjs`): CURRENT = 18, FIXED = 9.
+
+Upstream LitmusChaos `ExperimentRunDetailsGraph` renders `transformArgoData(...)` directly; the
+`normalizeStepKey` / `stepIdentity` / manifest-merge block (added so install/uninstall steps show
+their AgentHub/AppHub folder and target-config state) is ACE-only, so this is an ACE regression,
+not an upstream bug. It bites any multi-step ITBench experiment; a stock
+`install-chaos-faults → fault → cleanup` workflow happened not to trip it because its manifest
+step list and runtime node set line up differently.
+
+### Fix
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/web/src/views/ExperimentRunDetailsGraph/stepGraphMerge.ts` (**new**) | Extracted `normalizeStepKey`, `stepIdentity`, and a new `mergeManifestAndRuntimeSteps(steps, graphData)` into a pure, dependency-light module (only imports the `PipelineGraphState` type + lodash `cloneDeep`/`merge`). The merge now records **matched keys pre-merge** (`matchedRuntimeKeys.add(stepIdentity(step))` inside the map, before `merge()` mutates `identifier`) and filters `runtimeOnlySteps` against that set — so a node that was folded into a manifest step is never re-appended, regardless of what `merge` does to `identifier`. Runtime `id` still wins in the merged object (needed: `handleClickNode` indexes `executionData.nodes[id]`). |
+| `AgentCert/chaoscenter/web/src/views/ExperimentRunDetailsGraph/ExperimentRunDetailsGraph.tsx` | Deleted the ~30-line inline merge; now `const mergedSteps = mergeManifestAndRuntimeSteps(steps, graphData);`. Dropped the now-unused `cloneDeep`/`merge` imports. |
+| `AgentCert/chaoscenter/web/src/views/ExperimentRunDetailsGraph/__tests__/mergeManifestAndRuntimeSteps.test.ts` (**new**) | 6 tests: full run renders each step once (regression), runtime status folds onto the matching step, runtime `id` (node key) preserved for click-select, partial run keeps full step list with no dupes, a genuinely runtime-only node is appended exactly once, empty runtime data → manifest steps unchanged; plus `normalizeStepKey`/`stepIdentity` unit cases. |
+
+### Verification performed
+
+- `npx jest ExperimentRunDetailsGraph transformArgoData` → 12/12 pass (6 new + 6 existing `transformArgoData`).
+- `npx eslint` on the 3 changed/new files → clean. `npx prettier --write` on the 2 new files → clean (`ExperimentRunDetailsGraph.tsx` and its `index.ts` were already prettier-non-clean at HEAD — pre-existing repo noise, `format:check` isn't a blocking gate).
+- `npx tsc --noEmit` → no `src/` errors (only pre-existing `node_modules/@types/node/ffi.d.ts` parse errors from a Node-24 `@types/node` vs the repo's TS 4.4 — unrelated).
+- Root cause proven against real data: `scratchpad/repro.mjs` runs the verbatim `transformArgoData` + old-vs-new merge against `execution_data` for run `5ef09015…` — old = 18 nodes (workflow twice), new = 9.
+- Checked the other two graph consumers (`VisualizeExperimentManifest`, `ExperimentVisualBuilder`) — they render `getFaultsFromExperimentManifest(...)` with no runtime merge, so they were never doubled and are untouched.
+
+### Durability
+
+Durable in source (checked-in AgentCert submodule). **Requires a web-image rebuild + redeploy to
+take effect on a running cluster** — `./scripts/setup.sh --restart --local-build` (plain
+`--restart` does not rebuild images, per CLAUDE.md §6 "Known Operational Gotchas"). Not yet
+committed/pushed to the AgentCert org repo (same submodule constraint as §27/§31/§96).
+
+### Status
+
+Uncommitted. 1 file edited + 2 new files in `AgentCert/chaoscenter/web/…/ExperimentRunDetailsGraph/`.
+Web image not rebuilt/redeployed this session — the running ChaosCenter still shows the double
+until `setup.sh --restart --local-build`.
+
+
+## 98. Install helper image pull policy is now environment-driven: production defaults to Docker Hub pulls, local dev setup writes non-pulling policies (2026-08-31, uncommitted)
+
+### Context
+
+Follow-up to §96. The §96 source fix had changed static `chaos-charts` helper-image references from
+`Always` to `IfNotPresent` to protect the local KinD build from stale Docker Hub images. The user
+correctly pointed out that locally built images are a development setup; production should be easy to
+switch back to a Docker Hub pull policy instead of requiring another source edit.
+
+### Fix
+
+| File | Change | Why |
+|------|--------|-----|
+| `.env.example` | `INSTALL_APPLICATION_IMAGE_PULL_POLICY=Always` and `INSTALL_AGENT_IMAGE_PULL_POLICY=Always`; comments now say setup rewrites these to `Never` for local image sources. | Documents production/default behavior while keeping local development explicit. (`apply_patch` is blocked for this ignored file in this workspace, so this was updated with a scoped script replacement.) |
+| `scripts/setup.sh` | `INSTALL_APP_IMAGE_SOURCE=dockerhub` and `INSTALL_AGENT_IMAGE_SOURCE=dockerhub` now write `INSTALL_*_IMAGE_PULL_POLICY=Always`; `local` continues to write `Never`; `jfrog` already wrote `Always`. | Makes the setup wizard the switch: registry-backed setups pull, local KinD builds never pull stale public images. |
+| `AgentCert/chaoscenter/graphql/server/utils/variables.go` | Default `InstallApplicationImagePullPolicy` and `InstallAgentImagePullPolicy` changed to `Always`. | Production default if the env var is omitted. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` | Exported `ApplyInstallAgentTemplateOverrides` and updated save-time workflow/cron call sites. | Reuses the existing install-agent image/pull-policy override outside the save path. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/handler.go` | Calls `ops.ApplyInstallAgentTemplateOverrides(...)` when running both Workflow and CronWorkflow revisions, alongside the existing install-application and Litmus-helper runtime overrides. | Makes `INSTALL_AGENT_IMAGE_PULL_POLICY` apply to already-saved experiments at run time, not only newly saved ones. |
+| `chaos-charts/experiments/*/experiment*.yaml` (11 files) | Static prebuilt experiment templates restored to `imagePullPolicy: Always` for `agentcert/agentcert-install-app:latest` / `agentcert/agentcert-install-agent:latest` lines. | Keeps the catalog production-oriented; local behavior is now controlled by GraphQL env/runtime overrides. Canonical fault definitions were also checked and now remain at `Always`. |
+
+### Verification
+
+- `bash -n scripts/setup.sh` — clean.
+- `go build ./pkg/chaos_experiment_run/handler` — clean.
+- `go test ./utils ./pkg/chaos_experiment/ops` — clean.
+- `go test ./utils ./pkg/chaos_experiment/ops ./pkg/chaos_experiment_run/handler` was attempted; the handler package tests still fail on a pre-existing mock/interface mismatch (`InfraService` mock missing `StartFinalizerWatcher`), unrelated to this change.
+- Parsed the touched chaos-chart YAML set with PyYAML: `yaml ok: 18 files`.
+
+### Durability / Operational Note
+
+Durable in source. For production, use `INSTALL_APP_IMAGE_SOURCE=dockerhub` / `INSTALL_AGENT_IMAGE_SOURCE=dockerhub` (or omit the pull-policy env vars) and GraphQL defaults/runtime overrides will use `Always`. For local development, `setup.sh` writes `INSTALL_APPLICATION_IMAGE_PULL_POLICY=Never` and `INSTALL_AGENT_IMAGE_PULL_POLICY=Never` when the source is `local`, preventing accidental stale Docker Hub pulls. Existing saved experiments now receive the install-agent override at run time too; however, a running cluster still needs the GraphQL image rebuilt/redeployed before the new backend runtime behavior is active.
+
+### Status
+
+Uncommitted. Source-only follow-up; no additional live Kubernetes or MongoDB mutation was made for this entry.
+
+
+## 99. Replaced the broad `litmus-admin` ClusterRoleBinding source path with per-experiment chaos service accounts and namespace-scoped RoleBindings (2026-08-31, uncommitted)
+
+### Context
+
+Follow-up to §96 and the user's sandboxing concern. The live §96 unblock created a broad
+`ClusterRoleBinding` from `itbench/litmus-admin` to a ClusterRole, which allowed the fault runner to
+touch matching resources in any namespace. That fixed `bookinfo`, but it violates ACE's sandbox model:
+faults should be authorized only for the namespaces targeted by that experiment/run, not for the whole
+cluster.
+
+### Fix
+
+| File | Change | Why |
+|------|--------|-----|
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/handler.go` | Added per-run service-account helpers. Manual workflow runs derive `ace-chaos-<notify_id>`; cron workflows derive a stable `ace-chaos-<experiment_id>`. Added a shared `ace-per-experiment-chaos-runner` ClusterRole containing namespaced Litmus/app workload permissions, explicitly omitting broad cluster-scoped node/priorityclass rules. | Keeps the permission *rules* reusable while moving grants to namespace-scoped RoleBindings. |
+| same | At run submission time, while each ChaosEngine artifact is already being decoded/mutated, GraphQL now resolves `spec.appinfo.appns`, sets `spec.chaosServiceAccount` to the per-run/per-experiment service account, and collects exactly those target namespaces. | The fault runner identity is no longer the shared `litmus-admin`; its target namespace set comes from the actual run manifest. |
+| same | Before submitting the workflow, GraphQL creates/updates the per-run ServiceAccount in the infra namespace, creates the target namespaces if absent, and creates RoleBindings only in the infra namespace plus the collected target namespaces. Each RoleBinding references the shared ClusterRole but is namespace-scoped. | Allows `itbench/<per-run-sa>` to run Litmus internals in `itbench` and act only in the app namespaces declared by that run's ChaosEngines. |
+| same | On terminal experiment events, GraphQL best-effort deletes RoleBindings labeled for that per-run SA across namespaces and deletes the ServiceAccount from the infra namespace. | Prevents one-run identities/bindings from accumulating. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/handler/per_experiment_rbac_test.go` (**new**) | Tests deterministic DNS-safe SA names, namespace de-duplication, cleanup labels, and the rule set containing deployment scale/list permissions while excluding node/priorityclass cluster-scoped access. | Locks the sandboxing shape without importing `client-go` fake-client dependencies. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_infrastructure/model/mocks/service.go` | Added missing `StartFinalizerWatcher` / `StopFinalizerWatcher` mock methods. | Existing handler package tests no longer compiled because the mock had drifted from the interface. |
+| `scripts/setup.sh` | Removed the §96 setup-time `ensure_litmus_admin_cluster_rbac()` function and its calls from both deploy paths. | Future setup/restart no longer reapplies the broad `litmus-admin` ClusterRoleBinding. |
+
+### Verification
+
+- `bash -n scripts/setup.sh` — clean.
+- `go test ./pkg/chaos_experiment_run/handler ./utils ./pkg/chaos_experiment/ops` — clean.
+- `go build ./pkg/chaos_experiment_run/handler` — clean.
+- Confirmed `scripts/setup.sh` no longer contains `ensure_litmus_admin_cluster_rbac`, `litmus-admin ClusterRole/ClusterRoleBinding applied`, or `service-accounts/litmus-admin-rbac.yaml` apply hooks.
+- Confirmed the accidental `go.sum` additions from an abandoned fake-client test approach were removed (`git -C AgentCert diff -- chaoscenter/graphql/server/go.sum` empty).
+
+### Durability / Operational Note
+
+Durable in source, but **not active in the live cluster until GraphQL is rebuilt and redeployed**. The
+current live cluster still has the broad `clusterrolebinding/litmus-admin` applied from §96; do not
+delete it before the rebuilt GraphQL service is running, or already-saved experiments launched through
+the old GraphQL image will fall back to `litmus-admin` and fail again. Once the new GraphQL image is
+active, delete the live broad binding (`kubectl delete clusterrolebinding litmus-admin`) and rerun `q`;
+new runs should create per-run `ace-chaos-*` ServiceAccounts and namespace-scoped RoleBindings only in
+`itbench` plus the run's target app namespace(s).
+
+### Status
+
+Uncommitted source change. No live Kubernetes mutation was made for this entry.
+
+
+## 100. `q` Bookinfo run failed after RBAC was fixed because the Bookinfo chart ignored the requested sandbox namespace; `install-app` now maps `-namespace` into chart namespace values (2026-08-31, uncommitted)
+
+### Symptom
+
+After §99's per-experiment service account fix was onboarded enough for a new `q` run to use
+`Service Account Name=ace-chaos-095632f6-7e3d-4c45-860d-dafa4995dee6`, the
+`scaled-to-zero-kubernetes-workload` fault no longer failed with `Forbidden`. It failed later with:
+
+`Chaos injection failed, err: no deployments found in ns=bookinfo matching label app=details`.
+
+### Root cause
+
+The selector was right but the namespace was wrong. Live cluster state showed real Bookinfo workloads
+in `book-info`:
+
+- `book-info/details-v1` labels included `app=details,version=v1`
+- `bookinfo` namespace existed but had no workloads
+- Helm release `bookinfo` was installed in namespace `bookinfo`
+
+The stored `q` workflow passed `install-application` args `-folder=bookinfo -namespace=bookinfo`, and
+the ChaosEngine targeted `appns: bookinfo`, `applabel: app=details`. But the Bookinfo Helm chart's
+default values render app resources into `namespaces.bookInfo: book-info` regardless of the Helm
+release namespace. So the workflow's intended sandbox namespace (`bookinfo`) diverged from the chart's
+internal workload namespace (`book-info`). The same class could affect other ACE app charts with
+internal namespace values (`namespaces.sockShop`, `namespaces.otelDemo`) if a workflow asks to install
+them into a non-default namespace.
+
+### Fix
+
+| File | Change | Why |
+|------|--------|-----|
+| `app-charts/install-app/main.go` | Added `applyNamespaceSetDefaults(config)` before Helm arg generation. For known ACE app charts, it appends `--set namespaces.bookInfo=<namespace>`, `--set namespaces.otelDemo=<namespace>`, or `--set namespaces.sockShop=<namespace>` based on `-folder`, unless the caller already supplied that exact key. | Makes `install-app -namespace X` mean both "install the Helm release into X" and "render the app workloads into X" for ACE's app charts. Preserves explicit caller overrides. |
+| `app-charts/install-app/main_test.go` (**new**) | Covers Bookinfo, OTel Demo, Sock Shop namespace injection, explicit override preservation, and unknown-chart no-op. | Prevents this namespace split from recurring silently. |
+
+### Live action
+
+After explicit user confirmation, rebuilt and loaded only the affected helper image:
+
+`docker build -t agentcert/agentcert-install-app:latest -f app-charts/install-app/Dockerfile app-charts`
+`kind load docker-image agentcert/agentcert-install-app:latest --name agentcert-alfred`
+
+New image ID loaded into KinD: `sha256:0707cfcde761b10cb4aabd579b4b605fe7245b00c196e5057ac3f24782b372c9`.
+
+### Verification
+
+- `cd app-charts/install-app && go test ./...` — clean.
+- Dry-run from rebuilt image:
+  `install-app -folder=bookinfo -namespace=bookinfo -dry-run` logged
+  `helm upgrade --install bookinfo /charts/bookinfo --namespace bookinfo --set namespaces.bookInfo=bookinfo --dry-run --timeout 20m`.
+- Live cluster inspection before fix showed `details-v1` in `book-info` and no workloads in `bookinfo`, matching the failure.
+
+### Status
+
+Uncommitted source change plus live image rebuild/load done. `q` has not yet been rerun after this image load. The existing Helm release `bookinfo` in namespace `bookinfo` currently owns the previous chart render; the next `q` run's `helm upgrade --install` should render Bookinfo into `bookinfo` and remove/update the old `book-info` objects as part of the release upgrade.
+
+## 101. The `q` ITBench experiment produced zero agent LLM traces in Langfuse (only workflow-lifecycle spans) and a misleading 33.3% resiliency score — root cause is the `sre-agent-comprehensive` image crash-looping on two import-time bugs in its own committed source, so the agent never runs; the 33.3% is an unrelated fault-accounting artifact (2026-09-01, uncommitted)
+
+### Symptom
+
+User ran the `q` ITBench experiment (agent `sre-agent-comprehensive`, app `bookinfo`, cluster
+`agentcert-alfred`, namespace-scoped `itbench` infra) several times and observed **no Langfuse
+trace** for any run — including a run launched mid-investigation. Separately asked why the same
+experiment's **resiliency score is 33.3%**.
+
+### Part A — no agent traces
+
+- `db.chaosExperimentRuns` had 5 `q` runs; certifier `workspace/<exp>/<run>/fault-bucketing/*/`
+  existed for 4 of them. Every `pipeline_summary.json`: `total_faults: 3, faults_extracted: 0,
+  fault_results: []`.
+- Each run's Langfuse `raw_trace.json` (~35 KB) held **15 SPAN + 1 EVENT nodes, all
+  `workflow-step:` / `fault:` / `experiment_context` / `completion: q`** — emitted by the GraphQL
+  server's `observability.LangfuseTracer` from Argo workflow events. **Zero `GENERATION`
+  spans.**
+- `kubectl logs -n ace deploy/litellm --since=48h | grep -c chat/completions` → **0**. LiteLLM
+  never received a single request, so its `success_callback: ["langfuse"]` never fired. (LiteLLM's
+  own langfuse wiring is fine: `callbacks/success_callback/failure_callback: ["langfuse"]` in
+  `litellm-config`, `LANGFUSE_HOST` + `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY` all present via
+  the `ace-env` secret / `envFrom`.)
+- The live run's agent pod (`sre-agent-comprehensive-<hash>`, namespace `bookinfo`) was
+  `CrashLoopBackOff`, container `agent` (not `sre-agent-comprehensive` — that's the pod name),
+  4+ restarts:
+  ```
+  File "/sre-agent-comprehensive/src/sre_comprehensive/crew.py", line 18, in <module>
+      from mcp_tools import get_all_tools
+  ModuleNotFoundError: No module named 'mcp_tools'
+  ```
+  The `agent-sidecar` container comes up fine (`:4001 -> litellm.ace...:14000 mode=openai-metadata`)
+  and just waits — nothing ever calls it.
+
+Root cause: **two import-time bugs in committed source**
+(`agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py`, both present at HEAD `39ad013`):
+
+1. **`crew.py:18`** — `from mcp_tools import get_all_tools`. The package is installed via
+   `pip install -e .` with `pyproject.toml` `packages = ["src/sre_comprehensive"]` and the
+   entrypoint is `python -m sre_comprehensive`, so the sibling module is importable **only** as
+   `sre_comprehensive.mcp_tools`, never top-level `mcp_tools`. `__main__.py:26` already uses the
+   correct relative form (`from .crew import build_crew`); `crew.py` didn't.
+2. **`crew.py` last line** — a bare, unindented, unguarded `build_crew()` call at module scope.
+   Importing `crew.py` (which `__main__.py` does) immediately invokes `build_crew()` with no args
+   → `TypeError: build_crew() missing 4 required positional arguments`. This was masked by bug 1
+   (import died at line 18 first). Surfaced the moment bug 1 was fixed.
+
+Because both are import-time, **this image has never once started successfully** — every `q` run
+installed the agent, the agent crash-looped for the whole fault window, and the only Langfuse
+activity was the control-plane's own workflow spans.
+
+**Fix**
+
+| File | Change |
+|------|--------|
+| `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py:18` | `from mcp_tools import get_all_tools` → `from .mcp_tools import get_all_tools` |
+| `agents/sre-agent-comprehensive/src/sre_comprehensive/crew.py` (EOF) | Deleted the trailing module-level `build_crew()` call |
+
+Then rebuilt + reloaded the image (this agent is `INSTALL_AGENT`-independent; its
+`*_IMAGE_SOURCE` is `local` per `setup.sh` L894 / `prepare-images.sh` `build_and_load_sre_agent`):
+```
+docker build --network=host -t agentcert/sre-agent-comprehensive:latest \
+  -f agents/sre-agent-comprehensive/Dockerfile agents/sre-agent-comprehensive
+kind load docker-image agentcert/sre-agent-comprehensive:latest --name agentcert-alfred
+```
+
+**Verification**
+
+- `python3 -m py_compile src/sre_comprehensive/{crew,mcp_tools,__main__}.py` — clean.
+- In the rebuilt image:
+  `docker run --rm --entrypoint python agentcert/sre-agent-comprehensive:latest -c
+  "import sre_comprehensive.__main__; from sre_comprehensive.crew import build_crew;
+  from sre_comprehensive.mcp_tools import get_all_tools; print('ALL IMPORTS OK')"` → `ALL IMPORTS OK`.
+- Node has the new image: `crictl images | grep sre-agent-comprehensive` present; chart
+  `values.yaml` `agent.containerImage.pullPolicy: IfNotPresent`, so the next `q` run uses the
+  kind-loaded build rather than the stale Docker Hub `:latest`.
+- Not yet re-run end-to-end — the next `q` run should now show the agent's ReAct/LLM turns in
+  LiteLLM logs and `GENERATION` spans in Langfuse.
+
+**Durability**
+
+Source fixes land in the checked-in `agents/sre-agent-comprehensive/` tree; a from-scratch
+`setup.sh` with this agent's image source = `local` rebuilds from that source + `kind load`
+(`prepare-images.sh` `build_and_load_sre_agent`), so a fresh environment picks up the fix. The
+manual `docker build` + `kind load` this session is the live bridge for the current cluster.
+Docker Hub `agentcert/sre-agent-comprehensive:latest` is still the broken build — anyone setting
+this agent's image source to `dockerhub` would get the crash-loop; a `build-and-push.sh` publish
+is the follow-up if that path is ever used.
+
+### Part B — why the resiliency score is 33.3%
+
+`db.chaosExperimentRuns` for the one `Completed` `q` run: `resiliency_score: 33.33,
+faults_passed: 1, faults_failed: 2, total_faults: 3`. Its `execution_data` has **3 nodes of type
+`ChaosEngine`**, each `weight: 10`:
+
+| ChaosEngine node | `chaosData` verdict |
+|------------------|---------------------|
+| `scaled-to-zero-kubernetes-workload-mol` (the real fault) | **Pass** |
+| `uninstall-agent-wgy` | **Fail** |
+| `uninstall-application-chn` | **Fail** |
+
+`resiliency_score = Σ(passed weights) / Σ(all weights) = 10 / 30 = 33.33%`.
+
+- **Why the uninstall steps count as faults:** they are authored as `kind: ChaosExperiment` in
+  `chaos-charts/faults/kubernetes/uninstall-{agent,application}/` and invoked via ChaosEngine CRDs
+  in the Argo workflow, identical in shape to a real fault. ChaosCenter's `chaos_experiment_run`
+  resiliency math counts **every** ChaosEngine node in the run; it has no "teardown fault"
+  concept. The *setup* steps (`install-application`, `install-agent`) escape the count only
+  because they were modeled as plain Argo `Pod` steps, not ChaosEngines — an authoring
+  inconsistency in the ITBench workflow. (Continuation of the "`uninstall-*` modeled as faults"
+  theme in §91/§93/§96.)
+- **Why the uninstall steps get a `Fail` verdict:** the `uninstall-agent` / `uninstall-application`
+  ChaosExperiments run the ACE helm-wrapper binary (`image: agentcert/agentcert-install-agent`,
+  `command: /usr/local/bin/install-agent -delete -folder=… -namespace=…`), which is **not** built
+  on the LitmusChaos experiment SDK — `agent-charts/install-agent/main.go` has zero references to
+  `chaosresult` / `verdict` / `litmuschaos.io` / `ExperimentStatus`. It does its `helm uninstall`
+  and exits 0 but **never creates or updates a ChaosResult with `verdict: Pass`**. Confirmed:
+  `kubectl get chaosresult -n itbench` shows results **only** for `scaled-to-zero-*` — none exist
+  for `uninstall-agent` / `uninstall-application`. With no ChaosResult reporting success, the
+  chaos-operator finalizes the engine non-Pass and ChaosCenter records `chaosData: Fail`.
+- **Net:** the 33.3% conflates "did the agent keep the app healthy under fault" with "did the
+  harness's own cleanup emit a litmus Pass verdict" (which it structurally never can). For this
+  run it also means nothing about agent behaviour — the agent never ran (Part A). The other 4
+  `q` runs show `resiliency_score: 0` because `scaled-to-zero` itself errored those times
+  (ChaosResult `verdict: Error`).
+
+Not fixed this session (no code change for Part B). Options: exclude `uninstall-*` ChaosEngines
+from the resiliency tally (mark `faults_na`), or stop modeling teardown as ChaosExperiments and
+run it as plain `Pod` steps like `install-*`.
+
+### Status
+
+Uncommitted. 1 file edited (`crew.py`, 2 hunks) + live image rebuild/`kind load` into
+`agentcert-alfred`. `q` not yet re-run. Part B is diagnosis only.
+
+## 102. Resolved §101 Part B — ITBench teardown steps (`uninstall-agent` / `uninstall-application`) no longer count toward the resiliency score (2026-09-01, uncommitted)
+
+### Decision
+
+Implemented "Option C" from the §101 follow-up discussion: **teardown is harness plumbing, not a
+graded fault** — so the scoring path in the GraphQL server now excludes it, rather than rewriting
+the teardown steps as litmus-go SDK experiments (Option A) or hand-rolling the ChaosResult
+lifecycle in the helm-wrapper binary (Option B).
+
+### Root cause recap (see §101 Part B for the full trace)
+
+`chaos_experiment_run.ProcessCompletedExperimentRun` computes
+`resiliency_score = Σ(weight × probeSuccessPercentage) / Σ(weight)` where the weight set comes
+from `revision.Weightages`. `processExperimentManifest` in `chaos_experiment/ops/service.go`
+force-stamps a `weight` label + a `Weightages` entry on **every** template carrying a ChaosEngine
+artifact — including the two teardown steps a Chaos Studio user adds from the ChaosHub. The
+teardown steps always get verdict `Fail` (their helm-wrapper binary never writes a `Pass`
+ChaosResult), so for `q`: `weightSum = 30`, only `scaled-to-zero` contributes
+(`10 × 100`), `1000 / 30 = 33.33`. The `faults_passed` / `faults_failed` counters in the same
+function iterate **all** ChaosEngine nodes unconditionally, so they also miscounted (`2` failed).
+
+### Fix
+
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/graphql/server/utils/faults.go` | New `IsTeardownExperiment(name string) bool` + unexported `teardownExperimentNames` map (`uninstall-agent`, `uninstall-application`). Matches the exact ChaosExperiment name, a Chaos Studio `generateName` (`uninstall-agent-wgy`), and a runtime ChaosEngine name (`uninstall-agent-wgy-3f9c2`) — exact match or any `"<teardown>-"` prefix. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/service.go` (`ProcessCompletedExperimentRun`) | (a) skip teardown `FaultName`s when building `weightMap` / `weightSum` from `rev.Weightages` — so an already-stored revision that still lists them is handled at compute time, no DB migration needed; (b) restructured the node loop: a ChaosEngine node whose `EngineName` is a teardown name, or that matches no weighted fault, is now `continue`d **before** the verdict tallies — so teardown `Fail` verdicts no longer inflate `faults_failed` and `TotalExperiments` (`= len(weightMap)`) is correct. |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` | In `processExperimentManifest`, `processCronExperimentManifest`, and `UpdateRuntimeCronWorkflowConfiguration`: when a template's ChaosEngine artifact resolves to a teardown experiment (`meta.GenerateName` or `meta.Spec.Experiments[0].Name`), `delete` any stale `weight` label and `continue` — so a freshly saved/run experiment never puts teardown into `Weightages` in the first place. |
+| `AgentCert/chaoscenter/graphql/server/utils/misc_test.go` | `TestIsTeardownExperiment` — 9 cases (exact names, generateName, runtime name, real faults, `install-agent`, empty, near-miss `uninstall-agentx`). `gofmt -w` also re-aligned the pre-existing `TestSplit` struct (unrelated, cosmetic). |
+| `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment_run/service_test.go` | `Test_chaosExperimentRunService_ProcessCompletedExperimentRun_ExcludesTeardown` — stubs a revision whose `Weightages` still contains both teardown steps + a run with 3 ChaosEngine nodes (real fault Pass@100, two teardown Fail@0); asserts `ResiliencyScore == 100`, `TotalExperiments == 1`, `ExperimentsPassed == 1`, `ExperimentsFailed == 0`. |
+
+### What this deliberately does NOT do
+
+- **No litmus-go SDK experiment for teardown** (Option A) — the `uninstall-*` ChaosExperiment
+  CRDs in `chaos-charts/faults/kubernetes/` are left as-is; they still work, they're just not
+  graded. Removing them from the ChaosHub fault picker + giving Chaos Studio a first-class
+  "teardown step" (symmetric to its existing `install-agent`/`install-application` fixed-name
+  steps in `web/.../KubernetesYamlService.ts`) is a larger frontend change, filed as follow-up.
+- **No DB migration for `q`.** An earlier draft of this change staged a `q`-specific mongosh
+  script to strip the teardown entries from the stored revision's `weightages`; deleted as
+  needless — the `ProcessCompletedExperimentRun` filter makes any stored `Weightages` (old or
+  new) score correctly on the next run, and `processExperimentManifest` cleans the array on the
+  next save. The 5 historical `q` run docs keep their recorded `33.33`/`0` — a faithful record
+  of what the buggy build produced; re-run `q` for a correct score.
+
+### Verification performed
+
+- `go build ./...` — clean.
+- `go test ./pkg/chaos_experiment_run/... ./pkg/chaos_experiment/... ./utils/...` — all pass
+  (incl. both new tests + the pre-existing `ProcessCompletedExperimentRun` / ops / fuzz suites).
+- `gofmt`: new/edited hunks clean. `utils/faults.go`, `chaos_experiment_run/service.go`,
+  `service_test.go` were **already CRLF** at HEAD (like other files in this tree, e.g.
+  `pkg/probe/handler/handler.go`) and stay CRLF — new lines match each file's existing endings;
+  not converting to LF to avoid a whole-file diff fighting the repo's existing state.
+- Traced the score path end-to-end: `ProcessCompletedExperimentRun` (service.go:127) is the
+  single computation site, called from `handler.go:3088` on run completion; result flows to the
+  run + experiment docs (`handler.go:3462/3536/3557`). No second path.
+
+### Durability
+
+Durable in checked-in AgentCert source. **Requires a GraphQL-image rebuild + redeploy to take
+effect** — `./scripts/setup.sh --restart --local-build` (plain `--restart` does not rebuild Go
+images, per CLAUDE.md §6). Until then the running cluster keeps scoring teardown steps. Not
+committed/pushed to the AgentCert org repo yet (same submodule constraint as §27/§31/§96/§97).
+
+### Status
+
+Uncommitted. 3 source files + 2 test files under `AgentCert/chaoscenter/graphql/server/`.
+GraphQL image not rebuilt/redeployed this session. Next `q` run after
+`setup.sh --restart --local-build` should score only `scaled-to-zero` (teardown excluded).
+
+---
+
+## 103. `setup.sh` local-image build-log directory is now overridable via `ACE_BUILD_LOG_DIR` (2026-09-01, uncommitted)
+
+### Why
+
+When `setup.sh` builds component images locally (`--local-build`, or any
+`*_IMAGE_SOURCE=local` / `PLATFORM_IMAGE_SOURCE=local`), it prints e.g.:
+
+```
+Building 12 image(s), up to 6 at a time — per-image logs: /Innovation/home/alfred02.TRN/ace-monorepo/.tmp/build-logs/
+```
+
+That path was `"${REPO_ROOT}/.tmp/build-logs"` — not an absolute hardcode (it
+tracks whichever checkout `setup.sh` runs from), but the `.tmp/build-logs`
+location under the checkout root had no override. A checkout whose root sits on
+a cramped filesystem had no clean way to send the (verbose, per-image, wiped and
+recreated on every build) logs elsewhere without editing the script — the same
+shape as the already-existing `ACE_KIND_LOAD_TMPDIR` escape hatch for kind-load
+temp space.
+
+### Fix
+
+| File | Change |
+|------|--------|
+| `scripts/setup.sh` (~L3553, local-build block) | `_BUILD_LOG_DIR` now resolves `ACE_BUILD_LOG_DIR` from the environment first, then from `.env` via the existing `cur()` helper, then falls back to `${REPO_ROOT}/.tmp/build-logs`. Because the resolved dir is `rm -rf`'d and recreated on every build, a guard rejects unsafe values back to the default: empty, `/`, `$HOME`, `$REPO_ROOT` itself, or any non-absolute path — each emits a `warn` and uses the in-checkout default instead. Trailing slash is stripped before the check. |
+| `.env.example` (after `PLATFORM_IMAGE_SOURCE`) | New "Local image build tuning (optional)" block documenting `ACE_BUILD_LOG_DIR` (empty by default = in-checkout `.tmp/build-logs`) and, for completeness, the pre-existing-but-undocumented `ACE_BUILD_PARALLELISM` (default `nproc/2`, clamped 1..6). |
+| `.env` (this host only) | `ACE_BUILD_LOG_DIR=/Innovation/home/alfred02.TRN/ace-monorepo/.tmp/build-logs` — pinned to the current location so behaviour on this box is unchanged, per the request that prompted this. |
+
+`prepare-images.sh` has its own separate `log_dir`
+(`${REPO_ROOT}/.tmp/litmus-pull-logs`) for the litmus helper-image pull step —
+left as-is this session; only the `setup.sh` build-log path was asked about.
+
+### Verification performed
+
+- `bash -n scripts/setup.sh` — clean.
+- Extracted the resolution + guard logic and ran it against 6 inputs (empty,
+  the in-checkout default, a relative path, `/`, `$HOME`, an absolute path with
+  a trailing slash): unsafe/relative inputs fall back to the default, valid
+  absolute paths pass through with the trailing slash trimmed.
+
+### Durability
+
+Durable — the override and its guard live in checked-in `scripts/setup.sh` and
+`.env.example`, so a fresh checkout on any host picks up both the new env var and
+its documentation. The `.env` line is this-host-only local state (as intended);
+a from-scratch setup elsewhere gets the in-checkout default until someone sets
+the var. Durability check: confirmed the logic is in `scripts/setup.sh` itself
+(not a live/manual patch) and that `.env.example` — the template a fresh clone
+copies — carries the new block.
+
+### Status
+
+Uncommitted. `scripts/setup.sh` + `.env.example` changed; `.env` updated on this
+host only. No image rebuild needed (the change only affects where logs land the
+next time `setup.sh` builds locally).
+
+## 104. `uninstall-agent` / `uninstall-application` rebuilt as real litmus-go SDK experiments — they now emit `Pass` ChaosResults instead of always `Fail`, and `uninstall-application` is now a complete namespace teardown (2026-09-01, uncommitted)
+
+### Motivation
+
+Follow-up to §102. §102 stopped the teardown steps from *counting* toward the resiliency
+score; this makes them *pass* — so the ChaosCenter run graph shows them green rather than a
+misleading red — and closes the "`uninstall-all` doesn't delete the app namespace" gap the
+teardown-comparison surfaced (§101 discussion thread). The teardown steps ran the ACE
+helm-wrapper binaries (`install-agent -delete`, `install-app -delete -delete-namespace`),
+which are not built on the litmus-go experiment SDK and never write a ChaosResult, so the
+chaos-operator finalized every run `Fail`/`0%` regardless of outcome.
+
+### Approach
+
+Real `bin/itbench-experiment` switch-dispatched SDK experiments (same shape as
+`scaled-to-zero-kubernetes-workload`, §… / `faults/itbench/`), so they get the full
+`pkg/itbench/common.Run` lifecycle — SOT/EOT `result.ChaosResult`, `Verdict = Passed` on a
+clean `inject()`, events. Teardown is done in pure client-go (the `itbench-experiment` image
+is `distroless/static` — no `helm`, no shell): a dependency-free stand-in for `helm
+uninstall`.
+
+| File | Change |
+|------|--------|
+| `litmus-go/pkg/itbench/common/teardown.go` (**new**) | `UninstallHelmRelease(ctx, kube, dyn, release, ns)` — sweeps a fixed GVR set (all kinds an ACE agent/app chart can create, namespaced + cluster-scoped `ClusterRole`/`ClusterRoleBinding`), deleting objects that carry Helm 3's `app.kubernetes.io/managed-by=Helm` label **and** `meta.helm.sh/release-name=<release>` annotation, plus Helm's own `sh.helm.release.v1.<release>.vN` state Secrets. Missing APIs tolerated (`isMissingAPI`). Per-object deletes best-effort; only a wholesale list failure errors. `DeleteNamespace(ctx, kube, ns)` — deletes the namespace (cascades to everything), NotFound-tolerant. Helpers take `kubernetes.Interface` / `dynamic.Interface` (not `clients.ClientSets`, whose concrete `*kubernetes.Clientset` can't be faked) so they're unit-testable. |
+| `litmus-go/experiments/itbench/uninstall-agent/experiment/experiment.go` (**new**) | `inject` = `UninstallHelmRelease(FOLDER, NAMESPACE)`. Release-scoped (the agent usually shares the app namespace). |
+| `litmus-go/experiments/itbench/uninstall-application/experiment/experiment.go` (**new**) | `inject` = `UninstallHelmRelease` (non-fatal, catches cluster-scoped objects a namespace delete misses) **then** `DeleteNamespace(NAMESPACE)`. Two-stage → complete teardown regardless of what ran/succeeded: fault leftovers (NetworkPolicies, patched workloads), orphaned PVCs, leftover ChaosEngine/ChaosResult CRs, a half-installed agent release all go with the namespace. |
+| `litmus-go/bin/itbench-experiment/main.go` | 2 imports + 2 switch cases (`uninstall-agent`, `uninstall-application`). Imports appended at the block end matching the file's existing switch-case-ordered (non-gofmt-sorted) import convention. |
+| `litmus-go/pkg/itbench/common/teardown_test.go` (**new**) | `TestIsMissingAPI` (6 cases), `TestDeleteNamespace` (delete / idempotent-absent / empty-arg via `k8sfake`), `TestUninstallHelmRelease` (release-owned Deployment + its state Secret deleted; a different release's Deployment and an unrelated Secret survive — via `dynamicfake` + `k8sfake`). |
+| `chaos-charts/faults/kubernetes/uninstall-agent/fault.yaml` + `.../uninstall-application/fault.yaml` | `image` → `agentcert/itbench-experiment:dev`, `command` → `/itbench-experiment`, `args` → `-name <exp>`, `imagePullPolicy: Always` → `IfNotPresent` (also closes the §96/§98 phantom-pull risk for these two), `env` trimmed to `FOLDER`/`NAMESPACE` (SDK ignores the old `TIMEOUT`/`DELETE_NAMESPACE` — `uninstall-application` always deletes the ns now, matching the old hardcoded `-delete-namespace`), `permissions` rewritten to the SDK set + list/delete on every swept GVR. `description.message` rewritten (SDK-backed, like `scaled-to-zero`'s). |
+| `chaos-charts/faults/kubernetes/experiments.yaml` | Same two ChaosExperiment blocks re-synced (this aggregated file is what the deployed ChaosHub syncs from — must match the per-fault `fault.yaml`s, per §91). Verified: 35 `ChaosExperiment` docs / 71 `---` separators unchanged, `yaml.safe_load_all` clean. |
+| `chaos-charts/faults/kubernetes/uninstall-{agent,application}/engine.yaml` | Sample ChaosEngines updated to the `FOLDER`/`NAMESPACE`-only env + corrected comments. Reference-only files. |
+
+### Verification performed
+
+- `cd litmus-go && go build ./...` — clean. `go vet ./pkg/itbench/... ./experiments/itbench/uninstall-*/... ./bin/itbench-experiment/...` — clean.
+- `go test ./pkg/itbench/common/` — pass (3 new tests + existing). Logs show the sweep deleting only the release-owned Deployment + its state Secret, leaving the other release's Deployment and the unrelated Secret.
+- Built the `itbench-experiment` binary and ran `-name uninstall-agent` — dispatches to the new case (then exits on no-kubeconfig, as expected off-cluster).
+- `gofmt -l` clean on the 4 new Go files. `main.go` left matching the file's pre-existing (already non-gofmt-sorted) import order.
+- YAML: both `fault.yaml`s + `experiments.yaml` parse; doc/separator counts unchanged.
+
+### Durability
+
+- litmus-go: `scripts/prepare-images.sh` `build_and_load_itbench_experiment` (`ITBENCH_EXPERIMENT_IMAGE_SOURCE` defaults to `local`) does `docker build -f build/Dockerfile.itbench` (`COPY . . && go build ./bin/itbench-experiment`) + `kind load` — a from-scratch `setup.sh` compiles the new experiments into `agentcert/itbench-experiment:dev` automatically.
+- chaos-charts: the deployed ChaosCenter's ChaosHub syncs `faults/kubernetes/` from the **AgentCert org** repo / tracked branch (`DEFAULT_HUB_GIT_URL`). These edits are local + uncommitted on `feature/itbench-scenarios` — they must be pushed to `AgentCert/chaos-charts` before a deployed run's `install-chaos-faults` step installs the new ChaosExperiment CRDs (same constraint as §27/§31/§96). Until pushed, a live `q` run still installs the old helm-wrapper CRDs.
+- litmus-go submodule currently at `d6d18fcc`; these are working-tree changes, not yet committed to the submodule.
+
+### Interaction with §102
+
+Independent and additive. §102 makes teardown not count; §104 makes it pass. With both, a `q`
+run shows `uninstall-agent`/`uninstall-application` as green ChaosResults that don't affect the
+score, and `uninstall-application` leaves the app namespace actually gone.
+
+### Status
+
+Uncommitted. 4 new Go files + 1 edited (`main.go`) in `litmus-go/`; 4 `fault.yaml`/`engine.yaml`
++ `experiments.yaml` in `chaos-charts/`. No image built/loaded this session — needs
+`prepare-images.sh` (or `setup.sh`) to rebuild `itbench-experiment`, and the chaos-charts edits
+pushed to the AgentCert org repo before a deployed run picks them up.

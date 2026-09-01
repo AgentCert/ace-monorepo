@@ -1622,10 +1622,10 @@ if app_src:
         sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
         sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Never"
     else:
-        # "dockerhub": genuinely want the registry copy, so IfNotPresent (pull
-        # once, reuse thereafter) is correct and intentional here.
+        # "dockerhub": production/default mode genuinely wants the registry copy
+        # and should refresh the public :latest tag at run time.
         sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
-        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "IfNotPresent"
+        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Always"
 
 if agent_src:
     sets["INSTALL_AGENT_IMAGE_SOURCE"] = agent_src
@@ -1640,7 +1640,7 @@ if agent_src:
         sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Never"
     else:
         sets["INSTALL_AGENT_IMAGE"]             = "agentcert/agentcert-install-agent:latest"
-        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "IfNotPresent"
+        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Always"
 
 if litmus_src:
     sets["LITMUS_IMAGES_SOURCE"] = litmus_src
@@ -3550,7 +3550,27 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         (( _BUILD_PARALLELISM_DEFAULT < 1 )) && _BUILD_PARALLELISM_DEFAULT=1
         (( _BUILD_PARALLELISM_DEFAULT > 6 )) && _BUILD_PARALLELISM_DEFAULT=6
         _BUILD_PARALLELISM="${ACE_BUILD_PARALLELISM:-${_BUILD_PARALLELISM_DEFAULT}}"
-        _BUILD_LOG_DIR="${REPO_ROOT}/.tmp/build-logs"
+        # Per-image build-log location. Overridable so a host whose checkout
+        # root is on a small/cramped filesystem can send these elsewhere
+        # (CLAUDE.md §0.1: encode host-specific variability rather than
+        # hardcoding an observed path): ACE_BUILD_LOG_DIR in the environment
+        # wins, then the same key in .env, then the in-checkout default. Must
+        # be an absolute path — the resolved dir is wiped and recreated on
+        # every build, so a handful of obviously-catastrophic values (/,
+        # $HOME, the repo root itself, a bare relative name) are rejected
+        # back to the default rather than rm -rf'd.
+        _BUILD_LOG_DIR="${ACE_BUILD_LOG_DIR:-$(cur ACE_BUILD_LOG_DIR)}"
+        _BUILD_LOG_DIR="${_BUILD_LOG_DIR:-${REPO_ROOT}/.tmp/build-logs}"
+        _BUILD_LOG_DIR="${_BUILD_LOG_DIR%/}"
+        case "${_BUILD_LOG_DIR}" in
+            ""|/|"${HOME}"|"${REPO_ROOT}")
+                warn "ACE_BUILD_LOG_DIR resolves to an unsafe path ('${_BUILD_LOG_DIR}') — it is wiped on every build; using ${REPO_ROOT}/.tmp/build-logs instead"
+                _BUILD_LOG_DIR="${REPO_ROOT}/.tmp/build-logs" ;;
+            /*) : ;;
+            *)
+                warn "ACE_BUILD_LOG_DIR='${_BUILD_LOG_DIR}' is not an absolute path — using ${REPO_ROOT}/.tmp/build-logs instead"
+                _BUILD_LOG_DIR="${REPO_ROOT}/.tmp/build-logs" ;;
+        esac
         _BUILD_RESULTS_DIR="$(mktemp -d "${REPO_ROOT}/.tmp/build-results.XXXXXX")"
         rm -rf "${_BUILD_LOG_DIR}"; mkdir -p "${_BUILD_LOG_DIR}"
 

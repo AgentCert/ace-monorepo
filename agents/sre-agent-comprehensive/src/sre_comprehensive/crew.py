@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import litellm
 from crewai import Agent, Crew, LLM, Task
 
-from mcp_tools import get_all_tools
+from .mcp_tools import get_all_tools
 
 # ---------------------------------------------------------------------------
 # Output schema shared by ITBench evaluators
@@ -463,4 +463,3 @@ def build_crew(
         tasks=[task],
         verbose=True,
     )
-build_crew()

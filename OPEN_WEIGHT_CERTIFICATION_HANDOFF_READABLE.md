@@ -2463,3 +2463,19 @@ Durability check: the litmus-go side is durable — a from-scratch setup rebuild
 This stacks with §102: with both in place, a run shows the teardown steps green, they don't touch the score, and the app namespace is actually gone afterwards.
 
 Status: uncommitted. Four new Go files plus one edited in litmus-go; the two fault definitions (and their aggregated copy and sample engines) in chaos-charts. No image built or deployed this session.
+
+## §105 — All the pending certification work is now committed (2026-09-01)
+
+The accumulated in-progress work from the last several sessions (§93 through §104) was committed — one clean commit per concern per repo, all on the `feature/itbench-scenarios` branch:
+
+- litmus-go `d6d18fc → 2f6eba8` — the two teardown steps as real SDK experiments (§104)
+- AgentCert `4e4471f → 68b76d4` — per-experiment chaos permissions (§99), the resiliency score no longer counting teardown (§102), the run-graph double-render fix (§97)
+- app-charts `7b6e152 → e855a61` — the install-app namespace mapping (§100)
+- chaos-charts `fae5dfd → 66ba492` — the image pull policy default (§98) and the teardown fault definitions repointed at the SDK binary (§104)
+- ace-monorepo (top level) `bbc7e10 → fca469a` — the agent import-bug fix (§101), the setup-script and env-template changes (§98, §103), the handoff docs, and the four submodule pointer bumps
+
+**Nothing was pushed.** This host's global git config has the GitHub username as `aruscher_dev` (underscore) but the logged-in `gh` account is `aruscher-dev` (hyphen), so git can't authenticate and drops to a password prompt that fails in a non-interactive session. Fixing the config and overriding it per-push were both blocked by the permission system, so the push has to be done by hand.
+
+To finish: fix the username (`git config --global credential.https://github.com.username aruscher-dev`), push the four submodules first (`litmus-go`, `AgentCert`, `app-charts`, `chaos-charts`), then push the top-level repo (which carries two commits — `bbc7e10` was already waiting from before). Then `./scripts/setup.sh --restart --local-build` rebuilds the three affected images; the chaos-charts fault definitions only reach the deployed hub after that repo is pushed, and the existing `q` experiment needs its two teardown steps re-added in Studio to pick up the new versions.
+
+Status: committed locally in all five repos, working trees clean, nothing pushed.

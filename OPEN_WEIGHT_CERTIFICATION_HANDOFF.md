@@ -9573,3 +9573,19 @@ score. **For any scored/certification run these fault-specific heuristics should
 be reverted**, leaving only the mechanism-level parts (working tool loop, correct
 tool names, RBAC, robust parser, generic "don't conclude while the namespace is
 visibly unhealthy"). See memory `feedback_no_benchmark_finetuning`.
+
+### §126 follow-up — retry-spam fix (commit c74b658)
+
+The GPT-5 (`gpt-4o`) Azure rate limit hit during the sweep was almost certainly
+caused by the sweep volume — and made much worse by a defect in `tool_loop.py`:
+the LLM-error handler was `sleep(2); continue` with no cap, so once the endpoint
+started 429ing the agent fired ~900 consecutive failed calls per fault run and
+kept doing it every scan cycle, pinning the endpoint down.
+
+Fixed: classify rate-limit errors, exponential backoff (cap 60s, harder for
+rate-limits), abort after 3 (rate-limit) / 6 (generic) consecutive failures with
+an `_llm_unavailable` flag, and `__main__.py` ends the scan loop on that flag
+instead of retrying. Worst case is now ~3 calls + ~45s vs ~900/fault.
+Image rebuilt: `sha256:6ed76377f318` on the node. Verified at fix time: no sweep
+processes, 0 LiteLLM requests, no agent pods, no crons/monitors — nothing was
+spamming when the fix was made.

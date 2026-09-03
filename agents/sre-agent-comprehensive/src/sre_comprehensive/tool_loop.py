@@ -43,6 +43,14 @@ _TEMPERATURE = float(os.environ.get("SRE_AGENT_TEMPERATURE", "0.2") or "0.2")
 # GPT-5-class models write verbose reasoning; a low cap truncates the final
 # JSON mid-object so it never parses. 6000 leaves room for a full diagnosis.
 _MAX_TOKENS = int(os.environ.get("SRE_AGENT_MAX_COMPLETION_TOKENS", "6000") or "6000")
+# LLM-failure backoff / abort. The agent must NOT spam an endpoint that is down
+# or rate-limiting — a naive `sleep 2; continue` produced ~900 failed calls in a
+# single run against a cooled-down Azure deployment and kept it pinned.
+_LLM_FAIL_CAP = int(os.environ.get("SRE_AGENT_LLM_FAIL_CAP", "6") or "6")
+_RL_FAIL_CAP = int(os.environ.get("SRE_AGENT_RL_FAIL_CAP", "3") or "3")
+_LLM_BACKOFF_BASE = float(os.environ.get("SRE_AGENT_LLM_BACKOFF_BASE", "3") or "3")
+_RL_BACKOFF_BASE = float(os.environ.get("SRE_AGENT_RL_BACKOFF_BASE", "15") or "15")
+_LLM_BACKOFF_MAX = float(os.environ.get("SRE_AGENT_LLM_BACKOFF_MAX", "60") or "60")
 # After this many steps, stop offering tools and demand the final JSON. qwen
 # tends to keep "remediating" an already-healthy workload instead of concluding.
 _FORCE_ANSWER_AFTER = int(os.environ.get("SRE_AGENT_FORCE_ANSWER_AFTER", "16") or "16")
@@ -351,6 +359,7 @@ def run_investigation(
     seen_sigs: set[str] = set()
     stall_streak = 0
     remediation_ok = False
+    consec_llm_fail = 0        # consecutive failed litellm.completion calls
     inspected = False          # get_k8s_resource ever called
     remediated: set[tuple[str, str]] = set()   # (namespace/Kind/name, tool) actually written
     deepdive_nudges = 0        # times we've rejected a premature "nothing wrong"
@@ -386,10 +395,33 @@ def run_investigation(
                 timeout=_LLM_TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001
-            _log(f"tool-loop: LLM call failed at step {step}: {exc}")
-            time.sleep(2)
+            consec_llm_fail += 1
+            emsg = str(exc)
+            rate_limited = any(
+                k in emsg.lower()
+                for k in ("429", "ratelimit", "rate limit", "too many requests",
+                          "no deployments available", "cooldown", "overloaded",
+                          "quota", "insufficient_quota")
+            )
+            # Hard stop — do NOT keep hammering an endpoint that is down or
+            # rate-limiting us. A rate-limit trips the cap sooner.
+            cap = _RL_FAIL_CAP if rate_limited else _LLM_FAIL_CAP
+            if consec_llm_fail >= cap:
+                _log(f"tool-loop: aborting at step {step} — {consec_llm_fail} consecutive "
+                     f"LLM failures ({'rate-limited' if rate_limited else 'errors'}): "
+                     f"{emsg[:160]}")
+                best.setdefault("_llm_unavailable", True)
+                best["_error"] = f"LLM unavailable after {consec_llm_fail} attempts: {emsg[:300]}"
+                break
+            # Exponential backoff, capped. Rate-limit backs off harder.
+            base = _RL_BACKOFF_BASE if rate_limited else _LLM_BACKOFF_BASE
+            delay = min(base * (2 ** (consec_llm_fail - 1)), _LLM_BACKOFF_MAX)
+            _log(f"tool-loop: LLM call failed at step {step} "
+                 f"({consec_llm_fail}/{cap}, backoff {delay:.0f}s): {emsg[:160]}")
+            time.sleep(delay)
             continue
 
+        consec_llm_fail = 0
         msg = resp.choices[0].message
         tool_calls = [] if force_answer else (getattr(msg, "tool_calls", None) or [])
         messages.append(msg.model_dump() if hasattr(msg, "model_dump") else dict(msg))

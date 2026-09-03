@@ -282,12 +282,25 @@ def main() -> None:
                 output_data = {
                     "entities": deterministic_findings,
                     "propagation_chain": [],
+                    **({"_llm_unavailable": True} if output_data.get("_llm_unavailable") else {}),
                 }
             if deterministic_error:
                 output_data.setdefault("_preflight_error", deterministic_error[:2000])
             Path(output_path).write_text(json.dumps(output_data, indent=2))
             last_output = output_data
             print(f"[sre-comprehensive] diagnosis written to {output_path}", flush=True)
+
+            # The tool loop already aborted this cycle because the LLM endpoint
+            # is down / rate-limiting. Do NOT sleep SCAN_INTERVAL and try again —
+            # every retry cycle just hammers a dead endpoint. End the scan loop.
+            if output_data.get("_llm_unavailable"):
+                print(
+                    "[sre-comprehensive] abandoning scan loop: LLM endpoint "
+                    "unavailable / rate-limited — not retrying",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                break
 
         if mcp_down_streak >= max_mcp_down_streak:
             print(

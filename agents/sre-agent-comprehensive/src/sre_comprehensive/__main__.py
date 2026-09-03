@@ -17,6 +17,7 @@ The following environment variables are also read:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -25,7 +26,49 @@ import time
 from pathlib import Path
 
 from .crew import build_crew
-from .mcp_tools import collect_minimum_evidence, reset_tool_call_history
+
+# Hard ceiling on a single ``crew.kickoff()``. CrewAI's text-ReAct loop can
+# enter a non-terminating doom loop with qwen2.5 on the ollama_chat route
+# (hallucinated Observations → unparseable step → CrewAI re-injects the whole
+# tool list → scratchpad bloats → empty completion → retry, forever), which
+# would otherwise consume the entire scan window on scan iteration 1 and never
+# let the deterministic preflight (which runs at the top of each loop) re-check
+# for a fault injected *after* the agent started. On timeout we abandon the
+# kickoff thread (it dies with the process) and fall through to the next
+# iteration, where ``collect_minimum_evidence`` gets another turn.
+_KICKOFF_TIMEOUT_S = float(os.environ.get("SRE_AGENT_KICKOFF_TIMEOUT", "120") or "120")
+
+
+def _kickoff_with_timeout(crew, timeout: float):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(crew.kickoff)
+        try:
+            return future.result(timeout=timeout)
+        finally:
+            # Do not block process shutdown on a wedged kickoff thread.
+            pool._threads.clear()
+            concurrent.futures.thread._threads_queues.clear()
+from .mcp_tools import check_mcp_reachable, collect_minimum_evidence, reset_tool_call_history
+from .tool_loop import run_investigation
+
+# Which investigation engine to use once the deterministic preflight has run:
+#   "toolcalling" (default) — native OpenAI tool-calling loop (tool_loop.py),
+#     the fix for CrewAI's text-ReAct doom loop with qwen on ollama_chat.
+#   "crewai" — the legacy CrewAgentExecutor path (build_crew + kickoff).
+_ENGINE = os.environ.get("SRE_AGENT_ENGINE", "toolcalling").strip().lower()
+
+# Per-cycle wall-clock budget for the native tool-calling loop. Unlike the
+# CrewAI doom loop (which _KICKOFF_TIMEOUT_S exists to *cut off*), the tool loop
+# terminates cleanly on its own — it just needs enough time to walk the 9-phase
+# protocol. Still capped by the global --max-runtime deadline.
+_TOOLLOOP_BUDGET_S = float(os.environ.get("SRE_AGENT_TOOLLOOP_BUDGET", "600") or "600")
+
+# When false, the deterministic preflight still gathers evidence but does NOT
+# scale a zeroed workload back up — the agent's own loop has to do it. Use this
+# to certify pure agent capability; leave true for a production remediator.
+_PREFLIGHT_REMEDIATE = os.environ.get(
+    "SRE_AGENT_PREFLIGHT_REMEDIATE", "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -87,51 +130,173 @@ def main() -> None:
     deadline = time.monotonic() + max_runtime if max_runtime > 0 else None
     last_output: dict | None = None
     iteration = 0
+    # When every MCP endpoint is unreachable the agent has no way to gather
+    # evidence — re-running the crew just burns tokens and floods Langfuse with
+    # byte-identical "all tools broken → empty JSON" traces (temperature is low
+    # and the context is identical each cycle). Skip the kickoff on those cycles
+    # and abandon the scan loop after this many consecutive all-down cycles.
+    mcp_down_streak = 0
+    max_mcp_down_streak = int(os.environ.get("SRE_AGENT_MAX_MCP_DOWN_STREAK", "3") or "3")
 
     while True:
         iteration += 1
         print(f"[sre-comprehensive] scan iteration {iteration} namespace={args.namespace}", flush=True)
-        reset_tool_call_history()
-        deterministic_findings: list[dict] = []
-        deterministic_error = ""
-        try:
-            deterministic_findings = collect_minimum_evidence(args.namespace)
-        except Exception as exc:
-            deterministic_error = str(exc)
-            print(f"[sre-comprehensive] deterministic preflight failed: {deterministic_error}", file=sys.stderr, flush=True)
 
-        # The preflight is allowed to remediate obvious failures, but CrewAI must
-        # still collect its own minimum evidence before a final empty answer is accepted.
-        reset_tool_call_history()
+        reach = check_mcp_reachable()
+        for _url, _err in reach.items():
+            print(
+                f"[sre-comprehensive]   MCP {_url}: {'OK' if not _err else 'UNREACHABLE — ' + _err}",
+                file=sys.stderr if _err else sys.stdout,
+                flush=True,
+            )
+        mcp_all_down = bool(reach) and all(reach.values())
 
-        crew = build_crew(
-            goal=args.goal,
-            workspace_dir=str(workspace),
-            model=args.model,
-            output_path=output_path,
-            namespace=args.namespace,
-        )
+        if mcp_all_down:
+            mcp_down_streak += 1
+            print(
+                f"[sre-comprehensive] all MCP endpoints unreachable "
+                f"(streak {mcp_down_streak}/{max_mcp_down_streak}); skipping investigation this "
+                f"cycle. Check agent.config.MCP_URLS and that the app's MCP servers are "
+                f"Running/Ready in namespace '{args.namespace}'.",
+                file=sys.stderr,
+                flush=True,
+            )
+            if last_output is None:
+                last_output = {
+                    "entities": [],
+                    "propagation_chain": [],
+                    "_error": f"MCP endpoints unreachable: {reach}",
+                }
+                Path(output_path).write_text(json.dumps(last_output, indent=2))
+        else:
+            mcp_down_streak = 0
+            reset_tool_call_history()
+            deterministic_findings: list[dict] = []
+            deterministic_error = ""
+            try:
+                deterministic_findings = collect_minimum_evidence(
+                    args.namespace, remediate=_PREFLIGHT_REMEDIATE
+                )
+            except Exception as exc:
+                deterministic_error = str(exc)
+                print(f"[sre-comprehensive] deterministic preflight failed: {deterministic_error}", file=sys.stderr, flush=True)
 
-        try:
-            result = crew.kickoff()
-            output_data = _load_output(output_path, result)
-        except Exception as exc:
-            print(f"[sre-comprehensive] crew execution failed: {exc}", file=sys.stderr, flush=True)
-            output_data = {
-                "entities": deterministic_findings,
-                "propagation_chain": [],
-                "_error": str(exc)[:2000],
-            }
-        if deterministic_findings and not output_data.get("entities"):
-            output_data = {
-                "entities": deterministic_findings,
-                "propagation_chain": [],
-            }
-        if deterministic_error:
-            output_data.setdefault("_preflight_error", deterministic_error[:2000])
-        Path(output_path).write_text(json.dumps(output_data, indent=2))
-        last_output = output_data
-        print(f"[sre-comprehensive] diagnosis written to {output_path}", flush=True)
+            # The preflight is allowed to remediate obvious failures, but CrewAI must
+            # still collect its own minimum evidence before a final empty answer is accepted.
+            reset_tool_call_history()
+
+            # If the deterministic preflight already found (and remediated) a
+            # fault, don't hand this cycle to CrewAI's ReAct loop — it is prone
+            # to a non-terminating doom loop with qwen on the ollama_chat route
+            # (see _kickoff_with_timeout) and would only burn the rest of the
+            # window re-deriving what the preflight already knows. Record the
+            # findings and keep looping cheaply so later cycles can verify
+            # recovery / catch anything new.
+            if deterministic_findings:
+                output_data = {"entities": deterministic_findings, "propagation_chain": []}
+                if deterministic_error:
+                    output_data["_preflight_error"] = deterministic_error[:2000]
+                Path(output_path).write_text(json.dumps(output_data, indent=2))
+                last_output = output_data
+                print(
+                    f"[sre-comprehensive] deterministic preflight remediated "
+                    f"{len(deterministic_findings)} fault(s); skipping CrewAI this cycle",
+                    flush=True,
+                )
+                if deadline is None:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                sleep_for = min(scan_interval if scan_interval > 0 else 30, max(int(remaining), 0))
+                if sleep_for <= 0:
+                    break
+                print(f"[sre-comprehensive] sleeping {sleep_for}s before next scan", flush=True)
+                time.sleep(sleep_for)
+                continue
+
+            if _ENGINE != "crewai":
+                # Native tool-calling loop (default) — see tool_loop.py.
+                base_url = (
+                    os.environ.get("LITELLM_BASE_URL")
+                    or os.environ.get("OPENAI_BASE_URL")
+                    or "http://127.0.0.1:14000"
+                )
+                api_key = (
+                    os.environ.get("SRE_AGENT_LITELLM_API_KEY")
+                    or os.environ.get("OPENAI_API_KEY")
+                    or "ollama"
+                )
+                loop_deadline = time.monotonic() + _TOOLLOOP_BUDGET_S
+                if deadline is not None:
+                    loop_deadline = min(loop_deadline, deadline)
+                try:
+                    output_data = run_investigation(
+                        goal=args.goal,
+                        namespace=args.namespace,
+                        model=args.model,
+                        base_url=base_url,
+                        api_key=api_key,
+                        output_path=output_path,
+                        deadline=loop_deadline,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[sre-comprehensive] tool-loop failed: {exc}", file=sys.stderr, flush=True)
+                    output_data = {
+                        "entities": deterministic_findings,
+                        "propagation_chain": [],
+                        "_error": str(exc)[:2000],
+                    }
+            else:
+                crew = build_crew(
+                    goal=args.goal,
+                    workspace_dir=str(workspace),
+                    model=args.model,
+                    output_path=output_path,
+                    namespace=args.namespace,
+                )
+
+                try:
+                    result = _kickoff_with_timeout(crew, _KICKOFF_TIMEOUT_S)
+                    output_data = _load_output(output_path, result)
+                except concurrent.futures.TimeoutError:
+                    print(
+                        f"[sre-comprehensive] crew.kickoff() exceeded {_KICKOFF_TIMEOUT_S:.0f}s "
+                        f"— abandoning this cycle; deterministic preflight re-runs next scan",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    output_data = {
+                        "entities": deterministic_findings,
+                        "propagation_chain": [],
+                        "_error": f"crew.kickoff timed out after {_KICKOFF_TIMEOUT_S:.0f}s",
+                    }
+                except Exception as exc:
+                    print(f"[sre-comprehensive] crew execution failed: {exc}", file=sys.stderr, flush=True)
+                    output_data = {
+                        "entities": deterministic_findings,
+                        "propagation_chain": [],
+                        "_error": str(exc)[:2000],
+                    }
+            if deterministic_findings and not output_data.get("entities"):
+                output_data = {
+                    "entities": deterministic_findings,
+                    "propagation_chain": [],
+                }
+            if deterministic_error:
+                output_data.setdefault("_preflight_error", deterministic_error[:2000])
+            Path(output_path).write_text(json.dumps(output_data, indent=2))
+            last_output = output_data
+            print(f"[sre-comprehensive] diagnosis written to {output_path}", flush=True)
+
+        if mcp_down_streak >= max_mcp_down_streak:
+            print(
+                f"[sre-comprehensive] abandoning scan loop: MCP unreachable for "
+                f"{mcp_down_streak} consecutive cycles",
+                file=sys.stderr,
+                flush=True,
+            )
+            break
 
         if deadline is None:
             break

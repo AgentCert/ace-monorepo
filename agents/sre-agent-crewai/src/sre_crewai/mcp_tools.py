@@ -51,20 +51,63 @@ CAN_MUTATE = AGENT_MODE == "active"
 # never conflicts with CrewAI's own asyncio usage.
 # ---------------------------------------------------------------------------
 
+# Per-call ceiling. The mcp streamable-http client has no built-in connect
+# timeout, so a wrong MCP_URLS (wrong namespace, server not Ready yet) would
+# otherwise stall the whole ReAct turn until CrewAI's much longer timeout.
+_MCP_TIMEOUT_S = float(os.environ.get("MCP_TIMEOUT", "30") or "30")
+
+
+def _unwrap_exc(exc: BaseException) -> str:
+    """Flatten anyio/TaskGroup ExceptionGroups down to their real cause(s).
+
+    The mcp streamable-http client drives its POST + SSE read loop inside an
+    anyio task group, so every failure — connection refused, DNS failure,
+    non-200 status, timeout — reaches the caller as
+    ``ExceptionGroup: unhandled errors in a TaskGroup (N sub-exception(s))``
+    whose ``str()`` discloses nothing. Recurse through ``.exceptions`` and
+    surface the leaves so the agent's Observation and `kubectl logs` name the
+    real problem.
+    """
+    leaves: list[str] = []
+
+    def _walk(e: BaseException) -> None:
+        subs = getattr(e, "exceptions", None)
+        if subs:
+            for sub in subs:
+                _walk(sub)
+            return
+        label = f"{type(e).__name__}: {e}".strip()
+        if label and label not in leaves:
+            leaves.append(label)
+
+    _walk(exc)
+    return "; ".join(leaves) or f"{type(exc).__name__}: {exc}"
+
+
 async def _async_call(url: str, tool_name: str, arguments: dict) -> str:
-    async with streamablehttp_client(url) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
-            texts = [
-                c.text for c in result.content if hasattr(c, "text")
-            ]
-            return "\n".join(texts) or "(no output)"
+    async def _run() -> str:
+        async with streamablehttp_client(url) as (read, write, *_rest):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                texts = [c.text for c in result.content if hasattr(c, "text")]
+                return "\n".join(texts) or "(no output)"
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=_MCP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"timed out after {_MCP_TIMEOUT_S:.0f}s (endpoint unreachable or not responding)"
+        ) from None
 
 
 def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, _async_call(url, tool_name, arguments)).result()
+        try:
+            return pool.submit(asyncio.run, _async_call(url, tool_name, arguments)).result()
+        except Exception as exc:
+            detail = _unwrap_exc(exc)
+            raise RuntimeError(f"MCP call '{tool_name}' to {url} failed: {detail}") from exc
 
 
 # ---------------------------------------------------------------------------

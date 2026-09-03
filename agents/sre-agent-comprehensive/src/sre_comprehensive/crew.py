@@ -179,20 +179,22 @@ Only output the final JSON after completing all phases.
 ---
 
 ### PHASE 7 — CONFIGURATION RESOURCES
-15. call get_k8s_resource(api_version="v1", kind="ConfigMap", name="flagd-config",
-      namespace="{namespace}")
-    → Parse the demo.flagd.json data value
-    → REMEDIATE: If any feature flag has defaultVariant="on" (e.g. loadGeneratorFloodHomepage,
-      adServiceFailure, productCatalogFailure, recommendationServiceCacheFailure):
-      call patch_resource to update that flag to defaultVariant="off"
-      patch='{{"data":{{"demo.flagd.json":"<corrected-json-string>"}}}}'
+NOTE: only inspect a ConfigMap/Secret in this phase if an actual symptom points
+to it — a pod referencing it is CrashLooping, or a Warning event names it. A
+resource being ABSENT (e.g. no `valkey-credentials` Secret) is NORMAL for a
+clean install and is NEVER a fault — do not mention it anywhere in your output.
 
-16. call get_k8s_resource(api_version="v1", kind="Secret", name="valkey-credentials",
-      namespace="{namespace}")
-    → Decode the valkey-password value from base64
-    → REMEDIATE: If the password appears invalid (e.g. "invalid_password" base64-encoded):
-      call rollout_undo(name="valkey-cart", namespace="{namespace}") to remove the
-      --requirepass override injected into the container command
+15. Only if a pod is failing with a config/flag symptom: call get_k8s_resource
+      for ConfigMap "flagd-config", parse demo.flagd.json.
+    → REMEDIATE: if a failure flag (adServiceFailure, productCatalogFailure,
+      recommendationServiceCacheFailure, loadGeneratorFloodHomepage) has
+      defaultVariant="on", patch_resource it to "off".
+
+16. Only if a valkey-cart pod is CrashLooping / a Warning event names a bad
+      valkey password: call get_k8s_resource for Secret "valkey-credentials",
+      decode valkey-password.
+    → REMEDIATE: if the password is clearly bogus (e.g. "invalid_password"):
+      rollout_undo(name="valkey-cart", namespace="{namespace}").
 
 ---
 
@@ -280,10 +282,41 @@ _LOG_TOKEN_WASTE = os.environ.get("SRE_AGENT_LOG_TOKEN_WASTE", "").strip().lower
 # constructed Agent instance at the point _TruncatingLLM needs it.
 _STOP_MARKER = "\nObservation:"
 
+# Sampling temperature for the investigator LLM. This was hardcoded to 0.0,
+# which made every certification run of the same fault produce a byte-identical
+# trace — defeating the N>1 premise the certifier is built on (a single
+# deterministic run carries no variance to aggregate). Default to a small
+# non-zero value so runs differ; override per-deployment via env. Set it back
+# to "0.0" for a strictly reproducible single run.
+_TEMPERATURE = float(os.environ.get("SRE_AGENT_TEMPERATURE", "0.2") or "0.2")
 
-def _empty_final_answer(text: str) -> bool:
+
+def _premature_final_answer(text: str) -> bool:
+    """True when a ``Final Answer`` should be rejected and an evidence tool call
+    forced instead.
+
+    Catches three failure modes seen with qwen2.5 on the LiteLLM→ollama_chat
+    route, all of which CrewAI's parser would otherwise accept and stop on:
+      1. an empty result (``entities:[] propagation_chain:[]``) with no Action;
+      2. the model parroting the ReAct template's own placeholder text
+         ("the final answer to the original input question");
+      3. any Final Answer emitted before the minimum investigation evidence
+         (namespaces / pods / events / Deployment listing) has been gathered —
+         a small model frequently "concludes" after 2-3 steps.
+    """
+    if "Action:" in text:
+        return False
     compact = text.replace(" ", "").replace("\n", "")
-    return "\"entities\":[]" in compact and "\"propagation_chain\":[]" in compact and "Action:" not in text
+    if "\"entities\":[]" in compact and "\"propagation_chain\":[]" in compact:
+        return True
+    if "thefinalanswertotheoriginalinputquestion" in compact.lower():
+        return True
+    if "FinalAnswer:" in compact or "Final Answer:" in text:
+        # A conclusion is only credible once the core evidence exists.
+        return bool(required_evidence_missing())
+    return False
+
+
 
 
 def _forced_evidence_action() -> str | None:
@@ -381,7 +414,7 @@ class _TruncatingLLM(LLM):
         response = litellm.completion(**params)
         full_text = response["choices"][0]["message"]["content"]
         kept_text = full_text.split(_STOP_MARKER)[0].rstrip()
-        forced_action = _forced_evidence_action() if _empty_final_answer(kept_text) else None
+        forced_action = _forced_evidence_action() if _premature_final_answer(kept_text) else None
         if forced_action:
             print("[sre-comprehensive] rejected premature empty final answer; forcing evidence tool call", flush=True)
             kept_text = forced_action
@@ -416,7 +449,7 @@ class _StreamingTruncatingLLM(LLM):
                 close()
         full_text = "".join(chunks)
         kept_text = full_text.split(_STOP_MARKER)[0].rstrip()
-        forced_action = _forced_evidence_action() if _empty_final_answer(kept_text) else None
+        forced_action = _forced_evidence_action() if _premature_final_answer(kept_text) else None
         if forced_action:
             print("[sre-comprehensive] rejected premature empty final answer; forcing evidence tool call", flush=True)
             return forced_action
@@ -429,7 +462,7 @@ def _build_llm(model: str, base_url: str, api_key: str) -> LLM:
         model=model,
         base_url=base_url,
         api_key=api_key,
-        temperature=0.0,
+        temperature=_TEMPERATURE,
     )
 
 

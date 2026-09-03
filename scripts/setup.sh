@@ -3459,8 +3459,17 @@ helm_deploy() {
     set +e
     "${helm_cmd[@]}"
     helm_rc=$?
+    # Stop the pod-watch loop. `wait` on a just-killed job returns 143
+    # (128+SIGTERM); the `2>/dev/null` only hides its stderr, so with `set -e`
+    # already restored this line would abort the whole script *right after a
+    # successful Helm deploy* — silently skipping every post-deploy step
+    # (restart_locally_built_deployments, host-service wiring, subscriber-secret
+    # sync, experiment seeding). Reap it while -e is still off and swallow the
+    # signal exit explicitly.
+    kill "${_HELM_WATCH_PID}" 2>/dev/null || true
+    wait "${_HELM_WATCH_PID}" 2>/dev/null || true
+    unset _HELM_WATCH_PID
     set -e
-    kill "${_HELM_WATCH_PID}" 2>/dev/null; wait "${_HELM_WATCH_PID}" 2>/dev/null; unset _HELM_WATCH_PID
     if [[ ${helm_rc} -ne 0 ]]; then
         warn "helm upgrade --install failed (exit ${helm_rc})."
         return 1
@@ -3512,9 +3521,39 @@ subsets:
         protocol: TCP
 LITELLM_EOF
         # ollama: in-cluster DNS name for THIS checkout's Ollama container.
-        # Service port 11434 is the stable in-cluster virtual port; Endpoints
-        # port ${ollama_port} is the actual host port where the ACE-owned
-        # Ollama container (ollama-${ACE_INSTANCE_NAME}) is published.
+        #
+        # Preferred wiring (KinD): attach the Ollama container directly to the
+        # cluster's own Docker network and point the Endpoints at its address on
+        # that network, port 11434. The obvious-looking alternative — Endpoints →
+        # ${CALLBACK_HOST}:${ollama_port} (the host-published port) — does NOT
+        # work on every host: a KinD node container reaching the host bridge
+        # gateway on a *published* port depends on Docker's inter-bridge
+        # forwarding rules, which some hosts' firewall/DOCKER-USER config drops
+        # silently (curl from the node just times out). Joining the same network
+        # sidesteps the host hop entirely. Falls back to ${CALLBACK_HOST}:${ollama_port}
+        # when the container or network can't be resolved (e.g. k3s, where the
+        # cni0-gateway path does work).
+        # NB: every substitution below is `|| true`-guarded and pipe-free — this
+        # runs under `set -euo pipefail`, so a failing `docker inspect` or a
+        # `grep|head` SIGPIPE would otherwise abort the whole deploy here.
+        local ollama_ctr ollama_net ollama_ep_ip ollama_ep_port _oip
+        ollama_ctr="ollama-${ACE_INSTANCE_NAME:-$(id -un || true)}"
+        ollama_net="$(docker inspect "${KIND_CLUSTER_NAME:-agentcert}-control-plane" \
+            --format '{{range $n,$_ := .NetworkSettings.Networks}}{{$n}} {{end}}' 2>/dev/null || true)"
+        ollama_net="${ollama_net%% *}"   # first network name (KinD node → "kind"); no pipeline
+        ollama_ep_ip="${CALLBACK_HOST}"
+        ollama_ep_port="${ollama_port}"
+        if [[ -n "${ollama_net}" ]] && docker inspect "${ollama_ctr}" >/dev/null 2>&1; then
+            docker network connect "${ollama_net}" "${ollama_ctr}" >/dev/null 2>&1 || true
+            _oip="$(docker inspect "${ollama_ctr}" \
+                --format "{{with index .NetworkSettings.Networks \"${ollama_net}\"}}{{.IPAddress}}{{end}}" 2>/dev/null || true)"
+            if [[ -n "${_oip}" ]]; then
+                ollama_ep_ip="${_oip}"
+                ollama_ep_port="11434"
+                echo -e "${DIM}  Ollama container '${ollama_ctr}' attached to '${ollama_net}' network → ${ollama_ep_ip}:11434${NC}"
+            fi
+            unset _oip
+        fi
         kubectl apply -f - >/dev/null <<OLLAMA_SVC_EOF
 apiVersion: v1
 kind: Service
@@ -3527,7 +3566,7 @@ metadata:
 spec:
   ports:
     - port: 11434
-      targetPort: ${ollama_port}
+      targetPort: ${ollama_ep_port}
       protocol: TCP
       name: ollama
 ---
@@ -3538,9 +3577,9 @@ metadata:
   namespace: ${NS}
 subsets:
   - addresses:
-      - ip: ${CALLBACK_HOST}
+      - ip: ${ollama_ep_ip}
     ports:
-      - port: ${ollama_port}
+      - port: ${ollama_ep_port}
         name: ollama
         protocol: TCP
 OLLAMA_SVC_EOF
@@ -3558,7 +3597,7 @@ OLLAMA_SVC_EOF
         if ! kubectl get svc ollama -n "${NS}" >/dev/null 2>&1 || ! kubectl get endpoints ollama -n "${NS}" >/dev/null 2>&1; then
             warn "ollama.${NS}.svc.cluster.local Service/Endpoints missing after apply — any FLASH_AGENT_MODEL/MODEL_ALIAS routed to the Ollama alias will fail in-cluster with a DNS lookup failure, even if AZURE/GEMINI credentials are also configured. Re-run ./scripts/setup.sh --restart, or apply this section manually."
         else
-            ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434 → host:${ollama_port}"
+            ok "Host services wired: litellm.${NS}.svc.cluster.local:14000, ollama.${NS}.svc.cluster.local:11434 → ${ollama_ep_ip}:${ollama_ep_port}"
         fi
     fi
 

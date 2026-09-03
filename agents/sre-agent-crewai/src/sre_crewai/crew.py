@@ -70,6 +70,13 @@ _LOG_TOKEN_WASTE = os.environ.get("SRE_AGENT_LOG_TOKEN_WASTE", "").strip().lower
 # constructed Agent instance at the point _TruncatingLLM needs it.
 _STOP_MARKER = "\nObservation:"
 
+# Sampling temperature for the investigator LLM. Was hardcoded to 0.0, which
+# made every certification run of the same fault produce a byte-identical trace
+# — defeating the N>1 premise the certifier is built on. Default to a small
+# non-zero value so runs differ; override per-deployment via env. Set "0.0" for
+# a strictly reproducible single run.
+_TEMPERATURE = float(os.environ.get("SRE_AGENT_TEMPERATURE", "0.2") or "0.2")
+
 
 def _build_llm_params(llm: "LLM", messages: List[Dict[str, str]]) -> Dict[str, Any]:
     """Same param set as crewai.LLM.call(), except:
@@ -184,7 +191,7 @@ def _build_llm(model: str, base_url: str, api_key: str) -> LLM:
         model=model,
         base_url=base_url,
         api_key=api_key,
-        temperature=0.0,
+        temperature=_TEMPERATURE,
     )
 
 

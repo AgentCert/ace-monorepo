@@ -192,13 +192,76 @@ def _emit_langfuse_tool_observation(event: dict, start: datetime, end: datetime)
 # Low-level async → sync MCP bridge (fresh session per call, no shared state)
 # ---------------------------------------------------------------------------
 
+# Per-call ceiling. The mcp streamable-http client has no built-in connect
+# timeout, so a wrong MCP_URLS (wrong namespace, server not Ready yet) would
+# otherwise stall the whole ReAct turn until CrewAI's much longer timeout.
+_MCP_TIMEOUT_S = float(os.environ.get("MCP_TIMEOUT", "30") or "30")
+
+
+def _unwrap_exc(exc: BaseException) -> str:
+    """Flatten anyio/TaskGroup ExceptionGroups down to their real cause(s).
+
+    The mcp streamable-http client drives its POST + SSE read loop inside an
+    anyio task group, so every failure — connection refused, DNS failure,
+    non-200 status, timeout — reaches the caller as
+    ``ExceptionGroup: unhandled errors in a TaskGroup (N sub-exception(s))``
+    whose ``str()`` discloses nothing. Without this the agent's Observation
+    and the pod log both just say "unhandled errors in a TaskGroup", which is
+    un-actionable. Recurse through ``.exceptions`` and surface the leaves.
+    """
+    leaves: list[str] = []
+
+    def _walk(e: BaseException) -> None:
+        subs = getattr(e, "exceptions", None)
+        if subs:
+            for sub in subs:
+                _walk(sub)
+            return
+        label = f"{type(e).__name__}: {e}".strip()
+        if label and label not in leaves:
+            leaves.append(label)
+
+    _walk(exc)
+    return "; ".join(leaves) or f"{type(exc).__name__}: {exc}"
+
+
 async def _async_call(url: str, tool_name: str, arguments: dict) -> str:
-    async with streamablehttp_client(url) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments)
-            texts = [c.text for c in result.content if hasattr(c, "text")]
-            return "\n".join(texts) or "(no output)"
+    async def _run() -> str:
+        async with streamablehttp_client(url) as (read, write, *_rest):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                texts = [c.text for c in result.content if hasattr(c, "text")]
+                return "\n".join(texts) or "(no output)"
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=_MCP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise RuntimeError(
+            f"timed out after {_MCP_TIMEOUT_S:.0f}s (endpoint unreachable or not responding)"
+        ) from None
+
+
+def check_mcp_reachable() -> dict:
+    """Best-effort MCP handshake probe. Returns ``{url: "" if OK else error}``."""
+
+    async def _probe(url: str) -> None:
+        async with streamablehttp_client(url) as (read, write, *_rest):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+    results: dict = {}
+    for url in (K8S_URL, PROM_URL):
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(
+                    asyncio.run,
+                    asyncio.wait_for(_probe(url), timeout=min(_MCP_TIMEOUT_S, 10.0)),
+                ).result()
+            results[url] = ""
+        except Exception as exc:
+            results[url] = _unwrap_exc(exc)
+    return results
 
 
 def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
@@ -208,6 +271,7 @@ def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
             result = pool.submit(asyncio.run, _async_call(url, tool_name, arguments)).result()
         except Exception as exc:
             end = _utc_now()
+            detail = _unwrap_exc(exc)
             _record_tool_call(
                 url=url,
                 tool_name=tool_name,
@@ -215,9 +279,12 @@ def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
                 start=start,
                 end=end,
                 status="error",
-                error=str(exc),
+                error=detail,
             )
-            raise
+            # Re-raise with the unwrapped cause so CrewAI's Observation text
+            # (and `kubectl logs`) name the real problem instead of the opaque
+            # "unhandled errors in a TaskGroup".
+            raise RuntimeError(f"MCP call '{tool_name}' to {url} failed: {detail}") from exc
         end = _utc_now()
         _record_tool_call(
             url=url,
@@ -231,8 +298,11 @@ def _call_mcp(url: str, tool_name: str, arguments: dict) -> str:
         return result
 
 
-def collect_minimum_evidence(namespace: str) -> list[dict]:
-    """Deterministically inspect the target namespace and remediate scale-to-zero."""
+def collect_minimum_evidence(namespace: str, remediate: bool = True) -> list[dict]:
+    """Deterministically inspect the target namespace and (optionally) remediate
+    scale-to-zero. Set ``remediate=False`` — via ``SRE_AGENT_PREFLIGHT_REMEDIATE``
+    in __main__.py — to measure the agent's own remediation capability without
+    the deterministic assist (the LLM tool-loop then has to fix it itself)."""
     findings: list[dict] = []
     _call_mcp(K8S_URL, "namespaces_list", {})
     _call_mcp(K8S_URL, "pods_list_in_namespace", {"namespace": namespace})
@@ -242,8 +312,15 @@ def collect_minimum_evidence(namespace: str) -> list[dict]:
         "resources_list",
         {"apiVersion": "apps/v1", "kind": "Deployment", "namespace": namespace},
     )
-    deployments = _parse_json(deployments_text)
-    items = deployments.get("items", []) if isinstance(deployments, dict) else deployments
+    try:
+        deployments = _parse_json(deployments_text)
+        items = deployments.get("items", []) if isinstance(deployments, dict) else deployments
+    except ValueError as exc:
+        # Structured parse failed (e.g. the MCP server is still on the default
+        # `--list-output table`). Don't abandon the whole preflight — fall back
+        # to a kubectl-style table scan that can still catch scale-to-zero.
+        print(f"[sre-comprehensive] preflight: {exc}; falling back to table scan", flush=True)
+        return _collect_from_table(deployments_text, namespace, remediate)
     if not isinstance(items, list):
         return findings
 
@@ -256,29 +333,24 @@ def collect_minimum_evidence(namespace: str) -> list[dict]:
         replicas = int(spec.get("replicas") or 0)
         available = int(status.get("availableReplicas") or 0)
         if replicas == 0:
-            patch = json.dumps({"spec": {"replicas": 1}})
-            _call_mcp(
-                K8S_URL,
-                "resources_patch",
-                {
-                    "apiVersion": "apps/v1",
-                    "kind": "Deployment",
-                    "name": name,
-                    "namespace": namespace,
-                    "patch": patch,
-                },
-            )
+            if not remediate:
+                continue
+            _scale_workload(name, namespace, 1)
             findings.append(
                 {
                     "name": f"{namespace}/Deployment/{name}",
                     "contributing_factor": True,
                     "reasoning": (
                         "Deployment had spec.replicas=0 during deterministic preflight; "
-                        "patched spec.replicas to 1 and will verify in subsequent scans."
+                        "scaled it back to 1 replica and will verify in subsequent scans."
                     ),
                 }
             )
-        elif available == 0:
+        elif available == 0 and remediate:
+            # Only surface this in the "deterministic remediator" mode. Under
+            # remediate=False (certify pure agent capability) the preflight must
+            # NOT emit findings — a transient availableReplicas==0 during app
+            # install would otherwise short-circuit the LLM loop in __main__.
             findings.append(
                 {
                     "name": f"{namespace}/Deployment/{name}",
@@ -289,22 +361,142 @@ def collect_minimum_evidence(namespace: str) -> list[dict]:
     return findings
 
 
+def _collect_from_table(text: str, namespace: str, remediate: bool = True) -> list[dict]:
+    """Fallback scale-to-zero detector for kubectl-style table output.
+
+    Header is whitespace-delimited with a ``NAME`` and a ``READY`` column
+    (``desired/current`` style, e.g. ``0/0``). A ``READY`` of ``0/0`` means the
+    Deployment was scaled to zero — patch it back to one replica.
+    """
+    findings: list[dict] = []
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return findings
+    header = lines[0].split()
+    try:
+        name_i = header.index("NAME")
+        ready_i = header.index("READY")
+    except ValueError:
+        return findings
+    for row in lines[1:]:
+        cols = row.split()
+        if len(cols) <= max(name_i, ready_i):
+            continue
+        name, ready = cols[name_i], cols[ready_i]
+        desired = ready.split("/")[-1] if "/" in ready else ready
+        if desired == "0":
+            if not remediate:
+                continue
+            _scale_workload(name, namespace, 1)
+            findings.append(
+                {
+                    "name": f"{namespace}/Deployment/{name}",
+                    "contributing_factor": True,
+                    "reasoning": (
+                        "Deployment READY column was 0/0 (scaled to zero) during "
+                        "deterministic preflight table scan; scaled it back to 1 replica."
+                    ),
+                }
+            )
+    return findings
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """RFC 7396-ish recursive merge of ``overlay`` into ``base`` (in place)."""
+    for key, val in overlay.items():
+        if isinstance(val, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], val)
+        elif val is None:
+            base.pop(key, None)
+        else:
+            base[key] = val
+    return base
+
+
+def _merge_write(api_version: str, kind: str, name: str,
+                 namespace: Optional[str], patch_obj: dict) -> str:
+    """Emulate a strategic/merge patch on an MCP server that only exposes
+    ``resources_get`` + ``resources_create_or_update``: read the live object,
+    deep-merge the patch, write it back whole."""
+    gargs: dict = {"apiVersion": api_version, "kind": kind, "name": name}
+    if namespace:
+        gargs["namespace"] = namespace
+    current = _parse_json(_call_mcp(K8S_URL, "resources_get", gargs))
+    if not isinstance(current, dict):
+        raise RuntimeError(f"unexpected resources_get payload for {kind}/{name}")
+    # A server-managed field that rejects create_or_update if stale.
+    current.get("metadata", {}).pop("managedFields", None)
+    _deep_merge(current, patch_obj)
+    return _call_mcp(K8S_URL, "resources_create_or_update", {"resource": json.dumps(current)})
+
+
+def _scale_workload(name: str, namespace: str, replicas: int) -> None:
+    """Set a Deployment's replica count via the MCP server's ``resources_scale``
+    tool. This server build exposes ``resources_scale`` (and
+    ``resources_create_or_update``) but **no** generic ``resources_patch`` —
+    calling the latter fails with ``unknown tool "resources_patch"``.
+    """
+    _call_mcp(
+        K8S_URL,
+        "resources_scale",
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": name,
+            "namespace": namespace,
+            "scale": replicas,
+        },
+    )
+
+
 def _parse_json(text: str) -> dict | list:
-    """Parse JSON from MCP response text which may contain surrounding prose."""
+    """Parse structured data from an MCP ``resources_list`` / ``get`` response.
+
+    The containers/kubernetes-mcp-server emits **table** text by default
+    (``--list-output`` defaults to ``table``); the app charts now pass
+    ``--list-output yaml`` so these responses are YAML. Older/renderer
+    variants can still hand back JSON or JSON-with-prose, so try, in order:
+    JSON → embedded JSON → YAML (single or multi-doc). A YAML ``kind: *List``
+    document is normalised to ``{"items": [...]}`` so callers that expect the
+    Kubernetes list shape keep working.
+    """
     text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Find the outermost JSON object or array
+    # YAML — the primary format the MCP server emits for `resources_get` and,
+    # with `--list-output yaml`, for `resources_list`. Tried BEFORE the regex
+    # fallback below: a resource YAML often contains a literal `{}` (e.g.
+    # `emptyDir: {}`, `securityContext: {}`, an inline JSON annotation), and a
+    # greedy `\{.*\}` search would "successfully" json.loads that fragment into
+    # an empty dict, silently discarding the whole object.
+    try:
+        import yaml  # PyYAML — pulled in transitively by crewai
+
+        docs = [d for d in yaml.safe_load_all(text) if d is not None]
+    except Exception:
+        docs = []
+    if len(docs) == 1:
+        doc = docs[0]
+        if isinstance(doc, dict):
+            return doc
+        if isinstance(doc, list):
+            return {"items": doc}
+    elif len(docs) > 1:
+        # multi-doc stream (one YAML doc per resource)
+        return {"items": [d for d in docs if isinstance(d, dict)]}
+    # Last resort: pull the outermost JSON object/array out of surrounding prose.
     for pat in (r"\{.*\}", r"\[.*\]"):
         m = re.search(pat, text, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(0))
+                parsed = json.loads(m.group(0))
+                if parsed:  # ignore an empty {} / [] fragment match
+                    return parsed
             except json.JSONDecodeError:
                 continue
-    raise ValueError(f"Cannot parse JSON from MCP response: {text[:300]}")
+    raise ValueError(f"Cannot parse structured data from MCP response: {text[:300]}")
 
 
 # ---------------------------------------------------------------------------
@@ -483,11 +675,8 @@ class ListNodesTool(BaseTool):
     args_schema: Type[BaseModel] = _Empty
 
     def _run(self) -> str:  # type: ignore[override]
-        # Try dedicated nodes_list endpoint first; fall back to resources_list
-        try:
-            return _call_mcp(K8S_URL, "nodes_list", {})
-        except Exception:
-            return _call_mcp(K8S_URL, "resources_list", {"apiVersion": "v1", "kind": "Node"})
+        # This MCP server build has no `nodes_list`; Node is a normal resource.
+        return _call_mcp(K8S_URL, "resources_list", {"apiVersion": "v1", "kind": "Node"})
 
 
 class ListPodsTool(BaseTool):
@@ -635,17 +824,30 @@ class PatchResourceTool(BaseTool):
         patch: str,
         namespace: Optional[str] = None,
     ) -> str:
-        args: dict = {"apiVersion": api_version, "kind": kind, "name": name, "patch": patch}
-        if namespace:
-            args["namespace"] = namespace
         try:
-            return _call_mcp(K8S_URL, "resources_patch", args)
-        except Exception as e:
+            patch_obj = json.loads(patch) if isinstance(patch, str) else dict(patch)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            return f"patch_resource: patch is not valid JSON — {exc}"
+
+        # This MCP server build has no generic `resources_patch`. A replicas-only
+        # patch maps cleanly onto `resources_scale`; anything else is done as a
+        # read-merge-write through `resources_get` + `resources_create_or_update`.
+        if set(patch_obj) == {"spec"} and set(patch_obj["spec"]) == {"replicas"}:
+            try:
+                sargs = {"apiVersion": api_version, "kind": kind, "name": name,
+                         "scale": int(patch_obj["spec"]["replicas"])}
+                if namespace:
+                    sargs["namespace"] = namespace
+                return _call_mcp(K8S_URL, "resources_scale", sargs)
+            except Exception as e:  # noqa: BLE001 - fall through to merge path
+                pass
+
+        try:
+            return _merge_write(api_version, kind, name, namespace, patch_obj)
+        except Exception as e:  # noqa: BLE001
             return (
-                f"patch_resource call failed: {e}. "
-                "If the MCP server does not support resources_patch, "
-                "try delete_k8s_resource followed by apply_resource, "
-                "or use rollout_undo for Deployment modifications."
+                f"patch_resource: merge-write of {kind}/{name} failed — {e}. "
+                "For a Deployment pod-template change, use rollout_undo instead."
             )
 
 
@@ -665,15 +867,13 @@ class ApplyResourceTool(BaseTool):
             parsed = json.loads(spec)
         except json.JSONDecodeError as exc:
             return f"apply_resource: spec is not valid JSON — {exc}"
-        for method in ("resources_apply", "resources_create"):
-            try:
-                return _call_mcp(K8S_URL, method, {"spec": json.dumps(parsed)})
-            except Exception:
-                continue
-        return (
-            "apply_resource: neither resources_apply nor resources_create is available "
-            "on this MCP server. Try patch_resource with the existing resource instead."
-        )
+        try:
+            return _call_mcp(K8S_URL, "resources_create_or_update", {"resource": json.dumps(parsed)})
+        except Exception as e:  # noqa: BLE001
+            return (
+                f"apply_resource: resources_create_or_update failed — {e}. "
+                "Try patch_resource with the existing resource instead."
+            )
 
 
 class RolloutUndoTool(BaseTool):
@@ -785,15 +985,12 @@ class RolloutUndoTool(BaseTool):
         annots.pop("kubectl.kubernetes.io/last-applied-configuration", None)
         annots.pop("deployment.kubernetes.io/revision", None)
 
-        # 7. Patch the Deployment's pod template
-        patch = {"spec": {"template": prev_template}}
-        result = _call_mcp(K8S_URL, "resources_patch", {
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "name": name,
-            "namespace": namespace,
-            "patch": json.dumps(patch),
-        })
+        # 7. Patch the Deployment's pod template (read-merge-write; this MCP
+        #    server build has no generic resources_patch)
+        result = _merge_write(
+            "apps/v1", "Deployment", name, namespace,
+            {"spec": {"template": prev_template}},
+        )
         return (
             f"Rolled back Deployment {name} to revision {target_rev}. "
             f"Pods will restart with the previous configuration. "
@@ -821,6 +1018,82 @@ class ExecutePromQLTool(BaseTool):
 # ---------------------------------------------------------------------------
 # Public interface
 # ---------------------------------------------------------------------------
+
+_COMPACT_CAP = int(os.environ.get("SRE_AGENT_OBS_CHAR_CAP", "2600"))
+
+
+def _pod_rows(items: list) -> str:
+    """One line per pod: only the unhealthy ones in full, the rest summarised."""
+    unhealthy, healthy = [], 0
+    for p in items:
+        if not isinstance(p, dict):
+            continue
+        meta, status = p.get("metadata", {}), p.get("status", {})
+        name = meta.get("name", "?")
+        phase = status.get("phase", "?")
+        cs = status.get("containerStatuses") or []
+        ready = sum(1 for c in cs if c.get("ready"))
+        total = len(cs) or 1
+        restarts = sum(int(c.get("restartCount", 0)) for c in cs)
+        waiting = next(
+            (c["state"]["waiting"].get("reason")
+             for c in cs
+             if isinstance(c.get("state", {}).get("waiting"), dict)),
+            "",
+        )
+        is_healthy = phase == "Running" and ready == total and not waiting
+        if is_healthy:
+            healthy += 1
+        else:
+            unhealthy.append(
+                f"  {name}  phase={phase} ready={ready}/{total} restarts={restarts}"
+                + (f" {waiting}" if waiting else "")
+            )
+    out = ["UNHEALTHY PODS:" if unhealthy else "All pods healthy."]
+    out += unhealthy
+    if healthy:
+        out.append(f"(+{healthy} other pods Running/Ready)")
+    return "\n".join(out)
+
+
+def _workload_rows(items: list, kind: str) -> str:
+    rows = [f"{kind}S (name  spec.replicas  status.available):"]
+    for d in items:
+        if not isinstance(d, dict):
+            continue
+        n = d.get("metadata", {}).get("name", "?")
+        spec_r = d.get("spec", {}).get("replicas", "?")
+        avail = d.get("status", {}).get("availableReplicas", 0)
+        rows.append(f"  {n}  {spec_r}  {avail}")
+    return "\n".join(rows)
+
+
+def compact_tool_output(tool_name: str, arguments: dict, text: str) -> str:
+    """Shrink a verbose MCP observation so a multi-step investigation fits in
+    context. Structured summaries for pod / workload lists; a head+tail char
+    cap for everything else. Never raises — worst case returns the raw text
+    truncated."""
+    try:
+        if tool_name == "list_pods_in_namespace":
+            data = _parse_json(text)
+            items = data.get("items", data) if isinstance(data, dict) else data
+            if isinstance(items, list):
+                return _pod_rows(items)
+        if tool_name == "list_k8s_resources" and str(arguments.get("kind", "")).lower() in (
+            "deployment", "statefulset", "daemonset", "replicaset"
+        ):
+            data = _parse_json(text)
+            items = data.get("items", data) if isinstance(data, dict) else data
+            if isinstance(items, list):
+                return _workload_rows(items, str(arguments.get("kind")))
+    except Exception:
+        pass
+    if len(text) <= _COMPACT_CAP:
+        return text
+    head = text[: _COMPACT_CAP * 2 // 3]
+    tail = text[-_COMPACT_CAP // 3 :]
+    return f"{head}\n… [{len(text) - _COMPACT_CAP} chars elided] …\n{tail}"
+
 
 def get_all_tools() -> list:
     return [

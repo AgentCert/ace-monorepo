@@ -1,33 +1,36 @@
 # ACE Handoff Briefing
 
 **Certifying agents under real Kubernetes chaos**
-Revised 2026-09-01 — orientation page for a developer picking up the project.
-Covers `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` through entry §111.
+Revised 2026-09-02 — orientation page for a developer picking up the project.
+Covers `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` through entry §125.
 
 > ACE (Agent Certification Engine) injects real infrastructure faults into a live
 > Kubernetes cluster, lets an AI agent attempt autonomous remediation, and runs its
 > full LLM trace through a 4-phase pipeline to produce a statistical certification
 > report. This page orients a new developer: what exists, how it fits together, what
 > was just fixed, and what's still open. It is a condensed companion to
-> `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` (111 entries) and `innovation.md`, not a
+> `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` (125 entries) and `innovation.md`, not a
 > replacement for either.
 >
-> **This revision** folds in handoff entries §82–§111 — the "make local builds tell
-> the truth" run (§82–§95) and then the multi-day debugging arc of a single ITBench
-> experiment (`q`: `sre-agent-comprehensive` on Bookinfo, §96–§111), where every
-> re-run failed in a new way and each failure was a real platform bug. §93–§105 are
-> committed and pushed; §106–§111 are source-only and uncommitted.
+> **This revision** folds in handoff entries §112–§125 — the arc that took
+> `sre-agent-comprehensive` from "never once started" to **autonomously investigating
+> and remediating a live fault through its own LLM tool-calling loop** (§119, §123,
+> §124, §125); a real agent-remediation verdict to replace the always-100% resiliency
+> score (§120–§122); cluster-scoped infra RBAC covering the whole fault catalogue
+> (§112); and a Chaos Studio agent-model picker that survives an N=30 batch
+> (§114–§118). §93–§116 are committed and pushed (§117); §118–§125 are source-only
+> and uncommitted.
 
 ## Quick facts
 
 | | |
 |---|---|
 | Agents onboarded | 6 charts — `flash-agent`, `ciso-agent`, `sre-agent`, `sre-agent-comprehensive`, `sre-agent-crewai`, `k8s-agent` |
-| Under active test | `sre-agent-comprehensive` on Bookinfo (the `q` experiment) — see §5 |
-| Model routing | Ollama qwen2.5 (local GPU) + Azure `gpt-4o` alias |
+| Under active test | `sre-agent-comprehensive` — the `reactfix` multi-fault sweep on otel-demo (§124/§125) and the `q` experiment on Bookinfo (§96–§113) |
+| Model routing | Ollama qwen2.5-32b (local GPU, the silent default) + Azure `gpt-4o` alias → GPT-5, now selectable per-run (§114/§125) |
 | GPU | NVIDIA RTX A6000, 49 GB — ~40–100× vs CPU |
 | Legacy dataset | 137/137 SRE runs — flash-agent + local Ollama, 2026-08-12 (historical baseline) |
-| Branch | `feature/itbench-scenarios` — §93–§105 pushed; §106–§111 uncommitted locally |
+| Branch | `feature/itbench-scenarios` — §93–§116 pushed (§117); §118–§125 uncommitted locally |
 
 ## Read this first — corrections to how this project has been reported
 
@@ -45,10 +48,33 @@ Covers `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` through entry §111.
    ingestion (§108/§110). The UI and the certifier both filter by time window, so a
    trace 8000 years in the future looks exactly like "no trace." Fixed in source;
    the running cluster picks it up on the next `setup.sh --restart --local-build`.
-4. **`sre-agent-comprehensive` had never once started.** Two bugs in its own
-   committed source crash-looped it on import, so no `q` run ever made an LLM call
-   until §101. Fixed and rebuilt locally; not yet re-run end to end.
-5. **The rootless-Docker migration produced six distinct incidents**, one still
+4. **`sre-agent-comprehensive` now runs, investigates, and remediates — but only
+   just.** Through §111 two import bugs crash-looped it so no `q` run ever made an LLM
+   call. §113/§119 bounded its scan loop and surfaced the opaque `unhandled errors in
+   a TaskGroup` MCP failures; §123 made its deterministic preflight reliably fix a
+   scaled-to-zero workload end-to-end (verified live, Run 5); §124 replaced CrewAI's
+   text-ReAct executor — which doom-loops with qwen — with a native OpenAI
+   tool-calling loop (`tool_loop.py`, `SRE_AGENT_ENGINE=toolcalling`, the new
+   default), and the agent now autonomously investigates and remediates through the
+   LLM path (verified live, Run 6). A multi-fault sweep is in progress (§124/§125).
+   All of this is uncommitted and local to the `agentcert-alfred` cluster.
+5. **The agent's model was silently always qwen, never the `gpt-4o` alias, until
+   §125.** ChaosCenter's GraphQL server rewrites the install-agent `MODEL_ALIAS` on
+   every run from its own `FLASH_AGENT_MODEL` env (`qwen2.5-32b-instruct`); the
+   manifest's model param was ignored. §114 added a per-run model picker to Chaos
+   Studio, §118 made the pick stick across an N=30 batch, but the sweep harness only
+   started passing `modelAlias` in §125. GPT-5 (behind `gpt-4o`) is now working —
+   ~1.5 s/call, native tool-calling, no 429s. Model identity still needs to be
+   pinned and reported (§8 Phase A).
+6. **The ITBench resiliency score read 100%/Pass on every run regardless of what the
+   agent did** — the ChaosEngines carry no probes and each fault self-reverts inside
+   the injector before any post-chaos probe could run (§120). §120 adds a mid-chaos
+   (post-hold, pre-revert) probe checkpoint and was verified live two ways (agent
+   fixes it → Pass; agent does nothing → Fail/0%); §122 makes the litmus-go framework
+   assert recovery for every fault with no probe YAML at all. Both are source-only,
+   not yet on the running cluster, and the dynamic ChaosCenter certification path
+   still needs §122's `:recovery-check` image promoted.
+7. **The rootless-Docker migration produced six distinct incidents**, one still
    unfixed (per-user kernel keyring exhaustion) — see §4.
 
 ---
@@ -192,11 +218,25 @@ experiments that structurally could never report a pass, so the `q` workflow sco
 pass/fail tally, and §104 rebuilt the teardown steps as real SDK experiments so they
 actually pass.
 
+**The bigger scoring gotcha (§120–§122):** even with teardown excluded, the ITBench
+ChaosEngines carry **no probes**, and every itbench `InjectFunc` does
+patch → hold → revert *inside* `inject()` — so by the time any post-chaos probe would
+run, the fault is already gone and the verdict is a vacuous `Pass` / `100%`, fully
+decoupled from whether the agent did anything. §120 moves the evaluation point to a
+**mid-chaos hook** (`HoldChaos` in `litmus-go/pkg/itbench/common/`, fires post-hold /
+pre-revert — the last instant the fault is live) and wires a real recovery `cmdProbe`
+onto one reference fault; §121 authored 42 fault-appropriate probes (inert until the
+workflow files stop `kubectl apply`ing shell-script ChaosExperiments over the SDK
+ones); §122 adds an **SDK-native default recovery assertion** so the framework scores
+`readyReplicas`/endpoint recovery for every fault with zero probe YAML. §120 is live-
+verified on a throwaway target; §122's image is built (`:recovery-check`) but not
+promoted. This is what has to land before an N=30 batch produces a meaningful score.
+
 ---
 
 ## 3. What's been done, in order
 
-The full log is `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` — 111 numbered entries with
+The full log is `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` — 125 numbered entries with
 commit SHAs, exact commands, and verification steps. This is the shape of it.
 
 1. **30 ITBench SRE fault bundles completed** — all 30 ITBench scenarios landed as
@@ -241,6 +281,20 @@ commit SHAs, exact commands, and verification steps. This is the shape of it.
     split; the agent crash-looping on two import bugs in its own source; the
     resiliency score counting un-passable teardown steps; and finally ClickHouse
     silently breaking every Langfuse timestamp. See §5.
+15. **Making `sre-agent-comprehensive` actually work + a real verdict (§112–§125)** —
+    committed §107–§116 (§117), then the uncommitted §118–§125 run: cluster-scoped
+    infra RBAC widened to the full fault-catalog union (§112); a Chaos Studio
+    agent-model picker (§114) that no longer blanks the page (§115) and now persists
+    across an N=30 batch (§118); the infra list refreshing after "Done" (§116); the
+    `setup.sh` `helm_deploy` `set -e` abort that was the real cause of the §115 "web
+    pod never cycled" mystery, plus `ollama.ace.svc` unreachability, both fixed
+    (§118); MCP errors made legible and the blind scan loop bounded (§119); a
+    mid-chaos recovery-probe checkpoint + 42 probes + an SDK-native default recovery
+    assertion (§120–§122); the deterministic preflight proven to remediate
+    scaled-to-zero live (§123); CrewAI's text-ReAct executor replaced with a native
+    tool-calling loop so the LLM path investigates and remediates on its own (§124);
+    and GPT-5 wired through as a real per-run model choice (§125). Multi-fault sweep
+    in progress.
 
 ---
 
@@ -357,7 +411,7 @@ is running.**
   username typo (`aruscher_dev` vs `aruscher-dev`) was blocking auth and was
   corrected directly.
 
-### Batch 4 — uncommitted, source only (§106–§111)
+### Batch 4 — the ClickHouse arc + UI fixes, now committed & pushed via §117 (§106–§116)
 
 - **§106** The §99 per-experiment RBAC sandbox is **switched off** for now
   (`perExperimentChaosRBACEnabled = false`) — its permission list only covered
@@ -396,6 +450,80 @@ is running.**
   three (server sorts newest-first by `created_at`; the list query sets the flag and
   stops flashing the spinner over the table on background polls; "Done" awaits the
   refetch before restarting the poll). Needs `graphql` + `web` rebuilt to go live.
+- **§112** Cluster-scoped chaos-infrastructure RBAC (`litmus-admin-cluster-role` in
+  the generated `manifests/cluster/` bundle) still carried the narrow upstream Litmus
+  permission set, so `uninstall-agent` / `uninstall-application` 403'd on `book-info`
+  every run. Replaced with the **union of every permission the `chaos-charts` fault
+  catalogue declares**, plus a catalog-driven Go regression test; namespace-scoped
+  infra validated against the namespaced subset.
+- **§113** `sre-agent-comprehensive` runs a **bounded scan loop** (stays alive through
+  the fault window instead of one-shot-exit-then-CrashLoop), rejects a premature empty
+  CrewAI answer until minimum tool evidence exists, and emits **tool-call spans to
+  Langfuse** so a trace shows what the agent actually did, not just paid completions.
+- **§114 / §115** A Chaos Studio **agent-model picker** (`listAgentModelOptions` +
+  `runChaosExperiment(modelAlias:)`) so a single manual run can pick Ollama vs an
+  API model without redeploying. §115: it was added to an `import type` block, so
+  `ts-loader`'s transpile-only build elided it and Chaos Studio rendered a blank
+  page — fixed, plus a note to add `npm run typecheck` to the web build.
+- **§117** All of §107–§116 committed and pushed across `chaos-charts`, `agent-charts`,
+  `AgentCert`, and the superproject; pointers bumped.
+
+### Batch 5 — `sre-agent-comprehensive` made to work + a real verdict, uncommitted (§118–§125)
+
+- **§118** The §114 model pick was lost on runs 2..N of a multi-run batch — every
+  re-run called `RunChaosWorkFlow(..., "")` and re-resolved the env default, so an
+  N=30 batch was not model-consistent. Now persisted as a
+  `litmuschaos.io/modelAlias` manifest annotation, resolved once and reused. **Also
+  in §118:** two `setup.sh` bugs — (1) `helm_deploy` `wait`s on a just-killed
+  background watch loop, which returns 143 and, under `set -e`, **aborts the entire
+  script right after "Happy Helming!"**, skipping `restart_locally_built_deployments`
+  and steps 5c–5f. *This is the root cause of the §115 "web image rebuilt but pod
+  never cycled" mystery.* (2) step 5c's Ollama-network resolution took SIGPIPE under
+  `pipefail`. Both fixed; plus `ollama.ace.svc.cluster.local` made reachable by
+  `docker network connect`ing the Ollama container to the `kind` net (this host drops
+  Docker inter-bridge forwarding to a published port).
+- **§119** Every MCP tool call failed with the opaque `unhandled errors in a
+  TaskGroup`; the blind scan loop then re-emitted a byte-identical empty diagnosis
+  ~13×/run; and `temperature=0.0` made all N certification runs identical. Fixed:
+  `_unwrap_exc` flattens the anyio `ExceptionGroup` to its real cause, an
+  `asyncio.wait_for` timeout is enforced, `check_mcp_reachable()` gates each cycle and
+  abandons the loop after 3 all-down cycles, and `SRE_AGENT_TEMPERATURE` defaults to
+  0.2.
+- **§120 → §122** A **real agent-remediation verdict.** §120: a mid-chaos hook
+  (`HoldChaos`, post-hold / pre-revert) in `litmus-go/pkg/itbench/common/` runs a
+  recovery probe at the last instant the fault is live, then the injector's own revert
+  still runs — live-verified both ways on a throwaway target. §121: 42
+  fault-appropriate `cmdProbe`s authored across the workflow files (inert until those
+  files stop `kubectl apply`ing shell-script ChaosExperiments over the SDK ones).
+  §122: an **SDK-native default recovery assertion** (`readyReplicas` / endpoint
+  presence) so the framework scores every fault with zero probe YAML — this is the one
+  the dynamic ChaosCenter path needs. `:recovery-check` image built, not promoted.
+- **§123** `sre-agent-comprehensive` **actually remediates** a scaled-to-zero workload
+  end-to-end — four separate breakages fixed: the K8s MCP server now returns YAML not
+  tables; the MCP tool names in `mcp_tools.py` corrected to what this server build
+  exposes (`resources_scale`, `resources_create_or_update` — there is no
+  `resources_patch`); the MCP ServiceAccount given namespace-scoped **write** verbs;
+  and `crew.kickoff()` bounded by `_kickoff_with_timeout` (120 s) so the deterministic
+  preflight gets a second scan turn. Verified live (Run 5): `quote` back to `1/1`
+  ~7 min before self-revert.
+- **§124** Replaced CrewAI 0.95's hard-wired **text-ReAct executor** (which doom-loops
+  with qwen — free-runs past the `\nObservation:` stop, scratchpad bloats, completion
+  goes empty, restarts) with a **native OpenAI tool-calling loop** — new
+  `tool_loop.py`, `SRE_AGENT_ENGINE=toolcalling` (default). Duplicate-call
+  suppression, force-answer after 16 steps, `compact_tool_output` to fit a 20-step
+  investigation in context. Verified live (Run 6): the LLM path walked
+  list→get→`patch_resource` and remediated on its own, ~7 min before self-revert.
+- **§125** Deep-dive enforcement (`_open_issues` rejects a "nothing wrong" conclusion
+  while the cluster still has unremediated problems), entity-naming nudge, sharper
+  symptom→tool prompt, and **GPT-5 (the `gpt-4o` alias) wired through as a real
+  per-run model** — ChaosCenter was silently rewriting `MODEL_ALIAS` to
+  `qwen2.5-32b-instruct` on every run; `register_experiment.py` / `sweep.py` now pass
+  `modelAlias`. GPT-5 works: ~1.5 s/call, parallel tool calls, no 429s (needs
+  `max_completion_tokens`, not `max_tokens`). Multi-fault sweep running.
+- **§125 (CRD)** `unknown field 'spec.experiments[0].spec.rank'` warning spam in every
+  inject-fault log is **not an error** — pure version skew between the trimmed
+  ChaosEngine CRD bundle and `chaos-runner:3.0.0`. `rank` declared in all three CRD
+  copies; needs the CRD re-applied.
 
 ---
 
@@ -413,6 +541,12 @@ A sample, grouped by where the bug lived. Full detail and SHAs in the handoff lo
 | LLM gateway | Prompt silently truncated | Ollama's default 2048-token context window vs. a ~2100-token system prompt; fixed with `num_ctx: 16384` |
 | Agent code | CISO agent crashed for any non-GPT model | Two LLM call paths each hardcoded a `"gpt" in model` check |
 | Agent code | `sre-agent-comprehensive` never once started (§101) | `crew.py`: bare `import mcp_tools` instead of a relative import, plus a stray top-level `build_crew()` call — both fire on import |
+| Agent code | `sre-agent-comprehensive` made paid LLM calls but never remediated (§113/§119/§123/§124) | scan loop exited one-shot then CrashLooped; every MCP call died as opaque `unhandled errors in a TaskGroup`; MCP tool names had drifted (`resources_patch` doesn't exist); MCP SA was read-only; CrewAI text-ReAct doom-loops with qwen — fixed by a bounded scan loop, error unwrapping, correct tool names + write RBAC, and a native tool-calling loop replacing the CrewAI executor |
+| Agent code | Agent always ran on qwen even when a run picked `gpt-4o` (§125) | ChaosCenter's `ops.InjectExperimentContextArgs` rewrites install-agent `MODEL_ALIAS` from the server's own `FLASH_AGENT_MODEL` env on every run; the harness never passed the `runChaosExperiment(modelAlias:)` arg |
+| Scoring | ITBench resiliency 100%/Pass regardless of agent behavior (§120–§122) | ChaosEngines carry no probes, and each fault self-reverts inside `inject()` before any post-chaos probe runs — verdict fully decoupled from the agent |
+| Deploy tooling | `setup.sh --restart --local-build` rebuilt images but never cycled the pods (§115/§118) | `helm_deploy` `wait`s on a just-SIGKILLed background watch loop → exit 143 → `set -e` aborts the whole script right after the Helm deploy, before `restart_locally_built_deployments` and steps 5c–5f |
+| Infra | `litellm.ace.svc` → `ollama.ace.svc.cluster.local` times out even with the Service present (§118) | this host drops Docker inter-bridge forwarding to a published port; fixed by `docker network connect`ing the Ollama container onto the `kind` network and pointing Endpoints at its IP:11434 |
+| Cluster / infra | Cluster-scoped infra RBAC 403s `uninstall-*` on the app namespace (§112) | generated `litmus-admin-cluster-role` still had the narrow upstream permission set, not the union of what the `chaos-charts` fault catalogue declares |
 | Certifier | Phase 4 PDF silently dropped half its content | Renderer dispatch table handled only 7 of 14 block types |
 | Certifier | `total_runs: 0` in every report | Key-path typo: `experiment.run_id` vs. `experiment_run_id` |
 | Scoring | `q` always scored 33.3% resiliency (§101/§102) | The score counted the two teardown steps as chaos experiments that structurally cannot report a pass |
@@ -428,19 +562,63 @@ A sample, grouped by where the bug lived. Full detail and SHAs in the handoff lo
 
 ## 7. What's actually unresolved right now
 
-### 🔴 The ClickHouse fix (§110) is in source but not on the running cluster
-Until `./scripts/setup.sh --restart --local-build` runs, the live ClickHouse still
-clamps every new timestamp to `9999-12-31`, so fresh traces stay invisible. The 6
-already-stored traces can't be salvaged.
-**Recommendation:** run the restart, then a fresh `q` run to get a usable trace + cert.
+> **State of `sre-agent-comprehensive` (the headline).** It now works: it stays alive
+> through the fault window, makes real MCP tool calls, and remediates — the
+> deterministic preflight does scaled-to-zero reliably (§123, Run 5), and the native
+> tool-calling loop that replaced CrewAI's text-ReAct executor investigates and
+> remediates through the LLM path on its own (§124, Run 6), on GPT-5 via the `gpt-4o`
+> alias (§125). What's left is **breadth and durability**, not "does it run": the
+> multi-fault sweep (§124/§125) is still triaging which fault classes the model
+> reliably fixes, and none of §118–§125 is committed or on any cluster but
+> `agentcert-alfred`.
 
-### 🔴 §106–§111 are uncommitted, and much of §96–§102 needs a rebuild to go live
-The per-experiment RBAC decision (§106), the uninstall picker (§107), the ClickHouse
-and Langfuse-Postgres fixes (§110, §111), and the A2A bridge (§109) are all source
-only. The §97/§98/§99/§100/§102 fixes are committed but need
-`setup.sh --restart --local-build` (Go/web images) to take effect on the cluster.
-**Recommendation:** commit §106–§111 per-repo, bump submodule pointers, push; then a
-single `--restart --local-build`.
+### 🔴 §118–§125 are entirely uncommitted; the whole agent-works story is local
+`tool_loop.py`, the MCP-tool-name + write-RBAC fixes, the recovery-verdict work
+(§120–§122), the two `setup.sh` bugs, and the model-alias plumbing are all
+working-tree only, across the `agents/sre-agent-comprehensive`, `app-charts`,
+`chaos-charts`, `litmus-go`, and `AgentCert` trees. The agent image, the
+`install-app` RBAC image, and `itbench-experiment` are all local to `agentcert-alfred`
+(loaded via `docker save`→`ctr import` because plain `kind load` no-ops on this host).
+**Recommendation:** commit per-repo, bump submodule pointers, push; then rebuild
+images wherever else this runs.
+
+### 🔴 The ClickHouse fix (§110) is committed but may still need a cluster restart
+§117 committed it, but it only takes effect after `setup.sh --restart --local-build`
+re-applies the ClickHouse manifests. If the live cluster predates that, fresh traces
+still clamp to `9999-12-31`. Confirm ClickHouse is on the pinned `:26.8` with the
+`input_format_read_datetime_number_as_raw_value` drop-in before trusting any new trace.
+
+### 🔴 A real N=30 verdict is not wired end-to-end yet
+§120 (mid-chaos probe checkpoint) is live-verified but only on a hand-built
+ChaosEngine; §122 (SDK-native default recovery assertion — the one the dynamic
+ChaosCenter certification path actually needs) is built as
+`agentcert/itbench-experiment:recovery-check` but **not promoted to `:dev` and not
+live-run**. The 42 §121 probes are inert until the workflow files stop
+`kubectl apply`ing shell-script ChaosExperiments over the SDK ones. Until one of these
+lands, every ITBench run still scores a vacuous `Pass`/`100%`. The sweep harness
+currently judges recovery by watching `quote` readiness vs the self-revert deadline,
+not by a ChaosResult.
+
+### 🔴 The model was silently always qwen — verify per-run identity end-to-end
+§125 fixed the harness to pass `modelAlias`, and traces now show `model=azure/gpt4o`.
+But ChaosCenter still resolves `MODEL_ALIAS` from `FLASH_AGENT_MODEL` whenever no
+explicit alias is passed (the §118 annotation only persists a pick that was made). Any
+path that doesn't go through the §125 harness or the §114 Chaos Studio picker still
+gets the env default. Combined with the `gpt-4o`→GPT-5.1 mislabeling (§Read-this-first
+#1), a validated model/provider field at registration + real `model` extracted from
+Langfuse spans into the report is still Phase A work.
+
+### 🔴 The `spec.rank` CRD warning needs the CRD re-applied
+Cosmetic (§125), but the fix is code-only — `kubectl apply` the updated
+`2a_litmus_crds.yaml`, or `setup.sh --restart --local-build`, to silence it.
+
+### 🔴 Every install-agent step still gets flash-agent-shaped values
+`injectExperimentContextArgs` (GraphQL) matches any install-agent step by template
+name alone and injects a fixed `--set` list shaped for flash-agent's schema. §113
+added a batch of `sre-agent-comprehensive`-specific keys (`TARGET_NAMESPACE`,
+`WORKFLOW_UID`, Langfuse, bounded-runtime) to that same fixed list, so it works for
+these two agents by union — but there is still no branching on the agent's declared
+schema. **Recommendation:** branch on `agenthub` metadata — step A1 of §8.
 
 ### 🔴 The teardown fault definitions need pushing to the AgentCert-org repo
 §104 rebuilt `uninstall-agent` / `uninstall-application` as real SDK experiments, but
@@ -449,28 +627,26 @@ change is on that remote, a live run still installs the old helm-wrapper version
 The existing `q` experiment also needs its two teardown steps **re-added in Studio**
 to pick up the new versions.
 
-### 🔴 Every install-agent step still gets flash-agent-shaped values
-`injectExperimentContextArgs` (GraphQL) matches any install-agent step by template
-name alone and injects a fixed `--set` list shaped for flash-agent's schema.
-`sre-agent-comprehensive` uses a different schema with no branching. The 2026-08-25
-UI-workflow fixes improved the surrounding path but this core hardcoding is unchanged.
-**Recommendation:** branch on the agent's declared schema (`agenthub` metadata) —
-step A1 of §8.
-
 ### 🔴 Per-UID kernel keyring exhaustion can silently block all new pods
 `kernel.keys.maxkeys` (default 200, per Linux user) is shared across every
 rootless-Docker container; a long-running crash-looping pod burns through it, then an
 unrelated experiment fails with a misleading "disk quota exceeded." Full writeup §4.
 
-### 🟡 `sre-agent-comprehensive` fix (§101) not re-run end to end
-The crash-loop fix is built and loaded locally; no `q` run has confirmed the agent
-now actually produces a diagnosis and a trace.
+### 🟡 `sre-agent-comprehensive` LLM reasoning quality on the harder faults
+Even when the agent remediates, the diagnosis narrative can hallucinate the cause
+(Run 6 invented a "missing nodeSelector / Pending" story for what was just a replica
+count). qwen2.5:32b investigates shallowly (§125); GPT-5 does `get`-level inspection
+and parallel tool calls but is verbose enough that its final JSON truncated at 2000
+tokens (fixed to 6000). Treat as a certification finding or move to a bigger open
+model.
 
 ### 🟡 Ollama's Service may still point at a dead endpoint
 Found dangling after a rootless-Docker migration removed the container while the
-Service/Endpoints object and model volume survived. **Check:**
-`docker --context rootless ps -a | grep ollama`; if absent,
-`./scripts/start-local-services.sh --only-ollama`.
+Service/Endpoints object and model volume survived. §118's step-5c fix
+`docker network connect`s the container onto the `kind` net and repoints Endpoints,
+but the `kind`-net IP is DHCP and changes on any container recreate — 5c must re-run
+after one. **Check:** `docker ps -a | grep ollama`; if absent,
+`./scripts/start-local-services.sh --only-ollama`, then `setup.sh --restart`.
 
 ### 🟡 Rootless-Docker Compose rework: parse-verified, not run end-to-end
 Verified via `docker compose config`; a real `docker compose up` under a rootless
@@ -490,18 +666,33 @@ category; caught gracefully, but the content is generic.
 ## 8. What's left before ITBench faults are fully onboarded onto standard benchmarking
 
 ### Phase A — Correctness blockers
-1. **Stop hardcoding flash-agent's value schema** — branch
-   `injectExperimentContextArgs` on the selected agent's declared schema.
-2. **Commit §106–§111, then `setup.sh --restart --local-build`** — the ClickHouse,
-   Langfuse-Postgres, RBAC, resiliency-score, run-view, and namespace-mapping fixes
-   only take effect after a Go/web image rebuild.
-3. **Push the §104 teardown fault definitions to the AgentCert-org `chaos-charts`**
+1. **Commit §118–§125 per-repo, bump submodule pointers, push, rebuild images.** The
+   entire "agent now works" story — `tool_loop.py`, MCP tool names + write RBAC,
+   `setup.sh` bugs #1/#2, model-alias plumbing, the recovery-verdict work — is
+   working-tree only and local to `agentcert-alfred`. Nothing else picks it up until
+   this happens.
+2. **Land a real remediation verdict.** Promote `agentcert/itbench-experiment:recovery-check`
+   (§122) to `:dev`, `kind load`, and do the two-case live run (agent fixes it → Pass;
+   agent does nothing → Fail/0%) on the *no-probe* dynamic path. Then the ITBench
+   score stops being vacuous.
+3. **Finish the multi-fault sweep (§124/§125)** — run `sweep.py --all`, triage which
+   fault classes the model reliably misses, and add a hybrid deterministic preflight
+   floor (§124 "Step 4") for the ~6 blunt structural faults.
+4. **Confirm ClickHouse + the `spec.rank` CRD are actually applied on the target
+   cluster** — both are committed/code-done but need `setup.sh --restart --local-build`
+   (or a manual `kubectl apply`) to be live.
+5. **Push the §104 teardown fault definitions to the AgentCert-org `chaos-charts`**
    so a deployed hub serves them; re-add the two teardown steps to `q` in Studio.
-4. **Re-run `q` end to end** — confirm `sre-agent-comprehensive` produces a real
-   diagnosis, a dated Langfuse trace, a green run graph, and a sane resiliency score.
-5. **Pin and report actual model identity** — a validated model/provider field at
+6. **Stop hardcoding flash-agent's value schema** — branch
+   `injectExperimentContextArgs` on the selected agent's declared `agenthub` schema
+   instead of the current works-by-union fixed `--set` list.
+7. **Pin and report actual model identity** — a validated model/provider field at
    agent registration; extract the real `model` from Langfuse spans into the report
-   `Meta` section. Non-optional given the gpt-4o→GPT-5.1 mislabeling.
+   `Meta` section. Non-optional given the gpt-4o→GPT-5.1 mislabeling *and* the silent
+   `FLASH_AGENT_MODEL` override (§125).
+8. **Run an N=30 batch on `sre-agent-comprehensive`** once 1–4 land — a green run
+   graph, dated traces, per-run variance (`SRE_AGENT_TEMPERATURE=0.2`), and a
+   resiliency score that tracks actual remediation.
 
 ### Phase B — Coverage
 6. **Repeat the real-UI-trigger validation for the other agents** — `sre-agent`,
@@ -563,7 +754,8 @@ section numbers.
 | Doc | What's in it |
 |---|---|
 | `CLAUDE.md` | Authoritative repo map — architecture, subsystems, env vars, entry points. Read first. |
-| `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` | The full 111-entry technical change log — commit SHAs, exact commands, verification steps. |
+| `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` | The full 125-entry technical change log — commit SHAs, exact commands, verification steps. |
+| `.tmp/sre-agent-experiments/REACTFIX_HANDOFF.md` · `reactfix/sweep.py` · `sweep_results*.tsv` | The `sre-agent-comprehensive` fault-sweep working notes, harness, and per-model result archives (§123–§125). Not repo code. |
 | `OPEN_WEIGHT_CERTIFICATION_HANDOFF_READABLE.md` | Prose rewrite of the same log, easier to skim. |
 | `innovation.md` | Every feature considered or implemented across ACE, with status — source for §9. |
 | `chaos-charts/ITBENCH_HANDOFF.md` | Design notes for the 30 ITBench fault bundles (submodule). |
@@ -574,7 +766,7 @@ section numbers.
 | Command | Does what |
 |---|---|
 | `./scripts/setup.sh` | Interactive first-time wizard |
-| `./scripts/setup.sh --restart --local-build` | Redeploy **and rebuild** Go/web images — needed for every §97–§111 fix to land on the cluster |
+| `./scripts/setup.sh --restart --local-build` | Redeploy **and rebuild** Go/web images — needed for every §97–§125 fix to land on the cluster (and, since §118, it actually reaches the post-Helm steps now) |
 | `./scripts/start-local-services.sh` | Bring up MongoDB + Langfuse + Ollama + LiteLLM + Certifier via Compose |
 | `python scripts/ace-bench.py flash-agent --runs 30` | Dev-tool: run the flash-agent trace_based pipeline locally |
 | `python scripts/run_certification.py --trace-id <UUID>` | Run the certifier pipeline for one trace, no FastAPI server needed |
@@ -597,9 +789,10 @@ Always use `ACE_INSTANCE_NAME`-scoped naming and `scripts/compose-up-guard.sh`.
 
 ---
 
-*Built from `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` / `_READABLE.md` (111 entries),
+*Built from `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` / `_READABLE.md` (125 entries),
 `innovation.md`, `CLAUDE.md`, the `docs/` site (architecture, experiment-flow,
 certification-flow, the pipeline pages — source for the two system diagrams and the
-repo map), and a direct look at git log / status and the live GraphQL server source.
-First built 2026-08-25, revised 2026-09-01. Treat the handoff docs and `innovation.md`
-as the source of truth for anything condensed here.*
+repo map), the `.tmp/sre-agent-experiments/` sweep notes, and a direct look at git
+log / status and the live GraphQL server source. First built 2026-08-25, revised
+2026-09-02. Treat the handoff docs and `innovation.md` as the source of truth for
+anything condensed here.*

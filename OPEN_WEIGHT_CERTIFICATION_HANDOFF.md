@@ -9589,3 +9589,154 @@ instead of retrying. Worst case is now ~3 calls + ~45s vs ~900/fault.
 Image rebuilt: `sha256:6ed76377f318` on the node. Verified at fix time: no sweep
 processes, 0 LiteLLM requests, no agent pods, no crons/monitors — nothing was
 spamming when the fix was made.
+
+### §127 — Cert-reset bug: `StartCertificationGeneration` resets finalized cert for old runs (2026-09-17)
+
+**Status:** fix applied, uncommitted.
+
+**Symptom reported by user:**
+- Multi-run experiment with `maxRuns=30` configured on `test-final`.
+- Ran 30 times successfully; certificate generated.
+- After opening the Experiment Run History page (or navigating to another experiment's page), the certificate disappeared and all runs appeared to go back into "queued/in-progress" state.
+- User also noted the run count showed 48 instead of 30.
+
+**Root-cause analysis (two separate issues):**
+
+*Issue A — 48 instead of 30 (display confusion, not a code bug):*
+`totalNoOfExperimentRuns` from `listExperimentRun` is the full run history across all time — previous test attempts plus the 30 actual runs totalled 48. The frontend's auto-trigger fallback at `ExperimentRunHistory.tsx:238` uses `multiRunConfig?.maxRuns ?? totalExperimentRuns ?? newlyTerminal.length`, so with `maxRuns=30` set correctly this is not a functional problem (cert target is 30). The "48" is purely a count of historical runs in MongoDB.
+
+*Issue B — cert reset on page reload (real bug):*
+`autoTriggeredRunsRef` in `ExperimentRunHistory.tsx` is in-memory React state, reset to `new Set()` on every page load. On load:
+1. All 48 terminal runs detected as "newly terminal".
+2. Guard at line 226-227 (`allTerminalRuns.length <= alreadySubmitted`) fails: `48 > 30`.
+3. `autoTriggerMutation` fires for all 48 runs.
+4. For each run, `StartCertificationGeneration` is called on the backend.
+5. **For the 18 old runs:** `ResetStatusIfCertified` matches `status=EXPERIMENT_CERTIFICATE_READY` and resets to `RUNS_IN_PROGRESS`.
+6. `UpsertRunWorkflowInitial` creates NEW workflow docs for the 18 old runs (they weren't in `certificate_run_workflows` from the prior batch).
+7. `runPipeline` goroutines dispatch; old runs queue for bucketing in the certifier.
+8. Gate re-evaluates: 18 runs in `BUCKETING_TRIGGERED` state → gate stays closed.
+9. Certificate is gone; everything appears queued.
+
+**Fix applied:**
+`AgentCert/chaoscenter/graphql/server/pkg/certification/service.go` — added an early-return guard at the top of `StartCertificationGeneration`: fetch the existing run-workflow doc; if it has `status=BUCKETING_COMPLETED`, return `ALREADY_COMPLETED` immediately without touching `ResetStatusIfCertified`, `UpsertExperiment`, or dispatching a goroutine. This short-circuits the re-trigger path for runs that are already fully processed and ensures a finalized certificate is never erased by stale auto-trigger calls.
+
+**Files changed:**
+| File | Change |
+|------|--------|
+| `AgentCert/chaoscenter/graphql/server/pkg/certification/service.go` | Added `GetRunWorkflow` guard before `ResetStatusIfCertified`; returns `ALREADY_COMPLETED` for already-bucketed runs |
+
+**Durability:** fix is in checked-in source; a fresh build picks it up. The GraphQL server image must be rebuilt and reloaded into KinD (or redeployed) for the fix to take effect in a running cluster.
+
+**Setup guidance (how to avoid the 48-count confusion):**
+- Always configure experiments as Multi-Run (`litmuschaos.io/multiRunEnabled: "true"`, `litmuschaos.io/maxRuns: "30"`) before running, not after.
+- If a test already has accumulated old runs, the cert now correctly ignores them on page reload (the fix). For a clean start, delete old `chaosExperimentRuns` from MongoDB for the experiment, or create a fresh experiment.
+- The "Run" button is disabled for Multi-Run experiments by design — the system auto-runs them sequentially up to `maxRuns` times; do not click "Run" manually mid-batch.
+
+**Verification needed:**
+- Rebuild `agentcert/graphql-server` image: `./scripts/build-and-push.sh` or `make kind-load` (see Makefile).
+- Run an experiment to `maxRuns=5` for a quick smoke test; let it complete and generate a cert; reload the page; confirm cert status stays `EXPERIMENT_CERTIFICATE_READY`.
+
+### §128 — CORRECTION + real root cause: multi-run executor runaway (148 runs from maxRuns=25) (2026-09-17)
+
+**Status:** code fix applied + compile/test verified, uncommitted. Live instance remediated. **Image NOT yet rebuilt — the running cluster still has the buggy binary.**
+
+**This entry supersedes §127's root-cause analysis.** §127 hypothesised that "30 runs showing as 48" was stale run history plus a frontend auto-trigger re-firing. That hypothesis was wrong — it was formed before inspecting the live instance. The cert-reset guard §127 added is still a genuine, valid defect fix and is retained; it simply was not the cause of the run-count inflation.
+
+**What was actually happening — evidence from the live instance:**
+
+`test-final` (experiment_id `a361aa5e-3f56-4fc9-a3f5-d87956bacd53`) had `planned_runs=25` and **148 documents in `chaosExperimentRuns`**, still growing. 157 Argo workflows existed in the `litmus` namespace: 63 Succeeded, 33 Failed, **57 Pending**. The Pending pile-up is exactly the user-reported symptom "the whole completed run goes in queue".
+
+Smoking gun in the graphql pod logs — two *different* run IDs completing 29s apart, each independently advancing the counter and launching a run:
+
+```
+06:58:14 run ec169cdd  currentRun 18->19  -> "Triggering run 20/25"
+06:58:43 run e3c2051d  currentRun 19->20  -> "Triggering run 21/25"
+07:00:14 -> "Successfully triggered run 20/25"
+07:00:43 -> "Successfully triggered run 21/25"
+```
+
+The sequential chain had forked into parallel chains running ~30s out of phase.
+
+**Three defects in the old executor** (`chaos_experiment_run/handler/handler.go`, `ChaosExperimentRunEvent`):
+
+1. **Racy read-modify-write.** `currentRun` was stored as a JSON annotation *inside the manifest string*. Each completion read it, incremented in Go, and wrote the whole manifest back. Concurrent completions lose updates.
+2. **No single-chain guard (the fork).** Any completing run advanced the chain and dispatched another. Once two runs were ever in flight, each completion spawned its own successor — two self-sustaining chains, then four. Nothing in the code constrained the batch to one outstanding run.
+3. **Reset-to-0 restarted the batch (the unbounded part).** On reaching `maxRuns` the handler reset `currentRun` to `"0"`. Any straggler completion arriving afterwards then read 0, incremented to 1, saw `1 < 25`, and kicked off a whole fresh 25-run batch. Combined with the fork this never terminates — hence 148 and climbing.
+
+Defect 3 alone converts a bounded batch into an infinite loop; defect 2 multiplies the rate.
+
+**Fix applied (3 files):**
+
+| File | Change |
+|------|--------|
+| `pkg/database/mongodb/chaos_experiment/schema.go` | New `MultiRunState{Launched int, CompletedRunIDs []string, BatchDone bool}` stored as first-class BSON fields (`multi_run_state`), deliberately NOT inside the manifest JSON, so progress advances by atomic conditional update instead of read-modify-write |
+| `pkg/database/mongodb/chaos_experiment/operations.go` | New `UpdateChaosExperimentWithResult` returning `*mongo.UpdateResult` so compare-and-set callers can branch on `MatchedCount` |
+| `pkg/chaos_experiment_run/handler/handler.go` | Old inline executor replaced by `advanceMultiRunChain` |
+
+`advanceMultiRunChain` applies three guards, each a conditional Mongo update:
+1. **De-duplication** — conditional `$addToSet` of the run ID; `MatchedCount==0` means already counted (the subscriber re-delivers terminal events) so the chain does not advance twice.
+2. **In-flight gate** — counts runs with phase `Running`/`Queued`; if any exist this chain retires, since the outstanding run will advance the chain when it finishes. This is what collapses an already-forked batch back to a single chain.
+3. **Terminal latch** — at `maxRuns` it sets `BatchDone` and never rewinds the counter, so a late completion cannot start a new batch.
+
+Then a compare-and-set on `multi_run_state.launched < completed` reserves the dispatch step so two completions clearing the in-flight check simultaneously cannot both dispatch. The sleeping dispatch goroutine re-checks `BatchDone` and the `multiRunEnabled` annotation before firing, so a batch disabled while a timer is pending is not resurrected (the old goroutine re-fetched the experiment but never re-checked either, so disabling multi-run did not stop already-scheduled launches).
+
+**Verification performed:** `go build ./...` passes (Go 1.24.13, matching the server's toolchain, via `golang:1.24-alpine` container since Go is not installed on the host). `go test ./pkg/chaos_experiment_run/... ./pkg/certification/... ./pkg/database/mongodb/chaos_experiment/...` all pass. **No runtime/end-to-end test has been run** — that requires rebuilding the image and executing a real batch.
+
+**Live remediation performed (bridge, not the deliverable):** with the user's explicit approval, `multiRunEnabled` was set to `"false"` and `currentRun` to `"0"` on test-final's manifest in MongoDB, and the 57 Pending/Running test-final Argo workflows were deleted. Verified afterwards: 0 Pending, 0 Running; only 63 Succeeded + 33 Failed history remain. Succeeded/Failed workflow history and all 148 `chaosExperimentRuns` documents were left intact, as was the generated certificate (`EXPERIMENT_CERTIFICATE_READY`).
+
+**Durability check: confirmed.** All three code changes land in checked-in source under `AgentCert/chaoscenter/graphql/server/`, so a fresh checkout and a from-scratch `setup.sh` pick them up. The MongoDB annotation flip and workflow deletion are live-only patches to the current instance and are explicitly NOT the fix.
+
+**REQUIRED NEXT STEP — the running cluster still has the old binary.** Until the graphql-server image is rebuilt and reloaded, re-enabling multi-run on any experiment will reproduce the runaway:
+```bash
+./scripts/setup.sh --restart --local-build    # rebuilds Go images (plain --restart does NOT)
+```
+
+**Setup problems found on this host while diagnosing (separate from the code bug):**
+
+- **Two clusters, wrong default context.** `~/.kube/config` names `kind-agentcert-sachin-mourya` as current-context, but `kubectl config current-context` in a plain shell resolved to a context called `default` pointing at a *different*, 47-day-old cluster (the `nwdaf`/ranenergy 5G workload, service CIDR 10.43.0.0/16). Every `kubectl`/`helm` command run without an explicit `--kubeconfig` therefore targets the wrong cluster. All ACE inspection in this session used `kind get kubeconfig --name agentcert-sachin-mourya` explicitly.
+- **Orphaned litmus install on that other cluster.** Its `litmus` namespace holds a `subscriber` pod with **1956 restarts**, fatal-looping on `Post "http://graphql.ace.svc.cluster.local:8081/query": no such host` — that DNS name only exists in the KinD cluster. This looks like a `setup.sh` run that landed on the wrong context. NOT touched: that cluster hosts an unrelated shared workload. Needs the owner's confirmation before cleanup.
+- **`.env` gaps:** `KIND_CLUSTER_NAME=` empty (CLAUDE.md §6 flags this exact gotcha), `OLLAMA_MODEL=` empty, `CLUSTER_MODE=auto`.
+
+**Latent issue noted, not changed:** `certification.UpsertExperiment` ratchets `expectedRuns` with `$max`. The frontend sends `multiRunConfig?.maxRuns ?? totalExperimentRuns ?? ...`, so for an experiment NOT configured as multi-run the gate target becomes the ever-growing total run count and can never be lowered — such an experiment can never satisfy its own gate. Correct for multi-run experiments (always `maxRuns`). Changing gate semantics was out of scope here.
+
+### §129 — §128's fix revised after adversarial review: bootstrap stalls and an unbounded-dispatch hole (2026-09-17)
+
+**Status:** revised fix applied, compile + test + behavioural simulation verified, uncommitted. Image still not rebuilt.
+
+§128's `advanceMultiRunChain` was put through an independent adversarial review before being trusted. The review found four defects, **two of which would have permanently stalled a batch at one run** — a worse outcome than the overshoot the fix was written to prevent. All four were then confirmed empirically against the live MongoDB rather than taken on faith.
+
+**Empirical verification of the MongoDB semantics in question** (run in a scratch database):
+
+| Behaviour under test | Result |
+|---|---|
+| `{n: {$lt: 5}}` against a document where `n` is **missing** | **0 matched** — `$lt` is type-bracketed and does not match missing fields |
+| `{$or:[{n:{$exists:false}},{n:{$lt:5}}]}` against missing `n` | 1 matched |
+| `$addToSet` on a **missing** field | succeeds, creates the array |
+| `$addToSet` on a field explicitly set to **null** | **fails**: `Cannot apply $addToSet to non-array field` |
+| `$inc` on a missing field | succeeds, creates the field |
+
+**Defect 1 — bootstrap stall via `$lt` (critical).** The dispatch compare-and-set filtered on `multi_run_state.launched: {$lt: completed}`. For any experiment created before this schema existed the field is absent, so the filter matched nothing, the chain "retired", and the batch stalled at one run forever. Fixed by adding the `$exists:false` arm shown above.
+
+**Defect 2 — bootstrap stall via a null array (critical).** `MultiRunState` was a value-typed struct with `bson:",omitempty"`. `omitempty` does not omit a zero struct (mongo-driver only does that under `omitZeroStruct`), so every insert persisted `multi_run_state.completed_run_ids` as BSON **null** — and `$addToSet` against null errors, so guard 1 would fail on the very first completion of every new experiment. Fixed by making the field a **pointer** (`*MultiRunState`): a nil pointer is genuinely omitted, the field stays absent, and `$addToSet` creates the array cleanly.
+
+**Defect 3 — the dispatch guard did not actually bound dispatches.** `Launched` was *set to* the monotonically growing `completed`, so the CAS only de-duplicated completions that observed the same `completed` value. The original production interleaving survived it: run A completes and claims, then sleeps through the delay window during which no new run exists; run B completes 29s later, the in-flight gate correctly sees zero in-flight, `completed` has advanced, so B's CAS also matches — **both dispatch**. The in-flight gate is structurally blind during the delay window and cannot be the bound. Fixed by changing `Launched` to count *dispatches*, claimed with `$inc` under a hard ceiling of `maxRuns-1` (the chain only starts runs 2..maxRuns; run 1 is started by whoever kicked the batch off). The ceiling, not the gate, is now what bounds the batch.
+
+**Defect 4 — claimed slots were never returned.** If the dispatch goroutine cancelled (multi-run switched off), `RunChaosWorkFlow` errored, or the pod restarted mid-delay, the claim stayed consumed and the batch silently finished short. Added a `releaseSlot` compensation (`$inc -1`) on every non-dispatch path.
+
+Also noted from the review and handled by documentation rather than code: a run wedged in `Queued` never emits a completion event and therefore holds the in-flight gate indefinitely. This is deliberate — stacking runs behind a wedged one is precisely what produced the runaway — but it is silent, so the log line now states the two ways to clear it (set `is_removed=true` on the wedged run, or start the next run manually).
+
+**Behavioural verification.** Because `chaosExperimentOperator` is a concrete struct rather than an interface, a Go unit test would require refactoring the handler's dependencies to interfaces — out of scope here. Instead the exact filter/update pairs from the Go code were replayed against the live MongoDB as a full batch lifecycle, starting from a document with **no** `multi_run_state` field (the bootstrap case that previously stalled):
+
+```
+r1: completed=1 claim=WON  launched=1
+r2: completed=2 claim=WON  launched=2
+r3: completed=3 -> BATCH LATCHED (no dispatch)
+r4: DEDUP REJECTED
+replay duplicate r2 -> rejected (matched 0)
+FINAL: launched=2 completed=3 batch_done=true
+TOTAL RUNS = 1 initial + 2 dispatched = 3  (maxRuns=3)
+```
+
+Converges to exactly `maxRuns`. `go build ./...` and `go test` on the three affected packages pass (Go 1.24.13 via `golang:1.24-alpine`).
+
+**Still unverified:** no end-to-end run against a rebuilt image. The concurrency guards are proven at the database-semantics level, not under real concurrent load.

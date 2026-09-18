@@ -122,8 +122,103 @@ image_already_built() {
     [[ "${ALREADY_BUILT_IMAGES}" == *" $1 "* ]]
 }
 
+# Detect which flavour of cluster the active kubectl context points at, so
+# locally-built images are side-loaded the way that cluster actually accepts.
+# `kind load docker-image` is KinD-only: on k3s it finds no matching cluster,
+# warns, and skips — leaving every locally-built image (install-app,
+# install-agent, the SRE agents, itbench-experiment) absent from the cluster and
+# every pod that references one stuck in ImagePullBackOff. Since none of those
+# images are published to a registry, there is no runtime pull to fall back on.
+#
+# Cached after the first call: this shells out to the API server.
+ACE_CLUSTER_FLAVOUR=""
+cluster_flavour() {
+    if [[ -n "${ACE_CLUSTER_FLAVOUR}" ]]; then
+        echo "${ACE_CLUSTER_FLAVOUR}"
+        return 0
+    fi
+
+    # A KinD cluster matching this checkout's name wins outright — it is the
+    # deliberate, instance-scoped target this repo's tooling creates.
+    if kind get clusters 2>/dev/null | grep -qxF "${KIND_CLUSTER_NAME}"; then
+        ACE_CLUSTER_FLAVOUR="kind"
+        echo "${ACE_CLUSTER_FLAVOUR}"
+        return 0
+    fi
+
+    # Otherwise ask the cluster itself what runtime it runs, the same signal
+    # litmus-go's socket-path resolver uses (pkg/utils/common/runtime.go).
+    local rv
+    rv="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}' 2>/dev/null || true)"
+    case "${rv,,}" in
+        *k3s*)       ACE_CLUSTER_FLAVOUR="k3s" ;;
+        containerd*) ACE_CLUSTER_FLAVOUR="containerd" ;;
+        cri-o*|crio*) ACE_CLUSTER_FLAVOUR="crio" ;;
+        docker*)     ACE_CLUSTER_FLAVOUR="docker" ;;
+        "")          ACE_CLUSTER_FLAVOUR="unreachable" ;;
+        *)           ACE_CLUSTER_FLAVOUR="other" ;;
+    esac
+    echo "${ACE_CLUSTER_FLAVOUR}"
+}
+
+# Import a local docker image into a k3s cluster's own containerd namespace.
+# k3s keeps its image store behind /run/k3s/containerd/containerd.sock, which is
+# root-owned, so this needs either root or passwordless sudo. Both are attempted
+# without prompting; if neither works the exact command is printed rather than
+# hanging on a password prompt inside a setup script.
+k3s_import() {
+    local img="$1"
+    local ctr_bin=""
+    for candidate in k3s /usr/local/bin/k3s; do
+        if command -v "${candidate}" &>/dev/null; then ctr_bin="${candidate}"; break; fi
+    done
+    if [[ -z "${ctr_bin}" ]]; then
+        warn "k3s cluster detected but the 'k3s' binary is not on PATH — cannot import ${img}"
+        return 1
+    fi
+
+    if docker image inspect "${img}" &>/dev/null; then
+        if docker save "${img}" | "${ctr_bin}" ctr images import - &>/dev/null; then
+            ok "k3s import: ${img} → k3s containerd"
+            return 0
+        fi
+        if docker save "${img}" | sudo -n "${ctr_bin}" ctr images import - &>/dev/null; then
+            ok "k3s import: ${img} → k3s containerd (via sudo)"
+            return 0
+        fi
+        warn "Could not import ${img} into k3s — needs root on /run/k3s/containerd/containerd.sock."
+        warn "Run this once by hand, then re-run this script:"
+        warn "  docker save ${img} | sudo ${ctr_bin} ctr images import -"
+        return 1
+    fi
+
+    warn "${img} is not present in the local docker image store — nothing to import"
+    return 1
+}
+
 kind_load() {
     local img="$1"
+    local flavour
+    flavour="$(cluster_flavour)"
+
+    case "${flavour}" in
+        k3s)
+            k3s_import "${img}"
+            return $?
+            ;;
+        containerd|crio|docker|other)
+            warn "Cluster runtime '${flavour}' has no local side-load path — ${img} must come from a registry."
+            warn "Either push it and set the matching *_IMAGE_SOURCE to that registry, or run on KinD/k3s."
+            return 1
+            ;;
+        unreachable)
+            warn "No reachable cluster (kubectl returned nothing) — skipping side-load of ${img}."
+            warn "Re-run this script once the cluster is up."
+            return 1
+            ;;
+    esac
+
+    # flavour == kind
     if kind get clusters 2>/dev/null | grep -qxF "${KIND_CLUSTER_NAME}"; then
         mkdir -p "${ACE_KIND_LOAD_TMPDIR}" || {
             warn "Could not create ACE_KIND_LOAD_TMPDIR='${ACE_KIND_LOAD_TMPDIR}' — falling back to kind's default temp directory"

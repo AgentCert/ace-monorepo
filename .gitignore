@@ -10,6 +10,9 @@ venv/
 env/
 .tmp/
 
+# Local-only nested clone (not a submodule, not tracked)
+/flash-agent/
+
 # Build outputs
 dist/
 build/

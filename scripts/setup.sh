@@ -72,6 +72,24 @@ say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
 
+# --- Pin KUBECONFIG so kubectl and helm cannot target different clusters -----
+# On any host where k3s is installed, /usr/local/bin/kubectl is a symlink to the
+# k3s binary, and k3s's bundled kubectl defaults to /etc/rancher/k3s/k3s.yaml --
+# it ignores ~/.kube/config entirely. helm, being a normal binary, still reads
+# ~/.kube/config. The result is a split brain: `helm install` deploys to the KinD
+# cluster while every kubectl step in this script (namespace, ace-ca-certs
+# ConfigMap, secrets, waits) silently lands in the k3s cluster instead.
+#
+# That failure is near-invisible. Both clusters are reachable, so no command
+# errors and the reachability probes pass; the deploy simply ends up split across
+# two clusters, and graphql then hangs forever in Init because the ConfigMap it
+# mounts was created somewhere else. `kind export kubeconfig` does not help,
+# because it writes the very file the k3s kubectl is ignoring.
+#
+# Setting KUBECONFIG explicitly makes the k3s-bundled kubectl honour the same
+# file helm uses, which is all that is required to keep the two in agreement.
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
 # --- Prerequisite check & self-heal ------------------------------------------
 # Runs unconditionally (both --setup and --restart), before anything else
 # touches .env, so a fresh host/VM missing tools this script depends on is
@@ -2055,6 +2073,17 @@ create_ca_configmap() {
         --from-file=ca-certificates.crt="${ca_src}" \
         --dry-run=client -o yaml \
         | kubectl apply -f - >/dev/null
+
+    # Read it back rather than trusting the apply. graphql's clone-charts
+    # initContainer mounts this ConfigMap, so if it is missing the pod sits in
+    # Init forever -- and the only symptom is a pod that never starts, long
+    # after this function has already printed a checkmark.
+    if ! kubectl get configmap ace-ca-certs --namespace "${ns}" >/dev/null 2>&1; then
+        warn "ace-ca-certs ConfigMap is not present in namespace '${ns}' after apply."
+        warn "graphql mounts it and will hang in Init. Check that kubectl and helm"
+        warn "target the same cluster: kubectl config current-context (KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config})."
+        return 1
+    fi
     ok "ace-ca-certs ConfigMap up to date (${ca_src})."
 }
 

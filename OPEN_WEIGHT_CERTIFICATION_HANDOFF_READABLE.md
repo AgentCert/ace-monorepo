@@ -3138,3 +3138,58 @@ faults. A few of the "is the namespace unhealthy?" checks currently name exact
 ITBench fault signatures (an "exceeded quota" event, a suspiciously low HPA
 threshold) — that's teaching to the test and should be stripped back to
 general-purpose checks before any real certification run.
+
+## §127 — Certificate reset bug when page reloads after a completed 30-run batch (2026-09-17)
+
+**What happened:** After running 30 experiments and generating a certificate ("test-final" experiment), reloading the Experiment Run History page caused the certificate to disappear and all runs to appear queued again.
+
+**Why:** The auto-trigger React ref (`autoTriggeredRunsRef`) is in-memory and resets on every page load. The experiment had 48 total runs in the database (18 old test runs + 30 actual runs). On page load, the frontend saw 48 terminal runs vs. 30 already submitted to the cert pipeline, so it re-fired the certification trigger for all 48 — including the 18 old ones. On the backend, each of those 18 old runs hit `ResetStatusIfCertified`, which reset the experiment from "certificate ready" back to "runs in progress". New workflow entries were created for the 18 old runs, they queued in the certifier, and the gate was blocked waiting for them to complete.
+
+**The 48 vs 30 display:** Not a bug. The 48 is the full run count in MongoDB history (all time). The certification correctly targets 30 via the `litmuschaos.io/maxRuns: "30"` annotation. The confusing UI count is just the run history total.
+
+**Fix:** Added an early-return guard at the start of `StartCertificationGeneration` in `certification/service.go`. Before touching anything, it checks whether the run's workflow doc already exists with `status=BUCKETING_COMPLETED`. If so, it returns immediately with "ALREADY_COMPLETED" — skipping `ResetStatusIfCertified`, `UpsertExperiment`, and goroutine dispatch entirely. This ensures that re-submitting old completed runs on page reload never erases a finalized certificate.
+
+**To deploy:** Rebuild the graphql-server image and reload it into the cluster.
+
+**Setup tip:** Configure experiments as Multi-Run (with `maxRuns=30`) before running, not after. Don't manually click "Run" mid-batch on Multi-Run experiments — the system handles the sequencing automatically.
+
+## §128 — CORRECTION: the real cause was a multi-run runaway, not stale history (2026-09-17)
+
+**This corrects §127.** That entry guessed the run-count inflation came from old runs in the database plus a frontend re-trigger. That guess was made before looking at the live system, and it was wrong. The cert-reset guard §127 added is still a real fix worth keeping — it just wasn't the cause.
+
+**What was really happening.** The experiment "test-final" was set to run 25 times. It had produced **148 runs** and was still going, about 2 more every minute. Alongside them sat 57 Argo workflows stuck in Pending — that queue is exactly what the user saw as "the completed run goes back in the queue".
+
+The cause was in the code that chains one run to the next. It kept its counter as a number written inside the experiment's manifest text. Every time a run finished, the code read that number, added one, wrote it back, and launched the next run. Three things were wrong with it:
+
+1. Reading and writing the counter wasn't atomic, so two runs finishing near each other could clobber each other's update.
+2. Nothing said "only one run at a time". Any finishing run launched a successor. So the moment two runs were ever in flight, the chain split into two chains, each feeding itself. The logs caught it plainly: two different runs finishing 29 seconds apart, each launching its own next run.
+3. Worst of all, when the batch finally reached 25 the code reset the counter back to zero. Any late-arriving "run finished" message then read zero, saw 0 < 25, and started a brand-new batch of 25. That's why it never stopped.
+
+**The fix.** Progress now lives in proper database fields instead of inside the manifest text, and every step is a conditional database update rather than read-then-write. Three guards keep a batch at exactly its configured size: each run is counted only once (so duplicate notifications don't double-advance), the next run is launched only when nothing else is still running (which collapses an already-split chain back to one), and once the batch is done it latches shut and the counter is never rewound. The delayed launch also re-checks before firing, so switching multi-run off now actually stops pending launches — previously it didn't.
+
+**Verified:** the whole server compiles and all existing tests pass, using the same Go version the server ships with. Not yet tested end-to-end — that needs a rebuilt image and a real batch.
+
+**Already done on the live system (with approval):** multi-run was switched off for test-final and the 57 queued workflows were deleted. Nothing else was touched — the 148 run records, the succeeded/failed history, and the generated certificate are all intact.
+
+**Still to do — important:** the cluster is still running the old code. Until the image is rebuilt with `./scripts/setup.sh --restart --local-build`, turning multi-run back on will start the runaway again. A plain `--restart` is not enough; it doesn't rebuild Go images.
+
+**Setup problems found along the way.** There are two Kubernetes clusters on this host, and a plain `kubectl` or `helm` command goes to the wrong one — a 47-day-old cluster running unrelated 5G workloads, not the ACE KinD cluster. That other cluster also has a stray litmus install whose subscriber has crash-looped 1956 times trying to reach an address that only exists in the KinD cluster; it was left alone because that cluster hosts someone else's work. Separately, `.env` is missing values for `KIND_CLUSTER_NAME` and `OLLAMA_MODEL`.
+
+## §129 — the §128 fix was reviewed, found wanting, and revised (2026-09-17)
+
+Before trusting the fix from §128, it was put through an independent adversarial review. That was worth doing: the review found four problems, and **two of them would have frozen a batch at a single run** — which is worse than the runaway the fix was meant to stop. Each finding was then checked directly against the live database rather than believed on sight.
+
+Two of the problems were about how MongoDB treats fields that don't exist yet:
+
+1. The check that decided whether to start the next run used a "less than" comparison. In MongoDB, "less than" simply does not match a field that is missing. So for every experiment created before this change, the check would never match and the chain would quietly stop after one run.
+2. The new progress field was being written into the database in a way that stored an empty list as "null". The operation used to record each finished run cannot be applied to null — it errors. So every brand-new experiment would break on its very first completed run.
+
+The third problem was more serious in principle: the guard meant to stop two runs from launching at once didn't actually do that. The original real-world timing still slipped through — one run finishes and schedules its successor, then two minutes pass before that successor actually exists, and during that window a second finishing run looks around, sees nothing running, and launches its own successor too. The guard was watching the wrong thing. It now counts *launches* against a hard ceiling instead, so no matter how many completion messages arrive or how they interleave, the chain can never start more runs than configured.
+
+The fourth: if a scheduled launch was cancelled or failed, its reserved slot was never given back, so the batch would end up short. It now hands the slot back.
+
+**Proof it works now.** A full batch was replayed against the real database starting from a record with no progress field at all — the exact case that used to freeze. It ran to completion and landed on exactly 3 runs for a setting of 3, rejected a duplicate notification, and then latched shut. The server also still compiles and all existing tests pass.
+
+**One honest caveat:** this is verified at the database level, not under real concurrent load with a rebuilt image. That test still needs to happen.
+
+One behaviour is intentional and worth knowing: if a run gets wedged and never finishes, the batch waits rather than launching more runs behind it. That is deliberate — stacking runs behind a stuck one is what caused the original explosion — but it is silent, so the log now spells out how to clear it.

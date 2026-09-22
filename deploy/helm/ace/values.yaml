@@ -58,6 +58,24 @@ images:
   langfuseWeb:    langfuse/langfuse:3
   langfuseWorker: langfuse/langfuse-worker:3
   busybox:        busybox:1.36
+  metricsServer:  registry.k8s.io/metrics-server/metrics-server:v0.7.2
+
+# ── metrics-server (cluster singleton) ──────────────────────────────────
+# Owned by the platform rather than by any application chart, because its
+# APIService/ClusterRole/ClusterRoleBinding are cluster-scoped: shipping them
+# per-app made two concurrently installed apps fight over the same objects, and
+# made uninstalling one app break metrics for the others. Worse, an APIService
+# stuck Available=False blocks namespace finalization cluster-wide, so a broken
+# metrics-server manifests as unrelated "namespace is Terminating" install
+# failures. See templates/metrics-server.yaml.
+#
+# Set enabled=false only when the target cluster already provides its own
+# metrics-server (k3s and most managed clusters do). It runs in the platform's
+# own namespace by default; `namespace` is an override for clusters that
+# require aggregated-API backends to live somewhere specific.
+metricsServer:
+  enabled: true
+  namespace: ""
 
 # IfNotPresent for KinD dev (images are kind-loaded locally); use Always for
 # cloud/registry deployments where agentcert/* images are pulled from Docker Hub.

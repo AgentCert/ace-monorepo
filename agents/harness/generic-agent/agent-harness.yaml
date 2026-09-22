@@ -1,0 +1,96 @@
+# ACE harness wrapper for agents/generic-agent/.
+#
+# Contract (see agents/harness/README.md):
+#   in  : /tmp/agent/scenario_data.json   {goal|scan_query, mcp_urls, openai_base_url, model_alias}
+#   out : /tmp/agent/agent_data.tar
+#
+# Build the local image once before the first run:
+#   docker build -t ace-harness/generic-agent:local ../../generic-agent
+path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
+path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
+run:
+  command: ["/bin/bash"]
+  args:
+  - -c
+  - |
+    set -euo pipefail
+
+    HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
+    REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+    SIDECAR_PY="${REPO_ROOT}/agent-sidecar/proxy.py"
+
+    timestamp=$(date +%Y%m%d%H%M%S)
+    outdir="/tmp/agent/generic-${timestamp}"
+    mkdir -p "${outdir}"
+    cp /tmp/agent/scenario_data.json "${outdir}/scenario_data.json"
+
+    MCP_URLS=$(jq -r        '.mcp_urls'        "${outdir}/scenario_data.json")
+    MODEL_ALIAS=$(jq -r     '.model_alias'     "${outdir}/scenario_data.json")
+    OPENAI_BASE_URL=$(jq -r '.openai_base_url' "${outdir}/scenario_data.json")
+    SCAN_QUERY=$(jq -r      '.scan_query // .goal' "${outdir}/scenario_data.json")
+
+    # ── Local sidecar ────────────────────────────────────────────────────────
+    # Same proxy.py the K8s chart runs as a sidecar container. Here it runs as a
+    # host process reading its context from a directory instead of a ConfigMap
+    # mount, so trace correlation works identically off-cluster.
+    NOTIFY_ID="${NOTIFY_ID:-$(python3 -c 'import uuid; print(uuid.uuid4())')}"
+
+    METADATA_DIR="${outdir}/sidecar-metadata"
+    mkdir -p "${METADATA_DIR}"
+    printf "%s" "${NOTIFY_ID}"      > "${METADATA_DIR}/NOTIFY_ID"
+    printf "%s" "generic-agent-v1"  > "${METADATA_DIR}/AGENT_ID"
+    printf "%s" "generic-agent"     > "${METADATA_DIR}/AGENT_NAME"
+    printf "%s" "observer"          > "${METADATA_DIR}/AGENT_ROLE"
+    printf "%s" "1.0.0"             > "${METADATA_DIR}/AGENT_VERSION"
+    [ -n "${SESSION_ID:-}"    ] && printf "%s" "${SESSION_ID}"    > "${METADATA_DIR}/SESSION_ID"
+    [ -n "${WORKFLOW_NAME:-}" ] && printf "%s" "${WORKFLOW_NAME}" > "${METADATA_DIR}/WORKFLOW_NAME"
+    # Present-but-empty means "no fault active right now" — a real signal the
+    # certifier's Phase 0 bucketing distinguishes from the key being absent.
+    printf "%s" "${CURRENT_FAULT_NAME:-}" > "${METADATA_DIR}/CURRENT_FAULT_NAME"
+
+    # proxy.py forwards to the LiteLLM base (scheme+host+port only, no /v1).
+    SIDECAR_UPSTREAM=$(python3 -c "
+    from urllib.parse import urlparse
+    u = urlparse('${OPENAI_BASE_URL}')
+    print(f'{u.scheme}://{u.netloc}')
+    ")
+    SIDECAR_PORT="${ACE_HARNESS_SIDECAR_PORT:-24002}"
+
+    SIDECAR_PORT="${SIDECAR_PORT}" \
+    UPSTREAM_URL="${SIDECAR_UPSTREAM}" \
+    CONFIG_MOUNT="${METADATA_DIR}" \
+      python3 "${SIDECAR_PY}" &
+    SIDECAR_PID=$!
+    trap 'kill "${SIDECAR_PID}" 2>/dev/null || true' EXIT
+
+    for _i in $(seq 1 10); do
+      python3 -c "
+    import socket, sys
+    s = socket.socket(); s.settimeout(0.3)
+    try:
+        s.connect(('127.0.0.1', ${SIDECAR_PORT})); s.close(); sys.exit(0)
+    except Exception:
+        sys.exit(1)
+    " 2>/dev/null && break || sleep 0.5
+    done
+
+    # ace-bench.py's _extract_trace_id() reads this line.
+    echo "HARNESS_TRACE_ID=${NOTIFY_ID}"
+
+    timeout "${AGENT_TIMEOUT_S:-600}" docker run --rm \
+      --network=host \
+      --user "$(id -u):$(id -g)" \
+      -v "${outdir}:${outdir}:rw" \
+      -e MCP_URLS="${MCP_URLS}" \
+      -e MODEL_ALIAS="${MODEL_ALIAS}" \
+      -e OPENAI_BASE_URL="http://127.0.0.1:${SIDECAR_PORT}/v1" \
+      -e OPENAI_API_KEY="${OPENAI_API_KEY:-not-needed}" \
+      -e AGENT_NAME="generic-agent" \
+      -e SCAN_INTERVAL=0 \
+      -e SCAN_QUERY="${SCAN_QUERY}" \
+      -e MCP_INTERACTIONS_FILE="${outdir}/mcp_interactions.jsonl" \
+      -e LOG_LEVEL=INFO \
+      ace-harness/generic-agent:local \
+      2>&1 | tee "${outdir}/generic-agent.log" || true
+
+    tar -C "${outdir}" -cf /tmp/agent/agent_data.tar .

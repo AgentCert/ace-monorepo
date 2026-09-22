@@ -1,0 +1,229 @@
+{{- if .Values.metricsServer.enabled }}
+# =============================================================================
+# metrics-server — cluster singleton, owned by the platform
+#
+# This used to ship inside every per-application chart
+# (app-charts/charts/<app>/templates/monitoring/metrics-server.yaml). That is
+# unsound for three compounding reasons, all of which have bitten this cluster:
+#
+#   1. APIService/ClusterRole/ClusterRoleBinding are CLUSTER-SCOPED, so two apps
+#      installed at once both try to own the same objects. otel-demo already had
+#      to be installed with `--set monitoring.metricsServer.enabled=false` to
+#      dodge the collision.
+#   2. Uninstalling one application tears down the metrics-server every other
+#      application is still relying on — and a partial teardown can strip the
+#      RBAC while leaving the Deployment running, at which point it 403s on
+#      nodes/pods, never turns Ready, and its Service keeps no endpoints.
+#   3. An aggregated APIService that is Available=False stops the apiserver
+#      completing discovery, and the namespace controller then refuses to
+#      finalize ANY terminating namespace. The blast radius is the whole
+#      cluster, and the symptom ("namespace is Terminating") points nowhere near
+#      metrics-server.
+#
+# Owning it here instead means its lifetime is the platform's, not any one
+# experiment's, so no install or uninstall of an application can break it.
+# The app charts now default monitoring.metricsServer.enabled to false.
+#
+# It deliberately lands in the platform's OWN namespace rather than the shared
+# `monitoring` one: the app charts create and own `monitoring` (for Grafana,
+# Prometheus and kube-state-metrics), and two Helm releases cannot both own a
+# namespace -- claiming it here would make the next application install fail
+# with "invalid ownership metadata", and a `helm uninstall` of the platform
+# would take those three workloads with it. The APIService resolves the backing
+# Service by name+namespace, so where it runs is otherwise immaterial.
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metrics-server
+  namespace: {{ include "ace.metricsServerNamespace" . }}
+  labels:
+    k8s-app: metrics-server
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:aggregated-metrics-reader
+  labels:
+    k8s-app: metrics-server
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:metrics-server
+  labels:
+    k8s-app: metrics-server
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "nodes/stats", "namespaces", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+# Required for the readiness probe: metrics-server authorizes incoming requests
+# via SubjectAccessReview. Without this binding the pod 403s and never turns
+# Ready, which is the exact failure that wedged namespace deletion cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-server:system:auth-delegator
+  labels:
+    k8s-app: metrics-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: metrics-server
+    namespace: {{ include "ace.metricsServerNamespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:metrics-server
+  labels:
+    k8s-app: metrics-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:metrics-server
+subjects:
+  - kind: ServiceAccount
+    name: metrics-server
+    namespace: {{ include "ace.metricsServerNamespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: metrics-server-auth-reader
+  namespace: kube-system
+  labels:
+    k8s-app: metrics-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: metrics-server
+    namespace: {{ include "ace.metricsServerNamespace" . }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-server
+  namespace: {{ include "ace.metricsServerNamespace" . }}
+  labels:
+    k8s-app: metrics-server
+spec:
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: https
+  selector:
+    k8s-app: metrics-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-server
+  namespace: {{ include "ace.metricsServerNamespace" . }}
+  labels:
+    k8s-app: metrics-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: metrics-server
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        k8s-app: metrics-server
+    spec:
+      serviceAccountName: metrics-server
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: metrics-server
+          image: {{ .Values.images.metricsServer }}
+          imagePullPolicy: {{ include "ace.infraPullPolicy" . }}
+          args:
+            - --cert-dir=/tmp
+            - --secure-port=4443
+            - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+            - --kubelet-use-node-status-port
+            - --metric-resolution=15s
+            # KinD nodes serve kubelet with a self-signed cert the metrics-server
+            # cannot verify; without this every scrape fails and the pod never
+            # reports ready.
+            - --kubelet-insecure-tls
+          ports:
+            - name: https
+              containerPort: 4443
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+      nodeSelector:
+        kubernetes.io/os: linux
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.metrics.k8s.io
+  labels:
+    k8s-app: metrics-server
+spec:
+  group: metrics.k8s.io
+  groupPriorityMinimum: 100
+  insecureSkipTLSVerify: true
+  service:
+    name: metrics-server
+    namespace: {{ include "ace.metricsServerNamespace" . }}
+  version: v1beta1
+  versionPriority: 100
+{{- end }}

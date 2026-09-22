@@ -156,6 +156,123 @@ def check_inventory(repo: Path, spec: dict, f: Findings) -> None:
             f.warn(f"[itbench] {name}: dispatcher implements it but no hub entry exposes it")
 
 
+def load_application_registry(repo: Path, f: Findings) -> dict[str, dict]:
+    """Applications are onboarded in app-charts, not in the fault catalog.
+
+    Reading them from there is what makes onboarding an application a single
+    chart edit: every generic fault widens to it automatically. The cost is that
+    a fault pinning `requiredApp` now references another chart repo, which is
+    exactly the cross-reference this function exists to check.
+    """
+    base = repo / "app-charts" / "charts"
+    if not base.is_dir():
+        f.warn(f"app charts directory not found: {base.relative_to(repo)}")
+        return {}
+
+    registry: dict[str, dict] = {}
+    for path in sorted(base.glob("*.chartserviceversion.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError as exc:
+            f.error(f"{path.relative_to(repo)}: not valid YAML ({exc})")
+            continue
+        for app in ((doc.get("spec") or {}).get("applications")) or []:
+            if not isinstance(app, dict) or not app.get("name"):
+                continue
+            registry[app["name"]] = app
+
+    if not registry:
+        f.error("no applications found in app-charts — every fault would derive an empty compatible-app set")
+    return registry
+
+
+def check_applications(repo: Path, spec: dict, f: Findings) -> None:
+    """Every app-specific fault must pin an application that actually exists.
+
+    A `requiredApp` matching no registered application silently derives an EMPTY
+    compatible-app set, which makes the fault unselectable in the builder for
+    every application — a fault that quietly disappears from the UI rather than
+    failing loudly.
+    """
+    apps = load_application_registry(repo, f)
+    if not apps:
+        return
+
+    seen_folders: dict[str, str] = {}
+    for name, app in apps.items():
+        for folder in [name, *(app.get("aliases") or [])]:
+            if folder in seen_folders and seen_folders[folder] != name:
+                f.error(
+                    f"application {name!r}: folder/alias {folder!r} is already claimed by "
+                    f"{seen_folders[folder]!r} — an install-application step carrying "
+                    f"it would resolve ambiguously"
+                )
+            seen_folders[folder] = name
+        if not app.get("namespace"):
+            f.error(f"application {name!r}: missing required field 'namespace'")
+        if not app.get("labelKey"):
+            f.warn(
+                f"application {name!r}: no labelKey, falling back to "
+                f"app.kubernetes.io/name for pre-deployment applabel synthesis"
+            )
+
+    for name, entry in (spec.get("faults") or {}).items():
+        entry = entry or {}
+        required_app = (entry.get("targetRequirements") or {}).get("requiredApp")
+        classification = entry.get("classification")
+
+        if classification == "application-specific":
+            if not required_app:
+                f.error(
+                    f"{name}: classification='application-specific' but "
+                    f"targetRequirements.requiredApp is unset, so its compatible-app "
+                    f"set derives empty and the fault is unselectable"
+                )
+            elif required_app not in apps:
+                f.error(
+                    f"{name}: targetRequirements.requiredApp={required_app!r} is not a "
+                    f"registered application {sorted(apps)} "
+                    f"(app-charts/charts/*.chartserviceversion.yaml)"
+                )
+        elif required_app:
+            f.error(
+                f"{name}: classification={classification!r} but it pins "
+                f"targetRequirements.requiredApp={required_app!r} — mark it "
+                f"'application-specific' or drop the pin"
+            )
+
+
+def check_agent_compatibility(repo: Path, f: Findings) -> None:
+    """An agent may restrict itself to applications, but only to real ones."""
+    base = repo / "agent-charts" / "charts"
+    if not base.is_dir():
+        f.warn(f"agent charts directory not found: {base.relative_to(repo)}")
+        return
+
+    apps = load_application_registry(repo, f)
+    if not apps:
+        return
+
+    for path in sorted(base.glob("*.chartserviceversion.yaml")):
+        try:
+            doc = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError as exc:
+            f.error(f"{path.relative_to(repo)}: not valid YAML ({exc})")
+            continue
+        for agent in ((doc.get("spec") or {}).get("agents")) or []:
+            if not isinstance(agent, dict):
+                continue
+            declared = agent.get("compatibleApplications")
+            if declared is None:
+                continue  # unrestricted, and stays that way as apps are added
+            for app in declared:
+                if app not in apps:
+                    f.error(
+                        f"agent {agent.get('name')!r}: compatibleApplications lists "
+                        f"{app!r}, which is not a registered application {sorted(apps)}"
+                    )
+
+
 def check_vocabularies(spec: dict, f: Findings) -> None:
     vocab = spec.get("vocabularies") or {}
     required = ("mechanism", "scope", "concurrency", "category", "classification")
@@ -277,6 +394,8 @@ def main() -> int:
     spec = load_catalog(repo, f)
     if spec:
         check_vocabularies(spec, f)
+        check_applications(repo, spec, f)
+        check_agent_compatibility(repo, f)
         check_inventory(repo, spec, f)
         check_mechanism_consistency(spec, f)
         check_env_sentinels(repo, spec, f)

@@ -25,6 +25,7 @@ Two scenario universes exist:
 | `sre-agent-crewai` | CrewAI + MCP streamable-HTTP | orchestrated via Argo Workflow only (retired from `ace-bench.py`) | ITBench + standard faults, live cluster, N=30 certification runs |
 | `sre-agent-qwen` | Codex-CLI wrapper + MCP, local Ollama | `itbench_sre` | ITBench faults only, plus a two-layer prompt-patch capability-probe harness |
 | `a2a-mcp-agent` (harness-only) | Universal A2A/JSON-RPC bridge, not an LLM agent | any | Any A2A-compatible external agent, any scenario type |
+| `generic-agent` | Custom ReAct + MCP (K8s + Prometheus) | `trace_based` | Reference onboarding: the standard-conformant chart every new agent should be copied from |
 
 ---
 
@@ -103,3 +104,14 @@ Card + JSON-RPC `tasks/send`/`tasks/get`) and MCP. Scenario-agnostic: whatever
 `scenario_data.json` (`goal`, `mcp_urls`, `openai_base_url`, `model_alias`) is fed
 to it, it can point at any ITBench or non-ITBench scenario the target agent
 supports, with no certifier- or harness-side changes required.
+
+## generic-agent
+
+The reference onboarding target. Functionally an MCP discovery + ReAct loop with
+hindsight reflection, but its value is the **chart**: it is the only agent chart
+that carries the full `_CONTEXT_KEYS` set (including `CURRENT_FAULT_NAME` and
+`SESSION_ID`), uses `envFrom` instead of a hand-maintained `env:` list, and passes
+unknown `agent.config.*` keys through to the ConfigMap verbatim. New agents should
+be copied from `agent-charts/charts/generic-agent/`, not from any older chart.
+See `onboarding-guides/02-onboard-agent.md` and
+`chaos-charts/experiments/generic-agent-demo/experiment.yaml`.

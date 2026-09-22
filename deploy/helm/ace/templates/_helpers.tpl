@@ -6,6 +6,14 @@ Namespace — always "ace"; kept as a helper so it can be overridden if needed.
 {{- end }}
 
 {{/*
+Namespace for the cluster-singleton metrics-server. Defaults to the platform's
+own namespace so it never contends with the app charts over `monitoring`.
+*/}}
+{{- define "ace.metricsServerNamespace" -}}
+{{- .Values.metricsServer.namespace | default (include "ace.namespace" .) -}}
+{{- end }}
+
+{{/*
 Common labels
 */}}
 {{- define "ace.labels" -}}

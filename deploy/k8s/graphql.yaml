@@ -7,8 +7,8 @@
 # KUBECONFIG is intentionally unset so the Go client falls back to in-cluster
 # config (pod ServiceAccount token) — no kubeconfig file needed.
 #
-# agent-charts and app-charts are cloned at startup by the clone-charts
-# initContainer into /repo — no host bind-mount needed.
+# Hub content is copied from an image built from this checkout. Runtime
+# operation does not require GitHub and cannot drift to another branch.
 # =============================================================================
 apiVersion: apps/v1
 kind: Deployment
@@ -27,27 +27,20 @@ spec:
     spec:
       serviceAccountName: graphql
       initContainers:
-        - name: clone-charts
-          image: alpine/git
-          command: [sh, -c]
+        - name: load-local-hubs
+          image: agentcert/ace-hub-bundle:local
+          imagePullPolicy: Never
+          command: [sh, -ec]
           args:
             - |
-              # Branch must match the "branch =" value for these submodules in
-              # .gitmodules — otherwise this clones the repo's default branch
-              # and silently hides any agent/app onboarded only on the feature
-              # branch from AgentHub/AppHub, with no error anywhere.
-              git clone --depth 1 -b feature/itbench-scenarios https://github.com/AgentCert/agent-charts.git /repo/agent-charts
-              git clone --depth 1 -b feature/itbench-scenarios https://github.com/AgentCert/app-charts.git    /repo/app-charts
-          env:
-            - name: GIT_SSL_CAINFO
-              value: "/etc/ssl/certs/ca-certificates.crt"
+              rm -rf /repo/*
+              cp -a /bundle/. /repo/
+              test -f /repo/agent-charts/charts/agents.chartserviceversion.yaml
+              test -f /repo/app-charts/charts/applications.chartserviceversion.yaml
+              test -f "/repo/chaos-hubs/Litmus ChaosHub/faults/fault-capabilities.yaml"
           volumeMounts:
             - name: repo
               mountPath: /repo
-            - name: ca-certs
-              mountPath: /etc/ssl/certs/ca-certificates.crt
-              subPath: ca-certificates.crt
-              readOnly: true
       containers:
         - name: graphql
           image: agentcert/agentcert-graphql:latest
@@ -120,6 +113,16 @@ spec:
               value: "/repo/agent-charts"
             - name: DEFAULT_APP_HUB_PATH
               value: "/repo/app-charts"
+            - name: DEFAULT_CHAOS_HUB_PATH
+              value: "/repo/chaos-hubs/"
+            - name: AGENT_HUB_SOURCE_MODE
+              value: "custom"
+            - name: APP_HUB_SOURCE_MODE
+              value: "custom"
+            - name: HUB_SOURCE_MODE
+              value: "custom"
+            - name: FAULT_CAPABILITIES_PATH
+              value: "/repo/chaos-hubs/Litmus ChaosHub/faults/fault-capabilities.yaml"
             # Do not attempt to re-read .env from the host filesystem
             - name: AGENTCERT_ENV_FILE
               value: ""

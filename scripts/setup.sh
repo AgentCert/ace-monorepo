@@ -3156,13 +3156,17 @@ _PREPARE_IMAGES_LOG=""
 maybe_launch_prepare_images_bg() {
     [[ "${_PREPARE_IMAGES_LAUNCHED}" -eq 1 ]] && return 0
     _PREPARE_IMAGES_LAUNCHED=1
-    local app_src agent_src litmus_src
+    local app_src agent_src litmus_src sre_src itbench_src hub_bundle_src
     app_src="$(cur INSTALL_APP_IMAGE_SOURCE)"
     agent_src="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
     litmus_src="$(cur LITMUS_IMAGES_SOURCE)"
+    sre_src="$(cur SRE_AGENTS_IMAGE_SOURCE)"; sre_src="${sre_src:-local}"
+    itbench_src="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"; itbench_src="${itbench_src:-local}"
+    hub_bundle_src="$(cur HUB_BUNDLE_IMAGE_SOURCE)"; hub_bundle_src="${hub_bundle_src:-local}"
     if [[ "${app_src}" == "local" || "${app_src}" == "jfrog" || \
           "${agent_src}" == "local" || "${agent_src}" == "jfrog" || \
-          "${litmus_src}" == "local" ]]; then
+          "${litmus_src}" == "local" || "${sre_src}" == "local" || \
+          "${itbench_src}" == "local" || "${hub_bundle_src}" == "local" ]]; then
         mkdir -p "${REPO_ROOT}/.tmp"
         _PREPARE_IMAGES_LOG="${REPO_ROOT}/.tmp/prepare-images.log"
         echo -e "${DIM}Preparing experiment images in the background while the cluster comes up ...${NC}"
@@ -3172,14 +3176,24 @@ maybe_launch_prepare_images_bg() {
     fi
 }
 wait_for_prepare_images_bg() {
+    local prepare_rc=0
     if [[ -n "${_PREPARE_IMAGES_PID}" ]]; then
         echo -e "${DIM}Waiting for background experiment-image prep (PID ${_PREPARE_IMAGES_PID})...${NC}"
         if wait "${_PREPARE_IMAGES_PID}"; then
             ok "Experiment images prepared."
         else
-            warn "Background experiment-image prep failed (see ${_PREPARE_IMAGES_LOG}) -- re-run scripts/prepare-images.sh manually."
+            warn "Required experiment image preparation failed; see ${_PREPARE_IMAGES_LOG}."
+            prepare_rc=1
         fi
         _PREPARE_IMAGES_PID=""
+    fi
+    return "${prepare_rc}"
+}
+prepare_hub_bundle_for_deploy() {
+    echo -e "${DIM}Preparing the immutable local hub bundle before GraphQL starts...${NC}"
+    if ! "${REPO_ROOT}/scripts/prepare-images.sh" --hub-only; then
+        warn "Hub bundle preparation failed; refusing to deploy a control plane with no deterministic catalog."
+        return 1
     fi
 }
 
@@ -3229,6 +3243,8 @@ k8s_deploy() {
         warn "kubectl cannot reach the cluster. Check KUBECONFIG or re-run after fixing the cluster."
         return 1
     fi
+
+    prepare_hub_bundle_for_deploy
 
     # 3b) Kick off experiment-image prep now so it overlaps with the long
     # "wait for core services" rollout below instead of running after it.
@@ -3424,6 +3440,8 @@ helm_deploy() {
         return 1
     fi
 
+    prepare_hub_bundle_for_deploy
+
     # 3b) Kick off experiment-image prep now so it overlaps with the
     # mongodb-rs-init helm hook wait below instead of running after it.
     maybe_launch_prepare_images_bg
@@ -3455,6 +3473,16 @@ helm_deploy() {
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         helm_cmd+=(--set web.serviceType=LoadBalancer)
     fi
+    local _hub_bundle_image _hub_bundle_source
+    _hub_bundle_image="$(cur HUB_BUNDLE_IMAGE)"
+    _hub_bundle_image="${_hub_bundle_image:-agentcert/ace-hub-bundle:local}"
+    _hub_bundle_source="$(cur HUB_BUNDLE_IMAGE_SOURCE)"
+    _hub_bundle_source="${_hub_bundle_source:-local}"
+    helm_cmd+=(--set-string "chartsHub.bundleImage=${_hub_bundle_image}")
+    if [[ "${_hub_bundle_source}" == "local" ]]; then
+        helm_cmd+=(--set chartsHub.bundleImagePullPolicy=Never)
+    fi
+
     # The certifier's cert-report-export hostPath volume only makes sense against a
     # KinD cluster this repo's own render-kind-config.sh created (its extraMounts
     # bridge the node path to a real host directory) — an existing/external

@@ -1,6 +1,0 @@
-# Generic Agent runtime dependencies.
-# No tracing SDK: the ACE sidecar + LiteLLM gateway own all observability.
-kubernetes>=28.0.0
-openai>=1.0.0
-requests>=2.31.0
-python-dotenv>=1.0.0

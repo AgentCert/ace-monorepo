@@ -82,17 +82,16 @@ metricsServer:
 imagePullPolicy: IfNotPresent
 infraImagePullPolicy: IfNotPresent
 
-# ── AgentHub / AppHub chart sources ──────────────────────────────────────────
-# The graphql pod's clone-charts initContainer clones these branches of
-# agent-charts and app-charts to populate "Install Agent" / "Install
-# Application" in the UI (pkg/agenthub, pkg/apphub read
-# charts/agents.chartserviceversion.yaml / charts/applications.chartserviceversion.yaml
-# from the clone). Must match the branch actually tracked in .gitmodules —
-# otherwise cloning the repo's default branch silently hides any
-# agent/app onboarded only on the feature branch, with no error anywhere.
+# ── Immutable local hub content ───────────────────────────────────────────────
+# scripts/prepare-images.sh builds this image from the checked-out app-charts,
+# agent-charts, and chaos-charts trees, then side-loads it into Kind/k3s before
+# Helm starts GraphQL. Runtime pods never clone GitHub and the catalog files
+# cannot drift from the chart/fault content that workflows execute.
 chartsHub:
-  agentChartsBranch: feature/itbench-scenarios
-  appChartsBranch: feature/itbench-scenarios
+  bundleImage: agentcert/ace-hub-bundle:local
+  # setup.sh overrides this to Never after side-loading in local mode. Registry
+  # deployments may keep IfNotPresent and override bundleImage.
+  bundleImagePullPolicy: IfNotPresent
 
 # ── Persistent storage sizes ─────────────────────────────────────────────────
 storage:

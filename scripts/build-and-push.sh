@@ -170,6 +170,9 @@ fi
 # ---------------------------------------------------------------------------
 declare -a IMAGES=(
     "agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile"
+    # Every certified agent in AgentHub must have a published image.
+    "agentcert/sre-agent-comprehensive|${REPO_ROOT}/agents/sre-agent-comprehensive|Dockerfile"
+    "agentcert/sre-agent-crewai|${REPO_ROOT}/agents/sre-agent-crewai|Dockerfile"
     "agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile"
     "agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile"
     "agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile"

@@ -13,6 +13,8 @@
 #   ITBENCH_EXPERIMENT_IMAGE_SOURCE local (no dockerhub image is published for
 #                                    this one — see below)
 #   JFROG_HOST, JFROG_REGISTRY_PATH, JFROG_USER, JFROG_TOKEN
+#   HUB_BUNDLE_IMAGE_SOURCE        local | registry
+#   HUB_BUNDLE_IMAGE               image reference used by the GraphQL init container
 #   KIND_CLUSTER_NAME, ACE_INSTANCE_NAME
 #   APP_CHARTS_ROOT, AGENT_CHARTS_ROOT  (set by setup.sh to absolute paths)
 #   ACE_KIND_LOAD_TMPDIR                (set by setup.sh; temp dir for kind load tarballs)
@@ -32,6 +34,8 @@
 #   No action (Kubernetes pulls at runtime; IfNotPresent reuses cached copies).
 
 set -euo pipefail
+
+HUB_ONLY="${1:-}"
 
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
@@ -62,6 +66,8 @@ APP_SRC="$(cur INSTALL_APP_IMAGE_SOURCE)"
 AGENT_SRC="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
 LITMUS_SRC="$(cur LITMUS_IMAGES_SOURCE)"
 SRE_AGENTS_SRC="$(cur SRE_AGENTS_IMAGE_SOURCE)"
+HUB_BUNDLE_SRC="$(cur HUB_BUNDLE_IMAGE_SOURCE)"
+HUB_BUNDLE_IMAGE="$(cur HUB_BUNDLE_IMAGE)"
 ITBENCH_EXPERIMENT_SRC="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"
 
 APP_SRC="${APP_SRC:-dockerhub}"
@@ -72,6 +78,8 @@ SRE_AGENTS_SRC="${SRE_AGENTS_SRC:-local}"
 # 404s on agentcert/itbench-experiment) — local is the only source that can work today,
 # so it's the default regardless of what .env says, same as SRE_AGENTS_SRC's rationale.
 ITBENCH_EXPERIMENT_SRC="${ITBENCH_EXPERIMENT_SRC:-local}"
+HUB_BUNDLE_SRC="${HUB_BUNDLE_SRC:-local}"
+HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
 
 JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
 JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
@@ -103,7 +111,7 @@ fi
 echo
 echo -e "${CYAN}=======================================================${NC}"
 echo -e "${CYAN}  Preparing experiment images${NC}"
-echo -e "${CYAN}  install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}   itbench-experiment: ${ITBENCH_EXPERIMENT_SRC}${NC}"
+echo -e "${CYAN}  hub-bundle: ${HUB_BUNDLE_SRC}   install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}   itbench-experiment: ${ITBENCH_EXPERIMENT_SRC}${NC}"
 echo -e "${CYAN}=======================================================${NC}"
 echo
 
@@ -268,6 +276,58 @@ node_crictl_pull() {
         fi
     done <<< "${nodes}"
     return "${ok_all}"
+}
+
+# ─── immutable local hub bundle ──────────────────────────────────────────────
+# Build one immutable image from the exact checked-out hub trees. This is the
+# only hub source used by Kubernetes deployments; no runtime Git clone exists.
+build_and_load_hub_bundle() {
+    local dockerfile="${REPO_ROOT}/deploy/hub-bundle/Dockerfile"
+    local content_sha current_sha
+    if [[ ! -f "${dockerfile}" ]]; then
+        warn "Hub bundle Dockerfile not found: ${dockerfile}"
+        return 1
+    fi
+
+    content_sha="$(
+        cd "${REPO_ROOT}"
+        find app-charts/charts agent-charts/charts chaos-charts/faults chaos-charts/experiments \
+            -type f -print0 \
+            | LC_ALL=C sort -z \
+            | xargs -0 sha256sum \
+            | sha256sum \
+            | awk '{print $1}'
+    )"
+    if [[ -z "${content_sha}" ]]; then
+        warn "Could not compute hub bundle content digest"
+        return 1
+    fi
+
+    current_sha="$(docker image inspect \
+        --format '{{ index .Config.Labels "io.agentcert.hub-bundle.content-sha" }}' \
+        "${HUB_BUNDLE_IMAGE}" 2>/dev/null || true)"
+
+    if [[ "${current_sha}" == "${content_sha}" ]]; then
+        ok "${HUB_BUNDLE_IMAGE} already matches local hub content (${content_sha:0:12})"
+    else
+        info "Building ${HUB_BUNDLE_IMAGE} from local hub trees (${content_sha:0:12}) …"
+        (
+            cd "${REPO_ROOT}"
+            tar -cf - \
+                deploy/hub-bundle/Dockerfile \
+                app-charts/charts \
+                agent-charts/charts \
+                chaos-charts/faults \
+                chaos-charts/experiments
+        ) | docker build \
+            --build-arg "BUNDLE_CONTENT_SHA=${content_sha}" \
+            --tag "${HUB_BUNDLE_IMAGE}" \
+            --file deploy/hub-bundle/Dockerfile \
+            -
+        ok "Built ${HUB_BUNDLE_IMAGE}"
+    fi
+
+    kind_load "${HUB_BUNDLE_IMAGE}"
 }
 
 # Namespaces where LitmusChaos experiment workflows run.
@@ -435,16 +495,18 @@ pull_and_load_litmus_images() {
     wait
     unset -f _pull_and_load_one
 
-    local i status
+    local i status failed=0
     for (( i = 0; i < idx; i++ )); do
         status="$(cat "${results_dir}/${i}.status" 2>/dev/null || echo missing)"
         if [[ "${status}" == "ok" ]]; then
             ok "Pulled + loaded: ${images[i]}"
         else
+            failed=1
             warn "Failed: ${images[i]} — log: ${log_dir}/${i}.log"
         fi
     done
     rm -rf "${results_dir}"
+    return "${failed}"
 }
 
 # ─── jfrog: create pull secret + patch service account ───────────────────────
@@ -494,11 +556,43 @@ ensure_jfrog_pull_secret() {
 # ─── main ────────────────────────────────────────────────────────────────────
 
 _did_something=0
+declare -a _failures=()
+case "${HUB_BUNDLE_SRC}" in
+    local)
+        info "hub-bundle: build from checked-out app/agent/chaos charts"
+        build_and_load_hub_bundle
+        _did_something=1
+        ;;
+    registry)
+        if [[ "${HUB_BUNDLE_IMAGE}" == *":local" ]]; then
+            warn "HUB_BUNDLE_IMAGE_SOURCE=registry requires a pullable HUB_BUNDLE_IMAGE, not ${HUB_BUNDLE_IMAGE}"
+            exit 1
+        fi
+        info "hub-bundle: registry image ${HUB_BUNDLE_IMAGE}"
+        ;;
+    *)
+        warn "Unsupported HUB_BUNDLE_IMAGE_SOURCE='${HUB_BUNDLE_SRC}' (expected local or registry)"
+        exit 1
+        ;;
+esac
+
+if [[ "${HUB_ONLY}" == "--hub-only" ]]; then
+    ok "Hub bundle is ready."
+    exit 0
+elif [[ -n "${HUB_ONLY}" ]]; then
+    warn "Unknown argument: ${HUB_ONLY}"
+    exit 2
+fi
+
 
 case "${APP_SRC}" in
     local)
         info "install-application: local build"
-        build_and_load_install_app && _did_something=1
+        if build_and_load_install_app; then
+            _did_something=1
+        else
+            _failures+=("install-application")
+        fi
         ;;
     jfrog)
         info "install-application: JFrog (${JFROG_HOST}/${JFROG_PATH}/agentcert/agentcert-install-app:latest)"
@@ -512,7 +606,11 @@ esac
 case "${AGENT_SRC}" in
     local)
         info "install-agent: local build"
-        build_and_load_install_agent && _did_something=1
+        if build_and_load_install_agent; then
+            _did_something=1
+        else
+            _failures+=("install-agent")
+        fi
         ;;
     jfrog)
         info "install-agent: JFrog (${JFROG_HOST}/${JFROG_PATH}/agentcert/agentcert-install-agent:latest)"
@@ -528,7 +626,11 @@ esac
 case "${LITMUS_SRC}" in
     local)
         info "litmuschaos helpers: pull from Docker Hub + kind load"
-        pull_and_load_litmus_images && _did_something=1
+        if pull_and_load_litmus_images; then
+            _did_something=1
+        else
+            _failures+=("litmus-helpers")
+        fi
         ;;
     dockerhub)
         info "litmuschaos helpers: Docker Hub — no action needed (pulled at runtime)"
@@ -538,9 +640,17 @@ esac
 case "${SRE_AGENTS_SRC}" in
     local)
         info "sre-agent-comprehensive: local build"
-        build_and_load_sre_agent "sre-agent-comprehensive" "agentcert/sre-agent-comprehensive:latest" && _did_something=1
+        if build_and_load_sre_agent "sre-agent-comprehensive" "agentcert/sre-agent-comprehensive:latest"; then
+            _did_something=1
+        else
+            _failures+=("sre-agent-comprehensive")
+        fi
         info "sre-agent-crewai: local build"
-        build_and_load_sre_agent "sre-agent-crewai" "agentcert/sre-agent-crewai:latest" && _did_something=1
+        if build_and_load_sre_agent "sre-agent-crewai" "agentcert/sre-agent-crewai:latest"; then
+            _did_something=1
+        else
+            _failures+=("sre-agent-crewai")
+        fi
         ;;
     dockerhub)
         info "sre-agents: Docker Hub — no action needed (pulled at runtime)"
@@ -550,7 +660,11 @@ esac
 case "${ITBENCH_EXPERIMENT_SRC}" in
     local)
         info "itbench-experiment: local build"
-        build_and_load_itbench_experiment && _did_something=1
+        if build_and_load_itbench_experiment; then
+            _did_something=1
+        else
+            _failures+=("itbench-experiment")
+        fi
         ;;
     dockerhub)
         warn "itbench-experiment: dockerhub selected, but no image has ever been published to" \
@@ -558,6 +672,12 @@ case "${ITBENCH_EXPERIMENT_SRC}" in
              "chaos-charts/faults/itbench/ will hit ImagePullBackOff. Use 'local' instead."
         ;;
 esac
+
+if (( ${#_failures[@]} > 0 )); then
+    warn "Required image preparation failed: ${_failures[*]}"
+    warn "ACE was not deployed because continuing would create non-deterministic ImagePullBackOff failures."
+    exit 1
+fi
 
 echo
 if [[ "${_did_something}" -eq 1 ]]; then

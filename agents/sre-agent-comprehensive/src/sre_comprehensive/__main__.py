@@ -112,7 +112,7 @@ def main() -> None:
         "--max-runtime-seconds",
         type=int,
         default=int(os.environ.get("AGENT_MAX_RUNTIME_SECONDS", "0") or "0"),
-        help="Bounded scan-loop runtime. 0 keeps legacy one-shot behavior unless SCAN_INTERVAL is set.",
+        help="Bounded scan-loop runtime. 0 scans until the workflow cleanup terminates the agent when SCAN_INTERVAL is set.",
     )
     args = parser.parse_args()
     if not args.goal:
@@ -124,17 +124,13 @@ def main() -> None:
 
     scan_interval = int(os.environ.get("SCAN_INTERVAL", "0") or "0")
     max_runtime = args.max_runtime_seconds
-    if max_runtime <= 0 and scan_interval > 0:
-        max_runtime = 780
 
     deadline = time.monotonic() + max_runtime if max_runtime > 0 else None
     last_output: dict | None = None
     iteration = 0
     # When every MCP endpoint is unreachable the agent has no way to gather
-    # evidence — re-running the crew just burns tokens and floods Langfuse with
-    # byte-identical "all tools broken → empty JSON" traces (temperature is low
-    # and the context is identical each cycle). Skip the kickoff on those cycles
-    # and abandon the scan loop after this many consecutive all-down cycles.
+    # evidence. Skip the expensive crew kickoff and periodically retry so an
+    # agent installed before its MCP services are ready can recover in place.
     mcp_down_streak = 0
     max_mcp_down_streak = int(os.environ.get("SRE_AGENT_MAX_MCP_DOWN_STREAK", "3") or "3")
 
@@ -290,33 +286,32 @@ def main() -> None:
             last_output = output_data
             print(f"[sre-comprehensive] diagnosis written to {output_path}", flush=True)
 
-            # The tool loop already aborted this cycle because the LLM endpoint
-            # is down / rate-limiting. Do NOT sleep SCAN_INTERVAL and try again —
-            # every retry cycle just hammers a dead endpoint. End the scan loop.
             if output_data.get("_llm_unavailable"):
                 print(
-                    "[sre-comprehensive] abandoning scan loop: LLM endpoint "
-                    "unavailable / rate-limited — not retrying",
+                    "[sre-comprehensive] LLM endpoint unavailable / rate-limited; "
+                    "will retry on the next scan",
                     file=sys.stderr,
                     flush=True,
                 )
-                break
 
         if mcp_down_streak >= max_mcp_down_streak:
             print(
-                f"[sre-comprehensive] abandoning scan loop: MCP unreachable for "
-                f"{mcp_down_streak} consecutive cycles",
+                f"[sre-comprehensive] MCP unreachable for {mcp_down_streak} "
+                "consecutive cycles; continuing with bounded retries",
                 file=sys.stderr,
                 flush=True,
             )
-            break
+            mcp_down_streak = 0
 
         if deadline is None:
-            break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        sleep_for = min(scan_interval if scan_interval > 0 else 30, max(int(remaining), 0))
+            if scan_interval <= 0:
+                break
+            sleep_for = scan_interval
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sleep_for = min(scan_interval if scan_interval > 0 else 30, max(int(remaining), 0))
         if sleep_for <= 0:
             break
         print(f"[sre-comprehensive] sleeping {sleep_for}s before next scan", flush=True)
@@ -325,7 +320,7 @@ def main() -> None:
     if last_output is None:
         last_output = {"entities": [], "propagation_chain": []}
 
-    if os.environ.get("AGENT_IDLE_AFTER_MAX_RUNTIME", "true").strip().lower() in ("1", "true", "yes") and deadline is not None:
+    if os.environ.get("AGENT_IDLE_AFTER_MAX_RUNTIME", "false").strip().lower() in ("1", "true", "yes") and deadline is not None:
         print("[sre-comprehensive] bounded scan loop complete; idling until workflow cleanup", flush=True)
         while True:
             time.sleep(3600)

@@ -20,11 +20,11 @@
 [submodule "agent-charts"]
 	path = agent-charts
 	url = https://github.com/AgentCert/agent-charts.git
-	branch = feature/itbench-scenarios
+	branch = stable_it_bench
 [submodule "certifier"]
 	path = certifier
 	url = https://github.com/AgentCert/certifier.git
-	branch = feature/itbench-scenarios
+	branch = stable_it_bench
 [submodule "agentcert-stack"]
 	path = agentcert-stack
 	url = https://github.com/AgentCert/agentcert-stack.git
@@ -36,7 +36,7 @@
 [submodule "agent-sidecar"]
 	path = agent-sidecar
 	url = https://github.com/AgentCert/agent-sidecar.git
-	branch = feature/itbench-scenarios
+	branch = stable_it_bench
 [submodule "litmus-go"]
 	path = litmus-go
 	url = https://github.com/AgentCert/litmus-go.git

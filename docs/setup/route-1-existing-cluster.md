@@ -96,9 +96,18 @@ Open **[http://localhost:2001](http://localhost:2001)** and log in (`admin` / `l
 
 ## 5. Next: Run an Experiment
 
-Your cluster may already have chaos infrastructure installed. If not, follow
-**[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**
-to create an environment, enable chaos, apply the infra YAML, and run an experiment.
+Setup registers and connects the `ace-local` chaos infrastructure in this cluster
+(`kubectl get pods -n litmus`). Continue with
+**[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**.
+
+<div class="callout callout-warning">
+<span class="callout-title">Images on non-kind clusters</span>
+The default <em>build locally</em> answers side-load images into the cluster, which works for
+kind and k3s only. On any other cluster <code>scripts/prepare-images.sh</code> stops with
+"no local side-load path"; answer <code>d</code> (Docker Hub) to the image-source prompts or
+push the images to a registry the cluster can pull from. Published <code>:latest</code> images
+may lag this checkout.
+</div>
 
 ---
 

@@ -122,6 +122,29 @@ The certifier calls Azure OpenAI directly, not via LiteLLM. Gemini/OpenRouter ke
 
 ---
 
+## Image Sources & Reproducibility
+
+`setup.sh` writes these into `.env`; `scripts/prepare-images.sh` acts on them (and can be re-run
+standalone). The defaults make a run reproducible from the checkout alone:
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `PLATFORM_IMAGE_SOURCE` | `local` | auth, graphql, web, certifier, subscriber … — `local` builds them from this checkout on `--restart` |
+| `HUB_BUNDLE_IMAGE_SOURCE` | `local` | the immutable hub bundle (app/agent/fault catalogs + charts) GraphQL serves; `registry` + `HUB_BUNDLE_IMAGE` for clusters that cannot side-load |
+| `INSTALL_APP_IMAGE_SOURCE` / `INSTALL_AGENT_IMAGE_SOURCE` | `local` | the installer images, which carry their own copy of the charts — `local` keeps them identical to the hub bundle (pull policy `Never`) |
+| `SRE_AGENTS_IMAGE_SOURCE` | `local` | flash-agent, sre-agent-comprehensive, sre-agent-crewai and agent-sidecar |
+| `ITBENCH_EXPERIMENT_IMAGE_SOURCE` | `local` | the ITBench fault runner (never published; `local` is the only working option) |
+| `LITMUS_IMAGES_SOURCE` | `local` | all third-party workflow images (rendered bundled apps, Litmus helpers, fault tools, metrics-server), pre-pulled and side-loaded so runs do not contact registries |
+| `ACE_AUTO_REGISTER_INFRA` | `true` | register + connect the `ace-local` chaos infrastructure after deploy (`ACE_INFRA_NAME`, `ACE_INFRA_NAMESPACE`) |
+| `ACE_ALLOW_UNVERIFIED_COMBINATIONS` | `false` | `true` downgrades catalog/compatibility validation to warnings — development only, not certification-grade |
+
+`dockerhub`/`jfrog` sources pull published `:latest` images that can lag this checkout; use them
+only for clusters that cannot side-load (anything other than kind or k3s). If any required local
+image fails to build, `prepare-images.sh` exits non-zero and setup stops instead of deploying a
+stack that would fail later with `ImagePullBackOff`.
+
+---
+
 ## Required Secrets
 
 <div class="callout callout-warning">
@@ -250,3 +273,24 @@ The gateway is assigned by Docker based on how many networks already exist on yo
 </div>
 
 If your host firewall (UFW) is active, in-cluster pods also need the port opened **from the kind subnet** — see [running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }}#networking-checklist-pods--host).
+
+### Offline or air-gapped client delivery
+
+An experiment never pulls an image at run time when `LITMUS_IMAGES_SOURCE=local`: setup resolves every image from the three bundled application charts plus Litmus, fault-tool, and metrics images, then loads them into the Kind nodes before it reports success.
+
+For a connected client, set real `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` values in `.env`. They are used only by the setup-time preload; anonymous Docker Hub pulls are intentionally rejected before a partial install can hit a rate limit.
+
+For a disconnected client, prepare a bundle once on a connected build host:
+
+```dotenv
+RUNTIME_IMAGES_EXPORT_PATH=/absolute/path/ace-runtime-images.tar
+```
+
+Run `./scripts/prepare-images.sh` successfully, deliver the resulting archive with the checkout, then set this on the client before `./scripts/setup.sh --restart`:
+
+```dotenv
+RUNTIME_IMAGES_ARCHIVE=/absolute/path/ace-runtime-images.tar
+RUNTIME_IMAGES_EXPORT_PATH=
+```
+
+The client setup imports the archive, verifies every required Docker Hub image is now local, and side-loads it into Kind. It fails before deployment with the missing image names if the archive is incomplete.

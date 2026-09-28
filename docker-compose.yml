@@ -279,7 +279,7 @@ services:
       LITMUS_CHAOS_RUNNER_IMAGE: ${CHAOS_RUNNER_IMAGE:-litmuschaos/chaos-runner:3.0.0}
       LITMUS_CHAOS_EXPORTER_IMAGE: ${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}
       # godotenv.Overload re-reads this file at init, so .env stays authoritative.
-      AGENTCERT_ENV_FILE: /srv/projects/ace-monorepo/.env
+      AGENTCERT_ENV_FILE: /ace/.env
       # The "internal" kubeconfig cluster-init writes (server: Docker-network
       # DNS name, not 127.0.0.1) — see KUBECONFIG_INTERNAL_OUT on cluster-init
       # and the `kind` network above. Required now that this container is on
@@ -309,12 +309,16 @@ services:
       # refused", so we always set them here.)
       CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL_COMPOSE:-http://certifier:8000}
       CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL_COMPOSE:-http://certifier:8000}
-      DEFAULT_AGENT_HUB_PATH: ${AGENT_CHARTS_ROOT:-/tmp/default}
+      # Hub content comes from this checkout, mounted read-only below at fixed
+      # in-container paths (same layout as the Kubernetes hub bundle), so the
+      # checkout can live anywhere on the host and nothing is cloned at runtime.
+      DEFAULT_AGENT_HUB_PATH: /ace/agent-charts
       AGENT_HUB_SOURCE_MODE: custom
-      DEFAULT_APP_HUB_PATH: ${APP_CHARTS_ROOT:-/tmp/default}
+      DEFAULT_APP_HUB_PATH: /ace/app-charts
       APP_HUB_SOURCE_MODE: custom
-      DEFAULT_CHAOS_HUB_PATH: ${CHAOS_CHARTS_ROOT:-/tmp/default}
+      DEFAULT_CHAOS_HUB_PATH: /chaos-hubs/
       HUB_SOURCE_MODE: custom
+      FAULT_CAPABILITIES_PATH: "/chaos-hubs/Litmus ChaosHub/faults/fault-capabilities.yaml"
       PRE_CLEANUP_WAIT_SECONDS: ${PRE_CLEANUP_WAIT_SECONDS:-0}
       # On corporate networks the host has a custom CA bundle (SSL inspection
       # proxy) that the ubi9 base image doesn't know about.  Go checks
@@ -331,9 +335,13 @@ services:
       # config (external, 127.0.0.1:<port>, unused by this container) and
       # config-internal (Docker-network DNS, see KUBECONFIG above).
       - kubeconfig:/kube:ro
-      # Mount the repo at its own absolute path so AGENT_CHARTS_ROOT /
-      # APP_CHARTS_ROOT / AGENTCERT_ENV_FILE (all absolute in .env) resolve.
-      - .:/srv/projects/ace-monorepo:ro
+      # The checkout, read-only, at a fixed path (see DEFAULT_*_HUB_PATH above).
+      - .:/ace:ro
+      # The default ChaosHub is looked up as <DEFAULT_CHAOS_HUB_PATH>/<hub name>/.
+      - type: bind
+        source: ./chaos-charts
+        target: /chaos-hubs/Litmus ChaosHub
+        read_only: true
       # Mount the host CA bundle so the ubi9 container trusts corporate/proxy
       # CAs when git-cloning chaos-charts over HTTPS (go-git uses Go TLS, not
       # the system git binary, so GIT_SSL_NO_VERIFY has no effect here).

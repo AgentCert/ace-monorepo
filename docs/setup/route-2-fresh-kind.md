@@ -32,6 +32,12 @@ chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
 sudo snap install kubectl --classic
 # or: curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 #     chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+# helm (the default deploy method)
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# git + python3 (setup's helpers use only the standard library)
+sudo apt-get install -y git python3
 ```
 
 Verify:
@@ -40,7 +46,11 @@ Verify:
 docker --version      # Docker 28+
 kind version          # kind v0.20+
 kubectl version --client
+helm version --short  # v3.12+
 ```
+
+`./scripts/setup.sh` re-checks all of these (via `scripts/check-prerequisites.sh`) and prints
+the exact fix for anything missing.
 
 ---
 
@@ -57,6 +67,9 @@ If you already cloned without submodules:
 git submodule update --init --recursive
 ```
 
+This manual command is optional: `./scripts/setup.sh` detects and initializes
+missing submodules before it builds the platform.
+
 ---
 
 ## 3. Run the Setup Wizard
@@ -65,35 +78,49 @@ git submodule update --init --recursive
 ./scripts/setup.sh
 ```
 
-The wizard:
+The wizard asks for your LLM credentials; press **Enter** at every other prompt to take the
+stable defaults. In order, it:
 
-1. Creates `.env` from `.env.example` (or updates an existing one)
-2. Prompts for **Azure OpenAI** credentials (endpoint, key, deployment names)
-3. Optionally prompts for **Gemini** or **OpenRouter** keys
-4. Prompts for a `CLUSTER_MODE` — press Enter to accept `auto` (creates a kind cluster if none exists)
-5. Patches `.env` with Kubernetes service DNS names
-6. Asks: **Deploy the stack to the Kubernetes cluster now? [y/N]** → answer **Y**
-7. Asks how to deploy — press **`k`** for `kubectl apply` (default) or **`h`** for Helm
+1. Checks prerequisites, creates `.env` from `.env.example` (or updates yours) and picks
+   collision-free host ports and a per-user instance name (`ACE_INSTANCE_NAME`) — safe on a
+   shared host.
+2. Asks **Express or Guided** (`Enter` = guided) and **Build images?** (`Enter` = *build ALL
+   locally*). All first-party images — control plane, installers, agents, sidecar, ITBench
+   runner — and the **hub bundle** (app/agent/fault catalogs and charts) are built from this
+   checkout, so what runs is exactly what you cloned. Experiment image sources default to
+   **local** for the same reason.
+3. Asks for Azure OpenAI / Gemini / OpenRouter keys and optionally a local Ollama model.
+4. Asks **Deploy?** — `h` Helm (default) or `k` plain `kubectl apply`; `n` skips.
 
-When you answer Y, the wizard:
+With a deploy choice it then, unattended:
 
-- Creates the kind cluster `agentcert` using `deploy/kind/kind-agentcert.yaml` (with all required `extraPortMappings`)
-- Creates the `ace-env` Kubernetes Secret from `.env`
-- Applies all manifests in `deploy/k8s/` in order: namespace → RBAC → MongoDB → auth → graphql → web → LiteLLM → certifier → Langfuse (kubectl path), or installs the `deploy/helm/ace` chart (Helm path)
-- Waits for MongoDB, auth, graphql, web, and certifier to become ready (up to 5 min)
-- Prints access URLs
+- Creates the kind cluster `agentcert-<ACE_INSTANCE_NAME>` with all required port mappings
+- Builds and side-loads the hub bundle, then deploys the platform (Helm chart `deploy/helm/ace`,
+  or the manifests in `deploy/k8s/`) including a platform-owned metrics-server
+- Waits for the experiment images; **stops with an error** if any required image failed to build
+- Registers the `ace-local` chaos infrastructure, installs its subscriber into `litmus` and waits
+  until it is connected — no UI steps needed
+- Seeds the demo experiments and prints the access URLs
+
+Re-running `./scripts/setup.sh` (or `--restart` to reuse the saved answers) is idempotent.
 
 #### If you chose Helm
 
-The wizard generates `deploy/helm/ace/values-env.yaml` from your `.env` and runs:
+The wizard generates `deploy/helm/ace/values-env.yaml` from your `.env` and runs, in effect:
 
 ```bash
 helm upgrade --install ace deploy/helm/ace \
   -n ace --create-namespace \
-  -f deploy/helm/ace/values-env.yaml
+  -f deploy/helm/ace/values-env.yaml \
+  --set-string chartsHub.bundleImage=agentcert/ace-hub-bundle:local \
+  --set chartsHub.bundleImagePullPolicy=Never
 ```
 
-To upgrade after changing `.env`, re-run `./scripts/setup.sh` and press `h` again, or run the command above directly. Use `helm history ace -n ace` and `helm rollback ace -n ace` for release management. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for more Helm day-to-day commands.
+Always redeploy through `./scripts/setup.sh --restart` rather than raw `helm upgrade`: the hub
+bundle must be rebuilt and side-loaded first, and the post-deploy steps (host-service wiring,
+infrastructure registration, subscriber sync) only run from the script. Use `helm history ace -n ace`
+and `helm rollback ace -n ace` for release management. See
+[Managing services]({{ "/setup/managing-services.html" | relative_url }}) for more.
 
 ---
 
@@ -179,16 +206,11 @@ kubectl create clusterrolebinding argo-chaos-admin \
 
 ---
 
-## 7. Next: Install Infra and Run an Experiment
+## 7. Next: Run an Experiment
 
-A fresh cluster has **no chaos infrastructure yet**. Follow
-**[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})** to:
-
-1. Create an environment in the UI
-2. Enable chaos (creates a Chaos Infrastructure)
-3. Download and apply the infra YAML to the cluster
-4. Run a chaos experiment
-5. View the certification report
+Setup already connected the `ace-local` chaos infrastructure (`kubectl get pods -n litmus`).
+Continue with **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**
+to create and run an experiment and view its certification report.
 
 ---
 
@@ -196,14 +218,13 @@ A fresh cluster has **no chaos infrastructure yet**. Follow
 
 <div class="callout callout-warning">
 <span class="callout-title">⚠ Don't accidentally lose your cluster</span>
-The kind cluster is a Docker container named <code>agentcert-control-plane</code>. It
+The kind cluster is a Docker container named <code>agentcert-&lt;ACE_INSTANCE_NAME&gt;-control-plane</code>. It
 is <strong>not</strong> backed by an external volume — deleting the container (e.g. via
-<code>docker system prune</code>) permanently loses cluster state. Recreate with:<br>
-<code>kind create cluster --config deploy/kind/kind-agentcert.yaml</code><br>
-then re-run <code>./scripts/setup.sh</code> and answer Y to redeploy.
+<code>docker system prune</code>) permanently loses cluster state, including MongoDB. Re-run
+<code>./scripts/setup.sh --restart</code> to recreate and redeploy everything.
 </div>
 
-- **Port 8080** — the kind config also maps host `8080 → 80` for ingress. If 8080 is busy, edit `hostPort` in `local-personal-workspace/kind-agentcert.yaml` before first start.
-- **Idempotent setup** — re-running `./scripts/setup.sh` is safe: it detects existing port mappings, skips cluster recreation, updates the `ace-env` Secret, and re-applies all manifests (no-op if nothing changed).
+- **Ports** — every host port is chosen by `setup.sh` (free-port walk) and saved in `.env` as `KIND_HOSTPORT_*`; the table above shows the defaults. See [configuration.md]({{ "/setup/configuration.html" | relative_url }}) to change them.
+- **Idempotent setup** — re-running `./scripts/setup.sh` is safe: it detects existing port mappings, skips cluster recreation, updates the `ace-env` Secret, re-applies all manifests and reuses the registered chaos infrastructure.
 - **UFW** — if your host firewall is active, in-cluster pods need ports open from the kind subnet. See [running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }}#networking-checklist-pods--host).
 - **Submodule pointer issues** — if `agent-charts/` or `app-charts/` is empty, run `git submodule update --init --recursive` from the repo root.

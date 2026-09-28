@@ -144,20 +144,29 @@ curl -s -o /dev/null -w "UI  %{http_code}\n" "http://${WEB_IP}:32001/"
 
 ---
 
-## 5. Apply the Infra YAML to the Cloud Cluster
+## 5. Chaos Infrastructure
 
-After creating a Chaos Infrastructure in the UI, apply its manifest to the cluster:
+Setup registers the `ace-local` chaos infrastructure and applies its manifest to the cloud
+cluster automatically, then waits until it is connected:
 
 ```bash
-kubectl apply -f "<url-shown-in-the-ui>"
-
-# Watch litmus come up:
-kubectl -n litmus get pods -w
+kubectl -n litmus get pods -w     # subscriber, chaos-operator, workflow-controller, event-tracker
 ```
 
 Since both ACE control plane and Litmus run inside the same cluster, the subscriber
 reaches graphql at `http://graphql.ace.svc.cluster.local:8081` with no firewall
 rules needed.
+
+<div class="callout callout-warning">
+<span class="callout-title">Images on cloud clusters</span>
+Locally built images cannot be side-loaded into AKS/EKS/GKE. Answer <code>d</code> (Docker Hub)
+or <code>j</code> (JFrog) to the image-source prompts, or push the images to a registry the
+cluster can pull from — otherwise <code>scripts/prepare-images.sh</code> stops with
+"no local side-load path". The same applies to the hub bundle: build it
+(<code>docker build -f deploy/hub-bundle/Dockerfile .</code> from the repo root), push it, and set
+<code>HUB_BUNDLE_IMAGE_SOURCE=registry</code> and <code>HUB_BUNDLE_IMAGE=&lt;your-registry&gt;/ace-hub-bundle:&lt;tag&gt;</code>
+in <code>.env</code>. Published <code>:latest</code> images may lag this checkout.
+</div>
 
 Continue with **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**.
 

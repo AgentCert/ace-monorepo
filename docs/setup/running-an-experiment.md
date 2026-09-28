@@ -17,31 +17,19 @@ The control plane is based on **Litmus ChaosCenter 3.x**, so the UI uses Litmus 
 <div class="qs-steps">
   <div class="qs-step">
     <div class="qs-num">1</div>
-    <div class="qs-body"><strong>Create an Environment</strong> — a logical grouping (e.g. <code>local-dev</code>) that holds your chaos infrastructures.</div>
+    <div class="qs-body"><strong>Already done by <code>./scripts/setup.sh</code></strong> — it creates the <code>ace-local</code> environment, registers the <code>ace-local</code> chaos infrastructure (cluster scope, namespace <code>litmus</code>), installs its subscriber, and waits until it is CONNECTED.</div>
   </div>
   <div class="qs-step">
     <div class="qs-num">2</div>
-    <div class="qs-body"><strong>Enable Chaos</strong> — create a Chaos Infrastructure; this generates the Kubernetes manifest you install into your cluster.</div>
+    <div class="qs-body"><strong>Create a Chaos Experiment</strong> — pick an application, an agent and faults, and complete each fault's target. Save and Run reject combinations the local catalogs do not support.</div>
   </div>
   <div class="qs-step">
     <div class="qs-num">3</div>
-    <div class="qs-body"><strong>Apply the infra YAML</strong> — <code>kubectl apply -f &lt;url&gt;</code> on your cluster. The subscriber pod starts and calls home.</div>
+    <div class="qs-body"><strong>Run it</strong> — watch the live execution graph in the UI or via <code>kubectl -n litmus get pods -w</code>. Cleanup always runs at the end (Argo <code>onExit</code>), even when a step fails.</div>
   </div>
   <div class="qs-step">
     <div class="qs-num">4</div>
-    <div class="qs-body"><strong>Wait for CONNECTED / ACTIVE</strong> — the infrastructure flips status in the UI within a minute or two.</div>
-  </div>
-  <div class="qs-step">
-    <div class="qs-num">5</div>
-    <div class="qs-body"><strong>Create a Chaos Experiment</strong> — pick a fault, define the target, add probes, tune parameters.</div>
-  </div>
-  <div class="qs-step">
-    <div class="qs-num">6</div>
-    <div class="qs-body"><strong>Run it</strong> — watch the live execution graph in the UI or via <code>kubectl -n litmus get pods -w</code>.</div>
-  </div>
-  <div class="qs-step">
-    <div class="qs-num">7</div>
-    <div class="qs-body"><strong>Results → Langfuse → Certification</strong> — traces land in Langfuse; the Certifier produces a 12-section report.</div>
+    <div class="qs-body"><strong>Results → Langfuse → Certification</strong> — traces land in Langfuse; the Certifier produces one result per injected fault and a 12-section report.</div>
   </div>
 </div>
 
@@ -52,71 +40,26 @@ The control plane is based on **Litmus ChaosCenter 3.x**, so the UI uses Litmus 
 <div class="callout callout-info">
 <span class="callout-title">Pre-flight checklist</span>
 Stack is healthy: <code>kubectl get pods -n ace</code> shows all pods <code>Running</code>.<br>
-UI is reachable: <strong><a href="http://localhost:2001">http://localhost:2001</a></strong> — log in with <code>ADMIN_USERNAME / ADMIN_PASSWORD</code> (default <code>admin / litmus</code>).<br>
-<code>kubectl config current-context</code> returns <code>kind-agentcert</code> and <code>kubectl get nodes</code> shows the node Ready.
+Chaos infrastructure is up: <code>kubectl get pods -n litmus</code> shows <code>subscriber</code>, <code>chaos-operator</code>, <code>workflow-controller</code> and <code>event-tracker</code> Running, and the UI's <strong>Environments → ace-local</strong> page shows <code>ace-local</code> as CONNECTED.<br>
+UI is reachable at the URL <code>setup.sh</code> printed (default <strong><a href="http://localhost:2001">http://localhost:2001</a></strong>) — log in with <code>ADMIN_USERNAME / ADMIN_PASSWORD</code> (default <code>admin / litmus</code>).<br>
+<code>kubectl config current-context</code> is <code>kind-agentcert-&lt;ACE_INSTANCE_NAME&gt;</code> (see <code>KIND_CLUSTER_NAME</code> in <code>.env</code>).
 </div>
 
----
-
-## 1. Create an Environment
-
-An *Environment* is a logical grouping (e.g. `dev`, `staging`) that holds your chaos infrastructures.
-
-1. In the UI, open **Environments**.
-2. Click **New Environment**.
-3. Give it a name (e.g. `local-dev`) and type (Non-Production), then **Create**.
+If setup printed <em>"Chaos infrastructure is NOT connected"</em>, fix the warning it showed and re-run
+<code>./scripts/setup.sh --restart</code> — registration is idempotent and reuses the existing infrastructure.
 
 ---
 
-## 2. Enable Chaos — Create a Chaos Infrastructure
+## Connecting a chaos infrastructure by hand (fallback)
 
-A *Chaos Infrastructure* is the agent that runs inside your Kubernetes cluster and executes experiments.
+Only needed when you set <code>ACE_AUTO_REGISTER_INFRA=false</code> in <code>.env</code>, or want an extra
+infrastructure on another cluster.
 
-1. Open your environment → **Enable Chaos** (or **Chaos Infrastructures → New Chaos Infrastructure**).
-2. Choose **Kubernetes** as the infrastructure type.
-3. Pick the installation **scope**:
-   - **Cluster-wide** — can target workloads in any namespace (recommended for the demo / sock-shop).
-   - **Namespace** — restricted to one namespace.
-4. Accept the defaults for the service account / namespace (`litmus`) unless you have a reason to change them.
-5. Continue to the step that shows the **installation manifest** — this is the YAML you apply next.
-
----
-
-## 3. Download & Apply the Infrastructure YAML
-
-The UI presents the manifest in one of two ways — both are fine:
-
-**a) Copy the `kubectl apply` command** shown in the UI:
-```bash
-kubectl apply -f "<url-shown-in-the-ui>"
-```
-
-**b) Download the YAML** and apply the file:
-```bash
-kubectl --context kind-agentcert apply -f ~/Downloads/litmus-infra.yaml
-```
-
-Watch it come up:
-```bash
-kubectl -n litmus get pods -w
-# expect: subscriber, chaos-operator, workflow-controller, event-tracker → Running
-```
-
-<div class="callout callout-tip">
-A reference copy of the infrastructure manifest lives at <code>local-personal-workspace/litmus-fresh.yaml</code>. The UI-generated version is the same shape but stamped with a unique <code>instanceID</code> and your <code>SERVER_ADDR</code> so the in-cluster subscriber knows how to call back to the control plane.
-</div>
-
----
-
-## 4. Confirm the Infrastructure Is CONNECTED
-
-Back in the UI, the new infrastructure should flip to **CONNECTED / ACTIVE** within a minute or two.
-
-```bash
-kubectl -n litmus logs deploy/subscriber --tail=30
-```
-
-If it stays **DISCONNECTED**, work through the [networking checklist](#networking-checklist-pods--host) below.
+1. In the UI open **Environments → New Environment**, give it a name and type (Non-Production).
+2. Open it → **Enable Chaos** → **Kubernetes**; pick **Cluster-wide** scope and keep the `litmus` namespace / service account.
+3. Apply the manifest the UI shows (`kubectl apply -f "<url-shown-in-the-ui>"`, or download it and `kubectl apply -f` the file).
+4. Watch it come up (`kubectl -n litmus get pods -w`) and wait for **CONNECTED / ACTIVE** in the UI; if it stays DISCONNECTED, work through the networking checklist below.
+5. Re-run `./scripts/setup.sh --restart` so the subscriber secret and workflow-controller `instanceID` are synced to it.
 
 ---
 
@@ -169,19 +112,19 @@ kubectl get clusterrolebinding -o json \
 
 ---
 
-## 5. Create a Chaos Experiment
+## 1. Create a Chaos Experiment
 
 1. Open **Chaos Experiments → New Experiment**.
-2. Select the **Environment** and the **Chaos Infrastructure** you just connected.
-3. Choose a fault from a **ChaosHub** (the default hub is synced automatically). Start simple — e.g. `pod-delete` against a target deployment.
-4. Define the **target** (namespace / app label / deployment).
+2. Select the **ace-local** environment and the **ace-local** chaos infrastructure (created by `setup.sh`).
+3. Choose a fault from the default **ChaosHub** — it is served from this checkout's `chaos-charts/` (baked into the hub bundle image at setup), never cloned at runtime. Start simple — e.g. `pod-delete` against a target deployment.
+4. Define the **target** (namespace / app label / deployment). A newly added fault is only committed to the experiment when you click **Apply** with a complete target; Save and Run are blocked while any fault is incomplete.
 5. (Optional but recommended) Add **Resilience Probes** — the steady-state checks (HTTP/cmd/prometheus) that decide whether the system stayed healthy.
 6. **Tune** the fault parameters (duration, chaos interval, etc.).
 7. Save / **Run** the experiment.
 
 ---
 
-## 6. Watch the Run
+## 2. Watch the Run
 
 In the UI, open the experiment's **run** to see the live execution graph (install → inject fault → probes → cleanup).
 
@@ -192,7 +135,7 @@ kubectl -n <target-ns> get pods -w   # watch the fault take effect
 
 ---
 
-## 7. Results → Langfuse → Certification
+## 3. Results → Langfuse → Certification
 
 | What | Where | Notes |
 |---|---|---|

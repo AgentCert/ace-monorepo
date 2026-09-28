@@ -27,7 +27,9 @@ RUN chown -R agent:agent /app
 
 USER agent
 
-# CronJob mode by default (run once). Override SCAN_INTERVAL>0 for continuous.
+# Continuous by default: the image runs as a Deployment beside the app under
+# test and must keep scanning until the workflow's cleanup uninstalls it
+# (SIGTERM). Set SCAN_INTERVAL=0 for a one-shot run (the ITBench harness does).
 ENV SCAN_INTERVAL=120
 ENV LOG_LEVEL=INFO
 

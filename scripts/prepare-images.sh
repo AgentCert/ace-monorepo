@@ -22,7 +22,9 @@
 # For "local":
 #   install-app / install-agent  — docker build from source + kind load
 #   sre-agent-comprehensive / sre-agent-crewai — build from agents/ + kind load
-#   litmuschaos images           — docker pull from Docker Hub + kind load
+#   runtime dependencies         — pull pinned/public images + kind load
+#                                  (Litmus helpers, stress/network tools, and
+#                                  the platform-owned metrics-server)
 #   itbench-experiment           — docker build from litmus-go/ (Dockerfile.itbench) + kind load
 #                                   (single dispatcher binary shared by every fault under
 #                                   chaos-charts/faults/itbench/*/fault.yaml — see EXPERIMENT_NAME
@@ -69,6 +71,8 @@ SRE_AGENTS_SRC="$(cur SRE_AGENTS_IMAGE_SOURCE)"
 HUB_BUNDLE_SRC="$(cur HUB_BUNDLE_IMAGE_SOURCE)"
 HUB_BUNDLE_IMAGE="$(cur HUB_BUNDLE_IMAGE)"
 ITBENCH_EXPERIMENT_SRC="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"
+INSTALL_APP_IMAGE="$(cur INSTALL_APPLICATION_IMAGE)"
+INSTALL_AGENT_IMAGE="$(cur INSTALL_AGENT_IMAGE)"
 
 APP_SRC="${APP_SRC:-dockerhub}"
 AGENT_SRC="${AGENT_SRC:-dockerhub}"
@@ -80,11 +84,17 @@ SRE_AGENTS_SRC="${SRE_AGENTS_SRC:-local}"
 ITBENCH_EXPERIMENT_SRC="${ITBENCH_EXPERIMENT_SRC:-local}"
 HUB_BUNDLE_SRC="${HUB_BUNDLE_SRC:-local}"
 HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
+INSTALL_APP_IMAGE="${INSTALL_APP_IMAGE:-agentcert/agentcert-install-app:latest}"
+INSTALL_AGENT_IMAGE="${INSTALL_AGENT_IMAGE:-agentcert/agentcert-install-agent:latest}"
 
 JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
 JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
 JFROG_USER="$(cur JFROG_USER)"
 JFROG_TOKEN="$(cur JFROG_TOKEN)"
+DOCKERHUB_USER="$(cur DOCKERHUB_USERNAME)"
+DOCKERHUB_TOKEN="$(cur DOCKERHUB_TOKEN)"
+RUNTIME_IMAGES_ARCHIVE="${RUNTIME_IMAGES_ARCHIVE:-$(cur RUNTIME_IMAGES_ARCHIVE)}"
+RUNTIME_IMAGES_EXPORT_PATH="${RUNTIME_IMAGES_EXPORT_PATH:-$(cur RUNTIME_IMAGES_EXPORT_PATH)}"
 
 APP_CHARTS_ROOT="$(cur APP_CHARTS_ROOT)"; APP_CHARTS_ROOT="${APP_CHARTS_ROOT:-${REPO_ROOT}/app-charts}"
 AGENT_CHARTS_ROOT="$(cur AGENT_CHARTS_ROOT)"; AGENT_CHARTS_ROOT="${AGENT_CHARTS_ROOT:-${REPO_ROOT}/agent-charts}"
@@ -128,6 +138,80 @@ echo
 ALREADY_BUILT_IMAGES=" ${ACE_ALREADY_BUILT_IMAGES:-} "
 image_already_built() {
     [[ "${ALREADY_BUILT_IMAGES}" == *" $1 "* ]]
+}
+
+dockerhub_credentials_are_configured() {
+    [[ -n "${DOCKERHUB_USER}" && -n "${DOCKERHUB_TOKEN}" ]] || return 1
+    case "${DOCKERHUB_USER}:${DOCKERHUB_TOKEN}" in
+        *YOUR_*|*REPLACE_ME*|*CHANGE_ME*) return 1 ;;
+    esac
+}
+
+ensure_dockerhub_runtime_login() {
+    # Local runtime preparation preloads every image the bundled charts render.
+    # That includes public application images such as Sock Shop, which can
+    # easily exceed Docker Hub's anonymous quota in a fresh client environment.
+    # Reuse the documented build/push credentials without ever echoing a token.
+    if ! dockerhub_credentials_are_configured; then
+        warn "Docker Hub credentials are not configured; cached images may work, but a full local runtime preload can hit anonymous pull limits."
+        warn "Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in .env, then re-run this script."
+        return 0
+    fi
+
+    if printf '%s' "${DOCKERHUB_TOKEN}" | docker login docker.io --username "${DOCKERHUB_USER}" --password-stdin >/dev/null; then
+        ok "Authenticated to Docker Hub for workflow runtime image preload."
+        return 0
+    fi
+
+    warn "Docker Hub login failed; refusing a likely rate-limited runtime preload. Verify DOCKERHUB_USERNAME/DOCKERHUB_TOKEN."
+    return 1
+}
+
+preload_runtime_images_archive() {
+    [[ -z "${RUNTIME_IMAGES_ARCHIVE}" ]] && return 0
+    if [[ ! -r "${RUNTIME_IMAGES_ARCHIVE}" ]]; then
+        warn "RUNTIME_IMAGES_ARCHIVE is not readable: ${RUNTIME_IMAGES_ARCHIVE}"
+        return 1
+    fi
+    info "Loading offline workflow runtime image archive: ${RUNTIME_IMAGES_ARCHIVE}"
+    if ! docker load -i "${RUNTIME_IMAGES_ARCHIVE}"; then
+        warn "Could not load RUNTIME_IMAGES_ARCHIVE=${RUNTIME_IMAGES_ARCHIVE}"
+        return 1
+    fi
+    ok "Offline workflow runtime image archive loaded."
+}
+
+is_docker_hub_image() {
+    local image="$1" first_component
+    first_component="${image%%/*}"
+    [[ "${image}" != */* || ( "${first_component}" != *.* && "${first_component}" != *:* && "${first_component}" != "localhost" ) ]]
+}
+
+assert_runtime_images_are_available_or_authenticated() {
+    local image missing_count=0
+    local -a missing_images=()
+
+    # An image archive can make a local setup fully offline. If it did not
+    # contain every Docker Hub image, do not begin a large anonymous pull that
+    # will fail part-way through a customer setup because of registry quotas.
+    dockerhub_credentials_are_configured && return 0
+    for image in "$@"; do
+        if is_docker_hub_image "${image}" && ! docker image inspect "${image}" >/dev/null 2>&1; then
+            missing_images+=("${image}")
+        fi
+    done
+    missing_count="${#missing_images[@]}"
+    [[ "${missing_count}" -eq 0 ]] && return 0
+
+    warn "${missing_count} Docker Hub workflow image(s) are missing locally and no usable Docker Hub credentials are configured."
+    for image in "${missing_images[@]:0:5}"; do
+        warn "  missing: ${image}"
+    done
+    if (( missing_count > 5 )); then
+        warn "  ... plus $(( missing_count - 5 )) more"
+    fi
+    warn "Set DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or provide a complete RUNTIME_IMAGES_ARCHIVE, then re-run scripts/prepare-images.sh."
+    return 1
 }
 
 # Detect which flavour of cluster the active kubectl context points at, so
@@ -313,7 +397,12 @@ build_and_load_hub_bundle() {
         info "Building ${HUB_BUNDLE_IMAGE} from local hub trees (${content_sha:0:12}) …"
         (
             cd "${REPO_ROOT}"
+            # BuildKit requires explicit archive entries for parent directories;
+            # GNU tar does not emit app-charts/ when only app-charts/charts is
+            # named, which makes COPY fail with mkdirat ... no such directory.
             tar -cf - \
+                --no-recursion app-charts agent-charts chaos-charts deploy deploy/hub-bundle \
+                --recursion \
                 deploy/hub-bundle/Dockerfile \
                 app-charts/charts \
                 agent-charts/charts \
@@ -323,7 +412,7 @@ build_and_load_hub_bundle() {
             --build-arg "BUNDLE_CONTENT_SHA=${content_sha}" \
             --tag "${HUB_BUNDLE_IMAGE}" \
             --file deploy/hub-bundle/Dockerfile \
-            -
+            - || { warn "Building ${HUB_BUNDLE_IMAGE} failed"; return 1; }
         ok "Built ${HUB_BUNDLE_IMAGE}"
     fi
 
@@ -349,7 +438,7 @@ build_and_load_install_app() {
     # this right; this was previously a copy-paste-shifted-one-level-deep bug
     # that made every "local" install-app build here fail outright.
     local ctx="${APP_CHARTS_ROOT}"
-    local img="agentcert/agentcert-install-app:latest"
+    local img="${INSTALL_APP_IMAGE}"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
         return 0
@@ -359,7 +448,8 @@ build_and_load_install_app() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}"
+    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+        || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
 }
@@ -369,7 +459,7 @@ build_and_load_install_agent() {
     # Same context fix as build_and_load_install_app above -- charts/ is a
     # sibling of install-agent/, not nested inside it.
     local ctx="${AGENT_CHARTS_ROOT}"
-    local img="agentcert/agentcert-install-agent:latest"
+    local img="${INSTALL_AGENT_IMAGE}"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
         return 0
@@ -379,7 +469,8 @@ build_and_load_install_agent() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}"
+    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+        || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
 }
@@ -387,7 +478,7 @@ build_and_load_install_agent() {
 build_and_load_sre_agent() {
     local name="$1"   # e.g. sre-agent-comprehensive
     local img="$2"    # e.g. agentcert/sre-agent-comprehensive:latest
-    local ctx="${REPO_ROOT}/agents/${name}"
+    local ctx="${3:-${REPO_ROOT}/agents/${name}}"
     local dockerfile="${ctx}/Dockerfile"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
@@ -398,7 +489,8 @@ build_and_load_sre_agent() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build --network=host -t "${img}" -f "${dockerfile}" "${ctx}"
+    docker build --network=host -t "${img}" -f "${dockerfile}" "${ctx}" \
+        || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
 }
@@ -416,13 +508,59 @@ build_and_load_itbench_experiment() {
         return 1
     fi
     info "Building ${img} from ${ctx} (Dockerfile.itbench) …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}"
+    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+        || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
 }
 
-pull_and_load_litmus_images() {
-    # Base images pulled under their Docker Hub names.
+bundled_application_images() {
+    # Render charts from the install-app image, not the host checkout. The image
+    # contains the resolved OTel subchart and is the exact chart payload Argo
+    # will execute, so this cannot drift from workflow runtime content.
+    local installer_image="${INSTALL_APP_IMAGE}"
+    if ! docker image inspect "${installer_image}" >/dev/null 2>&1; then
+        warn "Cannot enumerate bundled app images: ${installer_image} is not built locally." >&2
+        return 1
+    fi
+
+    local charts
+    if ! charts="$(docker run --rm --entrypoint sh "${installer_image}" -ec '
+        for chart in /charts/*/; do
+            [ -f "${chart}Chart.yaml" ] && basename "${chart%/}"
+        done
+    ' | sort)"; then
+        warn "Could not enumerate charts from ${installer_image}." >&2
+        return 1
+    fi
+    if [[ -z "${charts}" ]]; then
+        warn "No bundled application charts found in ${installer_image}." >&2
+        return 1
+    fi
+
+    local chart rendered
+    while IFS= read -r chart; do
+        [[ -n "${chart}" ]] || continue
+        if ! rendered="$(docker run --rm --entrypoint helm "${installer_image}" \
+                template "ace-image-scan" "/charts/${chart}")"; then
+            warn "Could not render /charts/${chart} from ${installer_image}." >&2
+            return 1
+        fi
+        # Pod specs may render as `image: x` or list-form `- image: x`.
+        # Strip either quote style and reject unresolved template fragments.
+        awk '{
+                 for (i=1; i<NF; i++) if ($i == "image:") {
+                     image=$(i+1); gsub(/["\047]/, "", image);
+                     if (image != "" && image !~ /[{}]/) print image
+                 }
+             }' <<<"${rendered}"
+    done <<<"${charts}" | sort -u
+}
+
+pull_and_load_runtime_images() {
+    # Runtime dependencies that workflows/the platform must find in the node's
+    # image store when running locally. Keep this aligned with the platform
+    # metricsServer image and every image referenced by bundled fault templates.
     # For each image we also load an alias under any alternative registry names
     # that stored experiment manifests may reference (JFrog, Scarf proxy).
     local images=(
@@ -432,11 +570,32 @@ pull_and_load_litmus_images() {
         "litmuschaos/go-runner:latest"
         "alexeiled/stress-ng:latest-ubuntu"
         "gaiadocker/iproute2:latest"
+        "registry.k8s.io/metrics-server/metrics-server:v0.7.2"
     )
 
+    local app_images img
+    if ! app_images="$(bundled_application_images)"; then
+        return 1
+    fi
+    while IFS= read -r img; do
+        [[ -n "${img}" ]] || continue
+        # Kubernetes/Docker normalize an omitted tag to :latest. Normalize here
+        # too so equivalent references are not pulled/transferred twice.
+        if [[ "${img}" != *@* && "${img##*/}" != *:* ]]; then
+            img="${img}:latest"
+        fi
+        images+=("${img}")
+    done <<<"${app_images}"
+    # Monitoring/helper images repeat across charts. Transfer each exact image
+    # reference once and keep the execution/log order deterministic.
+    mapfile -t images < <(printf '%s\n' "${images[@]}" | sort -u)
+
+    preload_runtime_images_archive || return 1
+    assert_runtime_images_are_available_or_authenticated "${images[@]}" || return 1
+
     # Each image pulls (network-bound) and kind-loads independently of every
-    # other, so serializing all 6 was pure wall-clock waste -- bounded rather
-    # than unbounded for the same shared-host reason as setup.sh's build loop
+    # other, so serializing the complete set is unnecessary wall-clock cost.
+    # Keep concurrency bounded for the same shared-host reason as setup.sh's build loop
     # (see ACE_BUILD_PARALLELISM there); override via ACE_PULL_PARALLELISM.
     # `kind load docker-image` against the same node concurrently from
     # multiple processes isn't officially documented as safe, but containerd's
@@ -444,16 +603,54 @@ pull_and_load_litmus_images() {
     # this is a common pattern in CI pipelines; a failed load here was already
     # a non-fatal warning before this change, so the worst case is unchanged.
     local parallelism="${ACE_PULL_PARALLELISM:-4}"
-    local results_dir; results_dir="$(mktemp -d "${REPO_ROOT}/.tmp/litmus-pull-results.XXXXXX" 2>/dev/null || mktemp -d)"
-    local log_dir="${REPO_ROOT}/.tmp/litmus-pull-logs"
+    if ! [[ "${parallelism}" =~ ^[1-9][0-9]*$ ]]; then
+        warn "Ignoring invalid ACE_PULL_PARALLELISM=${parallelism@Q}; using 4"
+        parallelism=4
+    fi
+    local pull_retries="${ACE_IMAGE_PULL_RETRIES:-3}"
+    if ! [[ "${pull_retries}" =~ ^[1-9][0-9]*$ ]]; then
+        warn "Ignoring invalid ACE_IMAGE_PULL_RETRIES=${pull_retries@Q}; using 3"
+        pull_retries=3
+    fi
+    local refresh_runtime_images="${ACE_REFRESH_RUNTIME_IMAGES:-0}"
+    local results_dir; results_dir="$(mktemp -d "${REPO_ROOT}/.tmp/runtime-pull-results.XXXXXX" 2>/dev/null || mktemp -d)"
+    local log_dir="${REPO_ROOT}/.tmp/runtime-pull-logs"
     rm -rf "${log_dir}"; mkdir -p "${log_dir}"
 
     _pull_and_load_one() {
-        local img="$1" idx="$2"
+        local img="$1" idx="$2" attempt=1 pull_ok=0 pull_output retry_delay
         {
-            echo "Pulling ${img} from Docker Hub …"
-            if docker pull "${img}"; then
-                echo "Pulled ${img}"
+            # A local-first restart must be repeatable and offline. Docker pull
+            # still contacts a registry for an already-cached mutable tag, so
+            # avoid it unless an operator explicitly requests a refresh.
+            if docker image inspect "${img}" >/dev/null 2>&1 && [[ "${refresh_runtime_images}" != "1" ]]; then
+                echo "Using cached local image ${img}"
+                pull_ok=1
+            else
+                echo "Pulling ${img} from its registry …"
+                while (( attempt <= pull_retries )); do
+                    if pull_output="$(docker pull "${img}" 2>&1)"; then
+                        printf '%s\n' "${pull_output}"
+                        echo "Pulled ${img}"
+                        pull_ok=1
+                        break
+                    fi
+                    printf '%s\n' "${pull_output}"
+                    if [[ "${pull_output}" =~ [Rr]ate[[:space:]-]*limit|429[[:space:]]Too[[:space:]]Many[[:space:]]Requests ]]; then
+                        echo "Pull rate limit reached for ${img}; authenticate Docker Hub (DOCKERHUB_USERNAME/DOCKERHUB_TOKEN) or wait for its quota window."
+                        break
+                    fi
+                    if (( attempt == pull_retries )); then
+                        break
+                    fi
+                    retry_delay=$(( 5 * (2 ** (attempt - 1)) ))
+                    echo "Pull attempt ${attempt}/${pull_retries} failed for ${img}; retrying in ${retry_delay}s …"
+                    sleep "${retry_delay}"
+                    attempt=$(( attempt + 1 ))
+                done
+            fi
+
+            if [[ "${pull_ok}" -eq 1 ]]; then
                 local load_ok=1
                 if kind_load "${img}"; then
                     load_ok=0
@@ -480,8 +677,7 @@ pull_and_load_litmus_images() {
             fi
         } >"${log_dir}/${idx}.log" 2>&1
     }
-
-    info "Pulling ${#images[@]} litmus helper image(s), up to ${parallelism} at a time — logs: ${log_dir}/"
+    info "Pulling ${#images[@]} workflow runtime image(s), up to ${parallelism} at a time — logs: ${log_dir}/"
     local idx=0 running=0
     for img in "${images[@]}"; do
         _pull_and_load_one "${img}" "${idx}" &
@@ -505,6 +701,19 @@ pull_and_load_litmus_images() {
             warn "Failed: ${images[i]} — log: ${log_dir}/${i}.log"
         fi
     done
+    if [[ "${failed}" -eq 0 && -n "${RUNTIME_IMAGES_EXPORT_PATH}" ]]; then
+        local export_parent
+        export_parent="$(dirname "${RUNTIME_IMAGES_EXPORT_PATH}")"
+        if [[ -d "${RUNTIME_IMAGES_EXPORT_PATH}" ]]; then
+            warn "RUNTIME_IMAGES_EXPORT_PATH is a directory, not an archive file: ${RUNTIME_IMAGES_EXPORT_PATH}"
+            failed=1
+        elif ! mkdir -p "${export_parent}" || ! docker save -o "${RUNTIME_IMAGES_EXPORT_PATH}" "${images[@]}"; then
+            warn "Could not write workflow runtime image archive: ${RUNTIME_IMAGES_EXPORT_PATH}"
+            failed=1
+        else
+            ok "Wrote workflow runtime image archive: ${RUNTIME_IMAGES_EXPORT_PATH}"
+        fi
+    fi
     rm -rf "${results_dir}"
     return "${failed}"
 }
@@ -559,9 +768,13 @@ _did_something=0
 declare -a _failures=()
 case "${HUB_BUNDLE_SRC}" in
     local)
-        info "hub-bundle: build from checked-out app/agent/chaos charts"
-        build_and_load_hub_bundle
-        _did_something=1
+        if [[ "${ACE_HUB_BUNDLE_PREPARED:-0}" == "1" && "${HUB_ONLY}" != "--hub-only" ]]; then
+            ok "hub-bundle: already built + loaded earlier in this setup run"
+        else
+            info "hub-bundle: build from checked-out app/agent/chaos charts"
+            build_and_load_hub_bundle
+            _did_something=1
+        fi
         ;;
     registry)
         if [[ "${HUB_BUNDLE_IMAGE}" == *":local" ]]; then
@@ -625,20 +838,35 @@ esac
 
 case "${LITMUS_SRC}" in
     local)
-        info "litmuschaos helpers: pull from Docker Hub + kind load"
-        if pull_and_load_litmus_images; then
+        info "runtime dependencies: pull once + load into the local cluster"
+        if ensure_dockerhub_runtime_login && pull_and_load_runtime_images; then
             _did_something=1
         else
-            _failures+=("litmus-helpers")
+            _failures+=("workflow-runtime-images")
         fi
         ;;
     dockerhub)
-        info "litmuschaos helpers: Docker Hub — no action needed (pulled at runtime)"
+        info "workflow runtime images: registry mode — pulled by Kubernetes at runtime"
         ;;
 esac
 
 case "${SRE_AGENTS_SRC}" in
     local)
+        # Every agent in agents.chartserviceversion.yaml, plus the sidecar all of
+        # them run beside. Leaving any of these to a Docker Hub :latest pull would
+        # run code from a different revision than this checkout.
+        info "flash-agent: local build"
+        if build_and_load_sre_agent "flash-agent" "agentcert/agentcert-flash-agent:latest"; then
+            _did_something=1
+        else
+            _failures+=("flash-agent")
+        fi
+        info "agent-sidecar: local build"
+        if build_and_load_sre_agent "agent-sidecar" "agentcert/agent-sidecar:latest" "${REPO_ROOT}/agent-sidecar"; then
+            _did_something=1
+        else
+            _failures+=("agent-sidecar")
+        fi
         info "sre-agent-comprehensive: local build"
         if build_and_load_sre_agent "sre-agent-comprehensive" "agentcert/sre-agent-comprehensive:latest"; then
             _did_something=1
@@ -675,7 +903,7 @@ esac
 
 if (( ${#_failures[@]} > 0 )); then
     warn "Required image preparation failed: ${_failures[*]}"
-    warn "ACE was not deployed because continuing would create non-deterministic ImagePullBackOff failures."
+    warn "Experiments that use these images would fail with ImagePullBackOff; fix the build above and re-run scripts/prepare-images.sh."
     exit 1
 fi
 

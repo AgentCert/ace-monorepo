@@ -72,6 +72,55 @@ say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
 
+# Parse arguments before checking prerequisites or touching .env. In
+# particular, --help must be safe to run from a newly cloned checkout.
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/setup.sh [options]
+
+Create or re-apply a local ACE installation.
+
+Options:
+  --setup                  Run the interactive setup wizard (default).
+  --restart                Re-apply the saved .env without wizard prompts.
+  --local-build            Build first-party images locally.
+  --rootless-docker        Use a private rootless Docker daemon for this checkout.
+  --agent=<name>           Set BENCHMARK_AGENT to a directory under agents/.
+  --allow-build-cache      Allow Docker build cache for local image builds.
+  --record-image-baseline  Record current third-party image digests and exit.
+  -h, --help               Show this help without changing the checkout.
+EOF
+}
+
+SETUP_MODE="setup"
+BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
+ROOTLESS_DOCKER_ACTION=0
+ALLOW_BUILD_CACHE=0
+AGENT_FLAG=""
+RECORD_IMAGE_BASELINE=0   # --record-image-baseline: refresh deploy/image-baseline.tsv from what this host resolves now
+for _arg in "$@"; do
+    case "$_arg" in
+        --restart)               SETUP_MODE="restart" ;;
+        --setup)                 SETUP_MODE="setup" ;;
+        --local-build)           BUILD_MODE="local" ;;
+        --rootless-docker)       ROOTLESS_DOCKER_ACTION=1 ;;
+        --allow-build-cache)     ALLOW_BUILD_CACHE=1 ;;
+        --agent=)
+            echo "ERROR: --agent requires a directory name under agents/." >&2
+            exit 2
+            ;;
+        --agent=*)               AGENT_FLAG="${_arg#--agent=}" ;;
+        --record-image-baseline) RECORD_IMAGE_BASELINE=1 ;;
+        -h|--help)               usage; exit 0 ;;
+        *)
+            echo "ERROR: unknown option: ${_arg}" >&2
+            echo "Run './scripts/setup.sh --help' for usage." >&2
+            exit 2
+            ;;
+    esac
+done
+unset _arg
+
 # --- Pin KUBECONFIG so kubectl and helm cannot target different clusters -----
 # On any host where k3s is installed, /usr/local/bin/kubectl is a symlink to the
 # k3s binary, and k3s's bundled kubectl defaults to /etc/rancher/k3s/k3s.yaml --
@@ -95,12 +144,42 @@ export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 # touches .env, so a fresh host/VM missing tools this script depends on is
 # guided to a working state (or auto-fixed, for what can be fixed without
 # sudo) instead of failing deep into the wizard with an opaque error. See
-# scripts/check-prerequisites.sh for what's checked and why.
-export ACE_PREREQ_FULL_DEP_AUDIT=1
+# scripts/check-prerequisites.sh for what's checked and why. The normal
+# installation builds runtime dependencies inside containers, so auditing every
+# optional host-development environment here only produces false alarms on a
+# clean clone. Developers can opt in with ACE_PREREQ_FULL_DEP_AUDIT=1.
+export ACE_PREREQ_FULL_DEP_AUDIT="${ACE_PREREQ_FULL_DEP_AUDIT:-0}"
 export ACE_PREREQ_FAIL_ON_DEP_ISSUES="${ACE_PREREQ_FAIL_ON_DEP_ISSUES:-0}"
 export ACE_PREREQ_PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 # shellcheck source=scripts/check-prerequisites.sh
 source "${SCRIPT_DIR}/check-prerequisites.sh"
+
+# `git clone` without --recurse-submodules is a common first-run path. The
+# platform cannot build from an incomplete checkout, so initialize only when
+# Git reports an unpopulated submodule. Existing initialized submodules are
+# left alone; local work is never reset by this check.
+ensure_submodules_initialized() {
+    [[ -f "${REPO_ROOT}/.gitmodules" ]] || return 0
+
+    local missing
+    missing="$(git -C "${REPO_ROOT}" submodule status --recursive 2>/dev/null | sed -n '/^-/p')"
+    [[ -n "${missing}" ]] || return 0
+
+    warn "Initializing missing Git submodules required by ACE…"
+    if ! git -C "${REPO_ROOT}" submodule update --init --recursive; then
+        echo "ERROR: unable to initialize Git submodules." >&2
+        echo "Check repository access, then run: git submodule update --init --recursive" >&2
+        return 1
+    fi
+
+    if git -C "${REPO_ROOT}" submodule status --recursive 2>/dev/null | grep -q '^-'; then
+        echo "ERROR: one or more Git submodules are still uninitialized." >&2
+        echo "Run: git submodule update --init --recursive" >&2
+        return 1
+    fi
+    ok "Git submodules initialized."
+}
+ensure_submodules_initialized
 
 # Use the workspace venv interpreter for every setup-time Python snippet when
 # available, so setup follows the same import environment developers use.
@@ -251,25 +330,6 @@ agent_is_available() {
 #                       it. Every normal run also warns when a floating tag (:latest, a
 #                       bare major, no tag) has drifted since this host's last setup —
 #                       silence that with ACE_SKIP_IMAGE_DRIFT_CHECK=1.
-SETUP_MODE="setup"
-BUILD_MODE="prompt"   # "local" pre-answers the build prompt; "prompt" = ask interactively
-ROOTLESS_DOCKER_ACTION=0
-ALLOW_BUILD_CACHE=0
-AGENT_FLAG=""
-RECORD_IMAGE_BASELINE=0   # --record-image-baseline: refresh deploy/image-baseline.tsv from what this host resolves now
-for _arg in "$@"; do
-    case "$_arg" in
-        --restart)            SETUP_MODE="restart" ;;
-        --setup)               SETUP_MODE="setup"   ;;
-        --local-build)         BUILD_MODE="local"   ;;
-        --rootless-docker)     ROOTLESS_DOCKER_ACTION=1 ;;
-        --allow-build-cache)   ALLOW_BUILD_CACHE=1 ;;
-        --agent=*)             AGENT_FLAG="${_arg#--agent=}" ;;
-        --record-image-baseline) RECORD_IMAGE_BASELINE=1 ;;
-    esac
-done
-unset _arg
-
 # --agent=<name> is applied immediately and unconditionally (before the
 # --setup/--restart branch below), so it works as a standalone quick-switch
 # even under a plain `--restart` that would otherwise skip every prompt.
@@ -1062,8 +1122,11 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
     echo -e "${CYAN}=======================================================${NC}"
     echo -e "${DIM}  CLUSTER_MODE=${CLUSTER_MODE}  ·  image policy: ${PLATFORM_IMAGE_SOURCE}  ·  .env: ${ENV_FILE}${NC}"
     echo
-    read -rp "$(echo -e "  ${BOLD}r${NC} Reconfigure all choices  |  Enter = Continue with policy above  [r/Enter]: ")" _restart_choice
-    echo
+    _restart_choice=""
+    if [[ -t 0 ]]; then
+        read -rp "$(echo -e "  ${BOLD}r${NC} Reconfigure all choices  |  Enter = Continue with policy above  [r/Enter]: ")" _restart_choice || true
+        echo
+    fi
     if [[ "${_restart_choice,,}" == "r" ]]; then
         SETUP_MODE="setup"
     else
@@ -1235,13 +1298,13 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
         echo -e "${BOLD}▸ Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
         _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
     else
-        echo -e "${BOLD}▸ Experiment image sources${NC}  d=Docker Hub  j=JFrog  l=local build"
-        read -rp "  install-application  (agentcert-install-app)   [d/j/l, Enter=d]: " _ans
-        case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
-        read -rp "  install-agent        (agentcert-install-agent) [d/j/l, Enter=d]: " _ans
-        case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
-        read -rp "  litmuschaos helpers  (k8s/checker/deployer)    [d/l,   Enter=d]: " _ans
-        case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
+        echo -e "${BOLD}▸ Experiment image sources${NC}  l=local build (recommended — matches this checkout)  d=Docker Hub  j=JFrog"
+        read -rp "  install-application  (agentcert-install-app)   [l/d/j, Enter=l]: " _ans
+        case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; d) _INSTALL_APP_SRC="dockerhub" ;; *) _INSTALL_APP_SRC="local" ;; esac
+        read -rp "  install-agent        (agentcert-install-agent) [l/d/j, Enter=l]: " _ans
+        case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; d) _INSTALL_AGENT_SRC="dockerhub" ;; *) _INSTALL_AGENT_SRC="local" ;; esac
+        read -rp "  workflow runtime images (apps/Litmus/tools)    [l/d,   Enter=l]: " _ans
+        case "${_ans,,}" in d) _LITMUS_SRC="dockerhub" ;; *) _LITMUS_SRC="local" ;; esac
         unset _ans
     fi
     if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
@@ -1430,16 +1493,16 @@ if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
     echo -e "   ${DIM}The graphql server injects these into every Argo Workflow it creates,${NC}"
     echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
     echo
-    echo -e "   ${BOLD}d${NC}  Docker Hub   ${DIM}public images, no credentials needed${NC}"
+    echo -e "   ${BOLD}l${NC}  Local build  ${DIM}build from source in this repo, loaded into KinD — matches this checkout (recommended)${NC}"
+    echo -e "   ${BOLD}d${NC}  Docker Hub   ${DIM}public :latest images — may not match this checkout's charts${NC}"
     echo -e "   ${BOLD}j${NC}  JFrog        ${DIM}Infosys Artifactory — requires credentials${NC}"
-    echo -e "   ${BOLD}l${NC}  Local build  ${DIM}build from source in this repo, loaded into KinD — no network${NC}"
     echo
-    read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [d/j/l, Enter=d]${NC}: ")" _ans
-    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; l) _INSTALL_APP_SRC="local" ;; *) _INSTALL_APP_SRC="dockerhub" ;; esac
-    read -rp "$(echo -e "  install-agent        ${DIM}(agentcert-install-agent) [d/j/l, Enter=d]${NC}: ")" _ans
-    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; l) _INSTALL_AGENT_SRC="local" ;; *) _INSTALL_AGENT_SRC="dockerhub" ;; esac
-    read -rp "$(echo -e "  litmus helper images ${DIM}(k8s/checker/deployer)    [d/l, Enter=d]${NC}: ")" _ans
-    case "${_ans,,}" in l) _LITMUS_SRC="local" ;; *) _LITMUS_SRC="dockerhub" ;; esac
+    read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [l/d/j, Enter=l]${NC}: ")" _ans
+    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; d) _INSTALL_APP_SRC="dockerhub" ;; *) _INSTALL_APP_SRC="local" ;; esac
+    read -rp "$(echo -e "  install-agent        ${DIM}(agentcert-install-agent) [l/d/j, Enter=l]${NC}: ")" _ans
+    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; d) _INSTALL_AGENT_SRC="dockerhub" ;; *) _INSTALL_AGENT_SRC="local" ;; esac
+    read -rp "$(echo -e "  workflow runtime images ${DIM}(apps/Litmus/tools)       [l/d, Enter=l]${NC}: ")" _ans
+    case "${_ans,,}" in d) _LITMUS_SRC="dockerhub" ;; *) _LITMUS_SRC="local" ;; esac
     unset _ans
 
     if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
@@ -2671,6 +2734,131 @@ PY
 # in MongoDB.  Must be called after MongoDB is running and a chaos infrastructure
 # has been registered via the LitmusChaos UI.  Safe to call repeatedly — uses
 # kubectl apply --dry-run so it is idempotent.
+# --- Control-plane API access for post-deploy automation ---------------------
+# Infra registration and experiment seeding talk to auth + graphql. Reaching
+# them through the KinD host-port mappings only works for CLUSTER_MODE=auto/
+# fresh; a port-forward on a free loopback port works for every cluster mode
+# and never collides with another checkout's ports. Exports ACE_AUTH_URL and
+# ACE_GQL_URL for the helpers below.
+_ACE_API_PF_PIDS=()
+start_control_plane_api() {
+    local NS="ace" d pid auth_port gql_port pf_log
+    [[ ${#_ACE_API_PF_PIDS[@]} -gt 0 ]] && return 0
+    for d in auth graphql; do
+        if ! kubectl rollout status "deployment/${d}" -n "${NS}" --timeout=300s >/dev/null 2>&1; then
+            warn "${d} is not ready in namespace ${NS} — post-deploy registration steps cannot run."
+            return 1
+        fi
+    done
+    # Reserve two sockets at once so auth and graphql can never be assigned the
+    # same ephemeral port. They are released when the helper exits, immediately
+    # before kubectl binds them.
+    read -r auth_port gql_port < <("${SETUP_PYTHON}" -c '
+import socket
+sockets = [socket.socket(), socket.socket()]
+for sock in sockets:
+    sock.bind(("127.0.0.1", 0))
+print(*(sock.getsockname()[1] for sock in sockets))
+')
+    mkdir -p "${REPO_ROOT}/.tmp"
+    pf_log="${REPO_ROOT}/.tmp/control-plane-port-forward.log"
+    kubectl port-forward -n "${NS}" svc/auth "${auth_port}:3000" >"${pf_log}" 2>&1 &
+    _ACE_API_PF_PIDS+=($!)
+    kubectl port-forward -n "${NS}" svc/graphql "${gql_port}:8081" >>"${pf_log}" 2>&1 &
+    _ACE_API_PF_PIDS+=($!)
+    # Port-forward can fork successfully and then fail while resolving/binding.
+    # Detect that immediately instead of making API login retry for five minutes.
+    sleep 1
+    for pid in "${_ACE_API_PF_PIDS[@]}"; do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            warn "Control-plane port-forward failed to start — see ${pf_log}."
+            stop_control_plane_api
+            return 1
+        fi
+    done
+    export ACE_AUTH_URL="http://127.0.0.1:${auth_port}"
+    export ACE_GQL_URL="http://127.0.0.1:${gql_port}/query"
+    trap stop_control_plane_api EXIT
+}
+stop_control_plane_api() {
+    local pid
+    for pid in "${_ACE_API_PF_PIDS[@]}"; do
+        kill "${pid}" 2>/dev/null || true
+        wait "${pid}" 2>/dev/null || true
+    done
+    _ACE_API_PF_PIDS=()
+    unset ACE_AUTH_URL ACE_GQL_URL
+}
+
+# ensure_chaos_infrastructure
+# Registers this checkout's chaos infrastructure (or re-attaches the existing
+# one) and installs its subscriber, so a fresh setup ends ready to run
+# experiments without the manual "Enable Chaos → download YAML → kubectl apply"
+# UI sequence. Idempotent: an infra named ACE_INFRA_NAME is reused and its
+# current manifest is re-applied to repair stale credentials or partial installs.
+# Opt out with ACE_AUTO_REGISTER_INFRA=false.
+ensure_chaos_infrastructure() {
+    local auto infra_name infra_ns manifest result infra_id project_id admin_user admin_pass
+    auto="$(cur ACE_AUTO_REGISTER_INFRA)"; auto="${auto:-true}"
+    if [[ "${auto,,}" != "true" ]]; then
+        echo -e "${DIM}ACE_AUTO_REGISTER_INFRA=${auto} — skipping automatic chaos infrastructure registration.${NC}"
+        return 0
+    fi
+    infra_name="$(cur ACE_INFRA_NAME)"; infra_name="${infra_name:-ace-local}"
+    infra_ns="$(cur ACE_INFRA_NAMESPACE)"; infra_ns="${infra_ns:-litmus}"
+    admin_user="$(cur ADMIN_USERNAME)"; admin_user="${admin_user:-admin}"
+    admin_pass="$(cur ADMIN_PASSWORD)"; admin_pass="${admin_pass:-litmus}"
+
+    echo -e "${DIM}Ensuring chaos infrastructure '${infra_name}' is registered and connected…${NC}"
+    start_control_plane_api || return 1
+
+    manifest="$(mktemp "${REPO_ROOT}/.tmp/chaos-infra.XXXXXX.yaml")" # carries the infra access key
+    if ! result="$("${SETUP_PYTHON}" "${REPO_ROOT}/scripts/register-chaos-infra.py" \
+            --auth-url "${ACE_AUTH_URL}" --gql-url "${ACE_GQL_URL}" \
+            --username "${admin_user}" --password "${admin_pass}" \
+            --infra-name "${infra_name}" --namespace "${infra_ns}" \
+            --manifest-out "${manifest}")"; then
+        warn "Chaos infrastructure registration failed — connect one from the UI (Environments → Enable Chaos), then re-run ./scripts/setup.sh --restart"
+        rm -f -- "${manifest}"
+        return 1
+    fi
+    infra_id="$(printf '%s' "${result}" | "${SETUP_PYTHON}" -c 'import json,sys;print(json.load(sys.stdin)["infra_id"])')"
+    infra_ns="$(printf '%s' "${result}" | "${SETUP_PYTHON}" -c 'import json,sys;print(json.load(sys.stdin)["namespace"])')"
+    project_id="$(printf '%s' "${result}" | "${SETUP_PYTHON}" -c 'import json,sys;print(json.load(sys.stdin)["project_id"])')"
+    # Pin every later repair/seed step to this exact infrastructure.
+    export ACE_ACTIVE_INFRA_ID="${infra_id}"
+    export ACE_ACTIVE_PROJECT_ID="${project_id}"
+    export ACE_ACTIVE_INFRA_NAMESPACE="${infra_ns}"
+
+    echo -e "${DIM}Installing chaos infrastructure '${infra_name}' into namespace ${infra_ns}…${NC}"
+    # The Argo/Litmus CRDs in this manifest exceed the client-side apply
+    # annotation limit on some kubectl versions; server-side apply has no limit.
+    if ! kubectl apply -f "${manifest}" >/dev/null 2>&1 \
+       && ! kubectl apply --server-side --force-conflicts -f "${manifest}" >/dev/null; then
+        warn "Applying the chaos infrastructure manifest failed (${manifest})."
+        rm -f -- "${manifest}"
+        return 1
+    fi
+    # The manifest embeds the access key; remove it once kubectl consumed it.
+    rm -f -- "${manifest}"
+
+    if ! kubectl rollout status deployment/subscriber -n "${infra_ns}" --timeout=300s >/dev/null 2>&1; then
+        warn "Chaos infrastructure subscriber did not become ready — check: kubectl get pods -n ${infra_ns}"
+        return 1
+    fi
+    # The subscriber confirms asynchronously (and rotates its access key while
+    # doing so); sync_subscriber_secret and the experiment seeds only see the
+    # infra once that has happened, so wait for it rather than racing it.
+    if ! "${SETUP_PYTHON}" "${REPO_ROOT}/scripts/register-chaos-infra.py" \
+            --auth-url "${ACE_AUTH_URL}" --gql-url "${ACE_GQL_URL}" \
+            --username "${admin_user}" --password "${admin_pass}" \
+            --wait-confirmed "${infra_id}" --timeout 300; then
+        warn "Chaos infrastructure subscriber is running but never confirmed with the control plane — check: kubectl logs -n ${infra_ns} deploy/subscriber"
+        return 1
+    fi
+    ok "Chaos infrastructure '${infra_name}' connected (infra_id=${infra_id}, namespace=${infra_ns})"
+}
+
 sync_subscriber_secret() {
     local ACE_NS="ace"
     local mongo_user mongo_pass mongo_output infra_id access_key LITMUS_NS
@@ -2686,20 +2874,26 @@ sync_subscriber_secret() {
     # of truth is the mongodb-0 pod in the ace namespace.  Filter on is_registered
     # (set once at registration, stable) rather than is_active (flaps to false on
     # disconnect) — we are syncing precisely to recover from a disconnect. A given
-    # infra can be re-registered multiple times over a cluster's life (each attempt
-    # leaves behind a prior is_registered:true document with a stale infra_id that
-    # is_registered alone can't distinguish from the current one), so sort by
-    # created_at descending and take the newest non-removed match. Also pull
-    # infra_namespace instead of assuming "litmus" — this infra may have been
-    # connected into any namespace (e.g. "itbench").
-    mongo_output="$(kubectl exec mongodb-0 -n "${ACE_NS}" -- mongosh \
-        "mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true" \
-        --quiet --eval \
-        'var doc = db.getSiblingDB("litmus").chaosInfrastructures
-             .find({is_registered:true, is_removed:{$ne:true}})
-             .sort({created_at:-1}).limit(1).next();
-         if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key + "\ninfra_namespace=" + doc.infra_namespace); }' \
-        2>/dev/null)" || true
+    # infra can be re-registered multiple times over a cluster's life. When this
+    # run registered/reused one, ACE_ACTIVE_INFRA_ID selects that exact document;
+    # the newest non-removed document is only a fallback for manual registration.
+    # Also pull infra_namespace instead of assuming "litmus" — this infra may
+    # have been connected into any namespace (e.g. "itbench").
+    if [[ -n "${ACE_ACTIVE_INFRA_ID:-}" ]]; then
+        mongo_output="$(kubectl exec mongodb-0 -n "${ACE_NS}" -- \
+            env ACE_TARGET_INFRA_ID="${ACE_ACTIVE_INFRA_ID}" mongosh \
+            "mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true" --quiet --eval \
+            'var doc = db.getSiblingDB("litmus").chaosInfrastructures
+                 .findOne({infra_id:process.env.ACE_TARGET_INFRA_ID, is_removed:{$ne:true}});
+             if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key + "\ninfra_namespace=" + doc.infra_namespace); }' 2>/dev/null)" || true
+    else
+        mongo_output="$(kubectl exec mongodb-0 -n "${ACE_NS}" -- mongosh \
+            "mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true" --quiet --eval \
+            'var doc = db.getSiblingDB("litmus").chaosInfrastructures
+                 .find({is_registered:true, is_removed:{$ne:true}})
+                 .sort({created_at:-1}).limit(1).next();
+             if(doc){ print("infra_id=" + doc.infra_id + "\naccess_key=" + doc.access_key + "\ninfra_namespace=" + doc.infra_namespace); }' 2>/dev/null)" || true
+    fi
 
     if [[ -z "$mongo_output" ]]; then
         warn "No active chaos infrastructure found in MongoDB — skipping subscriber-secret sync."
@@ -2784,16 +2978,20 @@ _seed_flash_agent_experiment() {
     mongo_pass="$(cur MONGODB_PASSWORD)"; mongo_pass="${mongo_pass:-1234}"
     mongo_uri="mongodb://${mongo_user}:${mongo_pass}@localhost:27017/?authSource=admin&directConnection=true"
 
-    mongo_output="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
-        mongosh "${mongo_uri}" --quiet --eval \
-        'var doc = db.getSiblingDB("litmus").chaosInfrastructures
-             .find({is_registered:true, is_removed:{$ne:true}})
-             .sort({created_at:-1}).limit(1).next();
-         if(doc){ print("infra_id=" + doc.infra_id + "\nproject_id=" + doc.project_id); }' \
-        2>/dev/null)" || true
-
-    infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2- || true)"
-    project_id="$(echo "$mongo_output" | grep '^project_id=' | cut -d= -f2- || true)"
+    infra_id="${ACE_ACTIVE_INFRA_ID:-}"
+    project_id="${ACE_ACTIVE_PROJECT_ID:-}"
+    if [[ -z "${infra_id}" || -z "${project_id}" ]]; then
+        # Manual-registration fallback: select one coherent infra/project pair.
+        mongo_output="$(kubectl exec mongodb-0 -n "${PLATFORM_NS}" -- \
+            mongosh "${mongo_uri}" --quiet --eval \
+            'var doc = db.getSiblingDB("litmus").chaosInfrastructures
+                 .find({is_registered:true, is_removed:{$ne:true}})
+                 .sort({created_at:-1}).limit(1).next();
+             if(doc){ print("infra_id=" + doc.infra_id + "\nproject_id=" + doc.project_id); }' \
+            2>/dev/null)" || true
+        infra_id="$(echo "$mongo_output" | grep '^infra_id=' | cut -d= -f2- || true)"
+        project_id="$(echo "$mongo_output" | grep '^project_id=' | cut -d= -f2- || true)"
+    fi
 
     if [[ -z "${infra_id}" ]]; then
         warn "_seed_flash_agent_experiment(${exp_name}): no registered chaos infrastructure found."
@@ -2827,7 +3025,7 @@ _seed_flash_agent_experiment() {
     admin_user="$(cur ADMIN_USERNAME)"; admin_user="${admin_user:-admin}"
     admin_pass="$(cur ADMIN_PASSWORD)"; admin_pass="${admin_pass:-litmus}"
 
-    jwt="$(curl -sf -X POST "http://localhost:${auth_port}/login" \
+    jwt="$(curl -sf -X POST "${ACE_AUTH_URL:-http://localhost:${auth_port}}/login" \
         -H "Content-Type: application/json" \
         -d "{\"username\":\"${admin_user}\",\"password\":\"${admin_pass}\"}" \
         2>/dev/null \
@@ -2843,7 +3041,7 @@ _seed_flash_agent_experiment() {
     gql_port="$(cur KIND_HOSTPORT_GRAPHQL_REST)"; gql_port="${gql_port:-8081}"
 
     result="$(INFRA_ID="${infra_id}" PROJECT_ID="${project_id}" JWT="${jwt}" \
-        GQL_PORT="${gql_port}" MANIFEST_TEMPLATE="${manifest_template}" \
+        GQL_URL="${ACE_GQL_URL:-http://localhost:${gql_port}/query}" MANIFEST_TEMPLATE="${manifest_template}" \
         EXP_NAME="${exp_name}" EXP_DESCRIPTION="${exp_description}" EXP_ID="${exp_id}" \
         "${SETUP_PYTHON}" - <<'PYEOF'
 import json, sys, os, urllib.request, urllib.error
@@ -2851,7 +3049,7 @@ import json, sys, os, urllib.request, urllib.error
 infra_id        = os.environ["INFRA_ID"]
 project_id      = os.environ["PROJECT_ID"]
 jwt             = os.environ["JWT"]
-gql_port        = os.environ["GQL_PORT"]
+gql_url         = os.environ["GQL_URL"]
 manifest_tpl    = os.environ["MANIFEST_TEMPLATE"]
 exp_name        = os.environ["EXP_NAME"]
 exp_description = os.environ["EXP_DESCRIPTION"]
@@ -2881,7 +3079,7 @@ payload = json.dumps({
 }).encode()
 
 req = urllib.request.Request(
-    f"http://localhost:{gql_port}/query",
+    gql_url,
     data=payload,
     headers={
         "Content-Type": "application/json",
@@ -3195,6 +3393,51 @@ prepare_hub_bundle_for_deploy() {
         warn "Hub bundle preparation failed; refusing to deploy a control plane with no deterministic catalog."
         return 1
     fi
+    export ACE_HUB_BUNDLE_PREPARED=1
+}
+
+# metrics_api_served_elsewhere: true when the cluster already serves the
+# aggregated metrics API from a metrics-server outside the ace namespace (k3s
+# bundles one in kube-system; most managed clusters do too). Installing ours as
+# well would collide on the cluster-scoped APIService/ClusterRoles.
+metrics_api_served_elsewhere() {
+    local svc_ns
+    svc_ns="$(kubectl get apiservice v1beta1.metrics.k8s.io \
+        -o jsonpath='{.spec.service.namespace}' 2>/dev/null || true)"
+    [[ -n "${svc_ns}" && "${svc_ns}" != "ace" ]]
+}
+
+wait_for_metrics_api() {
+    echo -e "${DIM}Waiting for the Kubernetes metrics API to become available (up to 3 min)…${NC}"
+    if ! kubectl wait --for=condition=Available \
+            apiservice/v1beta1.metrics.k8s.io --timeout=180s >/dev/null 2>&1; then
+        warn "metrics.k8s.io did not become Available; agent pods_top checks would fail."
+        return 1
+    fi
+    if ! kubectl get --raw /apis/metrics.k8s.io/v1beta1 >/dev/null 2>&1; then
+        warn "metrics.k8s.io reports Available but discovery requests still fail."
+        return 1
+    fi
+    ok "Kubernetes metrics API ready"
+}
+
+wait_for_core_services() {
+    local ns="$1" svc resource failed=0
+    echo -e "${DIM}Waiting for MongoDB, auth, graphql, web, certifier to be ready (up to 5 min each)…${NC}"
+    for svc in mongodb auth graphql web certifier; do
+        resource="$(kubectl get statefulset,deployment -n "${ns}" \
+            -o name 2>/dev/null | grep "/${svc}$" | head -1 || true)"
+        if [[ -z "${resource}" ]]; then
+            warn "${svc} workload is missing from namespace ${ns}"
+            failed=1
+        elif kubectl rollout status "${resource}" -n "${ns}" --timeout=300s >/dev/null 2>&1; then
+            ok "${svc} ready"
+        else
+            warn "${svc} did not become ready — check: kubectl get pods -n ${ns}"
+            failed=1
+        fi
+    done
+    return "${failed}"
 }
 
 # Deploy all K8s manifests into the cluster.
@@ -3277,6 +3520,12 @@ k8s_deploy() {
               "${K8S_DIR}"/langfuse.yaml; do
         [[ -f "$f" ]] && kubectl apply -f "$f"
     done
+    # Application charts no longer ship metrics-server; the platform owns it.
+    if metrics_api_served_elsewhere; then
+        ok "Cluster already provides metrics-server — not installing the platform copy."
+    else
+        kubectl apply -f "${K8S_DIR}/metrics-server.yaml"
+    fi
     # For cloud clusters, switch the web service to LoadBalancer so browsers can reach it.
     # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -3293,25 +3542,24 @@ k8s_deploy() {
     restart_locally_built_deployments "${NS}"
     restart_subscriber_deployments
 
-    # 9) Wait for core services to become ready (best-effort; don't abort on timeout)
-    echo
-    echo -e "${DIM}Waiting for MongoDB, auth, graphql, web, certifier to be ready (up to 5 min)…${NC}"
-    local svc
-    for svc in mongodb auth graphql web certifier; do
-        kubectl rollout status \
-            "$(kubectl get statefulset,deployment -n "${NS}" \
-                -o name 2>/dev/null | grep "/${svc}$" | head -1)" \
-            -n "${NS}" --timeout=300s 2>/dev/null \
-            && ok "${svc} ready" || warn "${svc} not yet ready — check: kubectl get pods -n ${NS}"
-    done
-
-    # 9a) Reap the experiment-image prep kicked off in the background above.
+    # 9) Reap image preparation before checking workloads that consume those
+    # side-loaded images (notably the platform-owned metrics-server).
     wait_for_prepare_images_bg
+
+    # 9a) A setup that cannot serve the UI/API or pod metrics is not complete.
+    echo
+    wait_for_core_services "${NS}" || return 1
+    wait_for_metrics_api || return 1
 
     # 9b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         post_cloud_setup "${NS}"
     fi
+
+    # 9b2) Register + connect the chaos infrastructure (idempotent) so the
+    # stack is ready to run experiments without manual UI steps.
+    local _infra_ready=1
+    ensure_chaos_infrastructure || _infra_ready=0
 
     # 9c) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered)
     sync_subscriber_secret
@@ -3321,6 +3569,7 @@ k8s_deploy() {
 
     # 9e) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
     seed_flash_agent_5scenario
+    stop_control_plane_api
 
     # 10) Print access URLs
     local admu admp luser lpass
@@ -3338,6 +3587,9 @@ k8s_deploy() {
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "${GREEN}  ✓ ACE stack deployed to cluster${NC}"
     echo -e "${GREEN}=======================================================${NC}"
+    if [[ ${_infra_ready} -eq 0 ]]; then
+        echo -e "  ${YELLOW}!${NC} Chaos infrastructure is NOT connected — experiments cannot run until it is (see warnings above)."
+    fi
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
     else
@@ -3479,6 +3731,10 @@ helm_deploy() {
     _hub_bundle_source="$(cur HUB_BUNDLE_IMAGE_SOURCE)"
     _hub_bundle_source="${_hub_bundle_source:-local}"
     helm_cmd+=(--set-string "chartsHub.bundleImage=${_hub_bundle_image}")
+    if metrics_api_served_elsewhere; then
+        ok "Cluster already provides metrics-server — installing ACE with metricsServer.enabled=false."
+        helm_cmd+=(--set metricsServer.enabled=false)
+    fi
     if [[ "${_hub_bundle_source}" == "local" ]]; then
         helm_cmd+=(--set chartsHub.bundleImagePullPolicy=Never)
     fi
@@ -3541,6 +3797,9 @@ helm_deploy() {
     # no-diff `helm upgrade` leaves existing pods on the old image).
     restart_locally_built_deployments "${NS}"
     restart_subscriber_deployments
+
+    wait_for_core_services "${NS}" || return 1
+    wait_for_metrics_api || return 1
 
     # 5b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
@@ -3663,6 +3922,8 @@ OLLAMA_SVC_EOF
     # path: deploy_choice defaults to "h") never runs the instanceID self-heal at
     # all, silently leaving a re-registered chaos infrastructure's workflow-controller
     # pinned to a stale instanceID with every submitted experiment workflow orphaned.
+    local _infra_ready=1
+    ensure_chaos_infrastructure || _infra_ready=0
     sync_subscriber_secret
 
     # 5e) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
@@ -3670,6 +3931,7 @@ OLLAMA_SVC_EOF
 
     # 5f) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
     seed_flash_agent_5scenario
+    stop_control_plane_api
 
     # 6) Print access URLs
     local admu admp luser lpass
@@ -3687,6 +3949,9 @@ OLLAMA_SVC_EOF
     echo -e "${GREEN}=======================================================${NC}"
     echo -e "${GREEN}  ✓ ACE stack deployed via Helm${NC}"
     echo -e "${GREEN}=======================================================${NC}"
+    if [[ ${_infra_ready} -eq 0 ]]; then
+        echo -e "  ${YELLOW}!${NC} Chaos infrastructure is NOT connected — experiments cannot run until it is (see warnings above)."
+    fi
     echo -e "  ${BOLD}Release${NC}       ace  (namespace: ${NS})"
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
         echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
@@ -3782,6 +4047,10 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         (( _BUILD_PARALLELISM_DEFAULT < 1 )) && _BUILD_PARALLELISM_DEFAULT=1
         (( _BUILD_PARALLELISM_DEFAULT > 6 )) && _BUILD_PARALLELISM_DEFAULT=6
         _BUILD_PARALLELISM="${ACE_BUILD_PARALLELISM:-${_BUILD_PARALLELISM_DEFAULT}}"
+        if ! [[ "${_BUILD_PARALLELISM}" =~ ^[1-9][0-9]*$ ]]; then
+            warn "Ignoring invalid ACE_BUILD_PARALLELISM=${_BUILD_PARALLELISM@Q}; using ${_BUILD_PARALLELISM_DEFAULT}"
+            _BUILD_PARALLELISM="${_BUILD_PARALLELISM_DEFAULT}"
+        fi
         # Per-image build-log location. Overridable so a host whose checkout
         # root is on a small/cramped filesystem can send these elsewhere
         # (CLAUDE.md §0.1: encode host-specific variability rather than
@@ -3973,11 +4242,24 @@ for _charts_dir in "${REPO_ROOT}/agent-charts/charts" "${REPO_ROOT}/app-charts/c
 done
 
 if [[ $EXPRESS_MODE -eq 0 ]]; then
-    echo -e "${BOLD}Deploy the stack to the Kubernetes cluster now?${NC}"
-    echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
-    echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
-    echo -e "   ${BOLD}n${NC}  skip for now"
-    read -rp "$(echo -e "Choice ${DIM}[k/H/n]${NC}: ")" deploy_choice
+    if [[ "${SETUP_MODE}" == "restart" && ! -t 0 ]]; then
+        # --restart is a supported automation path. Reuse the deployment method
+        # already owning this stack; choose Helm for a fresh cluster.
+        if helm status ace -n ace >/dev/null 2>&1; then
+            deploy_choice="h"
+        elif kubectl get statefulset,deployment -n ace -o name 2>/dev/null | grep -q .; then
+            deploy_choice="k"
+        else
+            deploy_choice="h"
+        fi
+        echo -e "${DIM}Non-interactive restart: selected deployment method '${deploy_choice}'.${NC}"
+    else
+        echo -e "${BOLD}Deploy the stack to the Kubernetes cluster now?${NC}"
+        echo -e "   ${BOLD}k${NC}  kubectl apply  ${DIM}(plain manifests — no release tracking)${NC}"
+        echo -e "   ${BOLD}h${NC}  helm install   ${DIM}(Helm release — supports upgrade/rollback)${NC}"
+        echo -e "   ${BOLD}n${NC}  skip for now"
+        read -rp "$(echo -e "Choice ${DIM}[k/H/n]${NC}: ")" deploy_choice || true
+    fi
 fi
 deploy_choice="${deploy_choice:-${_DEPLOY_CHOICE:-h}}"
 case "${deploy_choice,,}" in

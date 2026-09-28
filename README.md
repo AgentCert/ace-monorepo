@@ -166,6 +166,10 @@ git clone --recurse-submodules <repo-url>
 git submodule update --init --recursive
 ```
 
+`./scripts/setup.sh` also detects an ordinary clone with missing submodules and
+initializes them before it builds anything, so this is safe to omit when you use
+the setup wizard.
+
 **Update all submodules to latest**
 
 ```bash
@@ -186,13 +190,12 @@ cd ace-monorepo
 ./scripts/setup.sh          # wizard: creates .env, creates kind cluster, deploys to K8s
 ```
 
-The wizard prompts for your Azure OpenAI credentials, defaults everything else, and
-asks at the end whether to deploy. Answer **Y** and the cluster is up in ~5 minutes.
-
-After answering Y the wizard asks *how* to deploy: **`k`** for `kubectl apply`
-(default) or **`h`** for `helm upgrade --install`. Both install the same stack —
-Helm adds release tracking (`helm history`, `helm rollback`) and lets you upgrade
-later without re-running the full wizard.
+The wizard asks for your LLM credentials; press **Enter** at every other prompt. The defaults
+build every first-party image and the immutable hub bundle (app/agent/fault catalogs + charts)
+from this checkout, deploy with Helm into a per-user kind cluster, register and connect the
+`ace-local` chaos infrastructure, and seed the demo experiments — ready to run an experiment
+with no further manual steps. Setup stops with an explicit error rather than deploying a stack
+that would fail later (missing image, unbuildable hub bundle).
 
 > ### 📚 Detailed setup guides — [`docs/setup/`](./docs/setup/)
 > - **[Setup overview & prerequisites](./docs/setup/README.md)**
@@ -200,37 +203,34 @@ later without re-running the full wizard.
 > - **[Route 2 — fresh VM with kind](./docs/setup/route-2-fresh-kind.md)**
 > - **[Route 3 — cloud Kubernetes (AKS/EKS/GKE)](./docs/setup/route-3-cloud-aks.md)**
 > - **[Local development (host processes)](./docs/setup/local-dev.md)** — Go/Node on the host, Docker for infra
-> - **[Running your first experiment](./docs/setup/running-an-experiment.md)** — create infra → enable chaos → apply YAML → run → certify
+> - **[Running your first experiment](./docs/setup/running-an-experiment.md)** — create → run → certify (setup already connected the chaos infrastructure)
 
 ### 1. Prerequisites
 
 | Tool | Min version | Install |
 |------|-------------|---------|
-| Docker | 28+ | `sudo apt-get install docker.io` — user must be in `docker` group |
-| kind | v0.20+ | `go install sigs.k8s.io/kind@latest` or [kind releases](https://github.com/kubernetes-sigs/kind/releases) |
+| Docker (+ Compose v2) | 28+ | `sudo apt-get install docker.io` — user must be in `docker` group |
+| kind | v0.20+ | [kind releases](https://github.com/kubernetes-sigs/kind/releases) |
 | kubectl | v1.27+ | `sudo snap install kubectl --classic` or [kubectl install](https://kubernetes.io/docs/tasks/tools/) |
-| git | any | `sudo apt-get install git` |
+| helm | v3.12+ | [helm install](https://helm.sh/docs/intro/install/) |
+| git, python3 | any / 3.8+ | `sudo apt-get install git python3` |
+
+`./scripts/setup.sh` checks all of them first (`scripts/check-prerequisites.sh`).
 
 ### 2. Run the setup wizard
 
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh              # first time (interactive)
+./scripts/setup.sh --restart    # later: re-apply saved answers, no prompts
 ```
 
-It creates `.env` from `.env.example`, patches it with K8s-specific service DNS
-names, and prompts only for the values that matter (Azure OpenAI credentials plus
-the flash-agent model). Everything else is defaulted. Re-run any time — pressing
-Enter at each prompt keeps the current value. At the end it asks:
-
-```
-Deploy the stack to the Kubernetes cluster now? [y/N]:
-```
-
-Answer **Y**. The wizard will:
-1. Create the kind cluster `agentcert` with all required port mappings
-2. Create the `ace-env` Kubernetes Secret from `.env`
-3. Apply all manifests in `deploy/k8s/`
-4. Wait for MongoDB, auth, graphql, web, and certifier to be ready
+It creates `.env` from `.env.example`, picks collision-free host ports and a per-user
+instance name, then — with the default answers — builds everything locally, creates the
+kind cluster `agentcert-<ACE_INSTANCE_NAME>`, deploys via Helm (`k` at the deploy prompt
+selects plain `kubectl apply` of `deploy/k8s/` instead), connects the chaos infrastructure
+and prints the URLs. See [`docs/setup/route-2-fresh-kind.md`](./docs/setup/route-2-fresh-kind.md)
+for the step-by-step flow and [`docs/setup/running-an-experiment.md`](./docs/setup/running-an-experiment.md)
+for your first experiment.
 
 ### 3. Services
 
@@ -252,16 +252,12 @@ Answer **Y**. The wizard will:
 kubectl get pods -n ace                         # health check
 kubectl logs -n ace deploy/graphql -f           # tail the control plane
 kubectl rollout restart -n ace deploy/graphql   # restart one service
-kubectl apply -f deploy/k8s/                    # re-apply after manifest changes
-kind delete cluster --name agentcert            # tear down everything
+./scripts/setup.sh --restart                    # re-apply after manifest/.env changes
+./scripts/shut_down.sh                          # tear down this checkout (dumps MongoDB first)
 ```
 
-To apply a `.env` change, re-run the wizard (it updates the `ace-env` Secret and
-restarts affected pods):
-
-```bash
-./scripts/setup.sh   # answer Y to deploy at the end
-```
+Ports in the table above are defaults; on a shared host `setup.sh` may pick others — the
+actual URLs are printed at the end of setup and saved in `.env` (`KIND_HOSTPORT_*`).
 
 ---
 

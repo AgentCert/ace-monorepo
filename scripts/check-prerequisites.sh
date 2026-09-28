@@ -203,7 +203,7 @@ else
     say "${DIM}  (go not found -- only needed for AgentCert backend Go work)${NC}"
 fi
 
-# --- Optional: full dependency audits (enabled by setup.sh) -------------------
+# --- Optional: full dependency audits ------------------------------------------
 # Verifies manifest-declared dependencies for Python/Node/Go are available.
 # These checks are informational by default so setup can still proceed on hosts
 # that only need a subset of the monorepo. Set ACE_PREREQ_FAIL_ON_DEP_ISSUES=1

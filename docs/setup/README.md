@@ -14,7 +14,7 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 ## Quick Start
 
-**Prerequisites: Docker 28+, kind, kubectl. That's it.**
+**Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh` checks them all first and prints the exact install command for anything missing.
 
 <div class="qs-steps">
   <div class="qs-step">
@@ -25,23 +25,30 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 cd ace-monorepo</code></pre>
     </div>
   </div>
+      <p>If you cloned without <code>--recurse-submodules</code>, the setup wizard initializes the required submodules before it starts building. You can therefore continue directly to the next step.</p>
   <div class="qs-step">
     <div class="qs-num">2</div>
     <div class="qs-body">
-      <strong>Run the setup wizard — configures .env, creates kind cluster, deploys to Kubernetes</strong>
+      <strong>Run the setup wizard — configures .env, builds images, creates the kind cluster, deploys, connects chaos infrastructure</strong>
       <pre><code>./scripts/setup.sh</code></pre>
-      <p>Answer the Azure OpenAI prompts, accept defaults for everything else, then answer <strong>Y</strong> to deploy at the end.</p>
-      <p>At the deploy prompt the wizard asks <em>how</em> to deploy: press <strong>k</strong> for <code>kubectl apply</code> (default) or <strong>h</strong> for <code>helm upgrade --install</code>. Both install the same stack — Helm adds release tracking and rollback. See <a href="{{ "/setup/managing-services.html" | relative_url }}">Managing services</a> for Helm day-to-day commands.</p>
+      <p>Enter your LLM credentials when asked and press <strong>Enter</strong> at every other prompt. The defaults are the stable, reproducible configuration:</p>
+      <ul>
+        <li><strong>Build ALL locally</strong> — every first-party image (control plane, installers, agents, sidecar, ITBench runner) and the immutable <em>hub bundle</em> (app/agent/fault catalogs + charts) is built from <em>this checkout</em> and side-loaded into kind, so what runs is exactly what you cloned. Nothing is cloned from GitHub at runtime.</li>
+        <li><strong>Helm</strong> deploy (<code>h</code>); <code>k</code> = plain <code>kubectl apply</code> of the same stack.</li>
+        <li>After the stack is up, setup registers the <code>ace-local</code> chaos infrastructure and waits until it is connected, then seeds the demo experiments.</li>
+      </ul>
+      <p>Setup stops with an explicit error if a required image fails to build or the hub bundle cannot be prepared, rather than deploying something that fails later with <code>ImagePullBackOff</code>. See <a href="{{ "/setup/managing-services.html" | relative_url }}">Managing services</a> for day-to-day commands.</p>
     </div>
   </div>
 </div>
 
-Open **[http://localhost:2001](http://localhost:2001)** · login `admin / litmus`
+Open the AgentCert UI URL setup prints at the end (default **[http://localhost:2001](http://localhost:2001)** — on a shared host the port may differ; see `KIND_HOSTPORT_WEB` in `.env`) · login `admin / litmus`, then go straight to **[Run your first experiment]({{ "/setup/running-an-experiment.html" | relative_url }})**.
 
 <div class="callout callout-info">
 <span class="callout-title">First run</span>
-Pulling images and creating the kind cluster takes 3–10 minutes; subsequent
-<code>./scripts/setup.sh</code> runs take seconds.<br>
+Building every image locally and creating the kind cluster can take tens of minutes the
+first time (Docker layer caches make later runs much faster). Re-apply an existing configuration
+without prompts with <code>./scripts/setup.sh --restart</code>.<br>
 <strong>Stuck?</strong> Join <a href="https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw">Slack ↗</a> — the fastest way to get unblocked.
 </div>
 
@@ -56,6 +63,8 @@ Pulling images and creating the kind cluster takes 3–10 minutes; subsequent
 | kind | v0.20+ | `kind version` | [kind releases ↗](https://github.com/kubernetes-sigs/kind/releases) or `go install sigs.k8s.io/kind@latest` |
 | kubectl | v1.27+ | `kubectl version --client` | `sudo snap install kubectl --classic` or [kubernetes.io ↗](https://kubernetes.io/docs/tasks/tools/) |
 | git | any | `git --version` | `sudo apt-get install git` |
+| helm | v3.12+ | `helm version --short` | [helm.sh ↗](https://helm.sh/docs/intro/install/) — used by the default (Helm) deploy |
+| python3 | 3.8+ | `python3 --version` | `sudo apt-get install python3` — setup's own helpers (stdlib only) |
 
 **LLM credentials** — you need at least one of:
 

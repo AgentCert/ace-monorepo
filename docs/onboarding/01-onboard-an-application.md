@@ -113,7 +113,7 @@ These are not optional extras — they are the agent's senses and hands.
 
 | MCP server | Image | Exposure |
 |---|---|---|
-| `kubernetes-mcp-server` | `quay.io/containers/kubernetes_mcp_server:latest` | ClusterIP `:8081` |
+| `kubernetes-mcp-server` | `quay.io/containers/kubernetes_mcp_server:v0.0.67` | ClusterIP `:8081` |
 | `prometheus-mcp-server` | `ghcr.io/pab1it0/prometheus-mcp-server:latest` | NodePort `31083` |
 
 ### `values.yaml` conventions

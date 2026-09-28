@@ -625,6 +625,15 @@ type: Opaque
 stringData:
   PLACEHOLDER: "unused"
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubernetes-mcp-config
+  namespace: litmus
+data:
+  config.toml: |
+    port = "8081"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -647,16 +656,21 @@ spec:
       
       #{NODE_SELECTOR}
       containers:
+        # Pinned to a released version, not :latest: quay.io's :latest tracks
+        # unreleased main-branch builds and has shipped breaking CLI changes.
         - name: mcp-server
-          image: quay.io/containers/kubernetes_mcp_server:latest
+          image: quay.io/containers/kubernetes_mcp_server:v0.0.67
           args:
-            - "--port"
-            - "8081"
-            - "--stateless"
+            - "--config"
+            - "/etc/mcp/config.toml"
           ports:
             - containerPort: 8081
               name: http
               protocol: TCP
+          volumeMounts:
+            - name: mcp-config
+              mountPath: /etc/mcp
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -681,6 +695,10 @@ spec:
           securityContext:
             runAsUser: 65532
             allowPrivilegeEscalation: false
+      volumes:
+        - name: mcp-config
+          configMap:
+            name: kubernetes-mcp-config
 ---
 apiVersion: v1
 kind: Service

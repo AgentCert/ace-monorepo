@@ -273,7 +273,7 @@ export INSTALL_APPLICATION_IMAGE_PULL_POLICY="$(env_val INSTALL_APPLICATION_IMAG
 export FLASH_AGENT_IMAGE="$(env_val FLASH_AGENT_IMAGE agentcert/agentcert-flash-agent:latest)"
 export AGENT_SIDECAR_IMAGE="$(env_val AGENT_SIDECAR_IMAGE agentcert/agent-sidecar:latest)"
 
-export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:latest"
+export KUBERNETES_MCP_SERVER_IMAGE="quay.io/containers/kubernetes_mcp_server:v0.0.67"
 export PROMETHEUS_MCP_SERVER_IMAGE="ghcr.io/pab1it0/prometheus-mcp-server:latest"
 export PROMETHEUS_MCP_URL="http://prometheus.monitoring.svc.cluster.local:9090"
 # MCP service URLs injected into agent.config.MCP_URLS at install-agent time

@@ -3250,9 +3250,9 @@ restart_locally_built_deployments() {
 # "ace" namespace), the subscriber runs once per connected chaos infra, each
 # in whatever namespace that infra was registered into — there is no single
 # namespace to target. Roll out every subscriber Deployment cluster-wide so
-# each already-connected infra picks up a freshly built local image; imagePullPolicy:
-# Always on that container (see AgentCert manifests/namespace/3b_agents_deployment.yaml)
-# means the restart alone is enough to re-pull, no reconnect/manifest regen needed.
+# each already-connected infra picks up a freshly built local image. Older
+# installed manifests can still set imagePullPolicy: Always, which pulls the
+# registry image even after kind load. Reconcile that policy before restarting.
 restart_subscriber_deployments() {
     [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]] || return 0
     local _built
@@ -3268,6 +3268,13 @@ restart_subscriber_deployments() {
 
     while read -r _sns _sdep; do
         [[ -z "${_sns}" ]] && continue
+        if [[ "${CLUSTER_MODE:-}" != "cloud" && "${CLUSTER_MODE:-}" != "local" ]]; then
+            if ! kubectl patch "deployment/${_sdep}" -n "${_sns}" --type=strategic \
+                    -p '{"spec":{"template":{"spec":{"containers":[{"name":"subscriber","imagePullPolicy":"IfNotPresent"}]}}}}' >/dev/null; then
+                warn "  Failed to set imagePullPolicy=IfNotPresent for deployment/${_sdep} in ${_sns}"
+                continue
+            fi
+        fi
         kubectl rollout restart "deployment/${_sdep}" -n "${_sns}" >/dev/null 2>&1 \
             && ok "  Restarted deployment/${_sdep} in ${_sns} to pick up freshly built subscriber image" \
             || warn "  Failed to restart deployment/${_sdep} in ${_sns} — it may still be running the old image"

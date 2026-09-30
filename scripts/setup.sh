@@ -1220,20 +1220,39 @@ is_placeholder() {
     esac
 }
 
+# Secret-like .env keys must never be echoed in prompts. The selected value is
+# still returned to the caller on stdout, but input is hidden and an existing
+# value is described as [hidden; Enter to keep].
+is_sensitive_key() {
+    case "$1" in
+        *KEY|*TOKEN|*PASSWORD|*SECRET*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ask "KEY" "Prompt label" → echoes chosen value (default = current .env value).
-# When .env already holds a real (non-placeholder) value for KEY, that's
-# flagged inline with "already set" so it's obvious the bracketed default is
-# an existing credential to keep (Enter) or overwrite — not a guess.
+# Existing non-secret values are shown as the default; credentials are hidden
+# both when displayed and while the user types them.
 ask() {
-    local key="$1" label="$2" def reply
+    local key="$1" label="$2" def reply prompt
     def="$(cur "$key")"
     if ! is_placeholder "$def"; then
-        read -rp "$(echo -e "  ${BOLD}${label}${NC} ${GREEN}✓ already set${NC} ${DIM}[${def}]${NC}: ")" reply
-        echo "${reply:-$def}"
+        if is_sensitive_key "$key"; then
+            prompt="  ${BOLD}${label}${NC} ${GREEN}✓ already set${NC} ${DIM}[hidden; Enter to keep]${NC}: "
+        else
+            prompt="  ${BOLD}${label}${NC} ${GREEN}✓ already set${NC} ${DIM}[${def}]${NC}: "
+        fi
     else
-        read -rp "$(echo -e "  ${BOLD}${label}${NC}: ")" reply
-        echo "${reply}"
+        prompt="  ${BOLD}${label}${NC}: "
     fi
+
+    if is_sensitive_key "$key"; then
+        read -rsp "$(echo -e "${prompt}")" reply
+        printf '\n' >&2
+    else
+        read -rp "$(echo -e "${prompt}")" reply
+    fi
+    printf '%s' "${reply:-$def}"
 }
 
 if [[ "$SETUP_MODE" == "setup" ]]; then
@@ -1426,7 +1445,7 @@ if [[ "${BUILD_MODE}" == "local" ]]; then
 else
     echo -e "${BOLD}Build Docker images?${NC}"
     echo -e "   ${BOLD}p${NC}  Build and push to Docker Hub"
-    echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD — no Docker Hub account needed)${NC}"
+    echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD; Docker Hub auth may be needed for base images)${NC}"
     echo -e "   ${BOLD}a${NC}  Build ALL locally   ${DIM}(platform + experiment images — also auto-fills and skips the image-source questions below)${NC}"
     echo -e "   ${BOLD}n${NC}  Skip"
     read -rp "$(echo -e "Choice ${DIM}[p/l/A/n]${NC}: ")" _build_ans
@@ -2645,6 +2664,7 @@ PY
     # extraPortMappings (kind can only bind a given hostPort to one node).
     local kind_cfg="${REPO_ROOT}/.tmp/kind-agentcert.rendered.yaml"
     KIND_CLUSTER_NAME="${cluster_name}" \
+    ACE_INSTANCE_NAME="${ace_instance_name}" \
     KIND_HOSTPORT_INGRESS="${_hp_ingress}" \
     KIND_HOSTPORT_WEB="${_hp_web}" \
     KIND_HOSTPORT_AUTH_REST="${_hp_auth_rest}" \
@@ -2669,6 +2689,13 @@ PY
         read -rp "$(echo -e "Delete and recreate cluster '${cluster_name}'? ${DIM}[y/N]${NC}: ")" _ans
         if [[ ! "${_ans}" =~ ^[Yy] ]]; then
             warn "Skipped cluster recreation — port mappings will NOT work until recreated."
+            # Reusing an existing cluster still requires kubectl to target it.
+            # In rootless-Docker setups, KinD can be present while the active
+            # kubeconfig context still points at a host cluster (for example,
+            # k3s). Returning here used to make the remaining setup steps apply
+            # ACE and Litmus resources to that unrelated cluster. Exporting the
+            # KinD kubeconfig is idempotent and also verifies cluster reachability.
+            ensure_kubeconfig_context "${cluster_name}" || return 1
             return 0
         fi
         kind delete cluster --name "${cluster_name}"
@@ -2859,6 +2886,25 @@ ensure_chaos_infrastructure() {
     ok "Chaos infrastructure '${infra_name}' connected (infra_id=${infra_id}, namespace=${infra_ns})"
 }
 
+wait_for_chaos_infrastructure() {
+    local infra_id="${ACE_ACTIVE_INFRA_ID:-}" admin_user admin_pass
+    [[ -n "${infra_id}" ]] || return 0
+
+    admin_user="$(cur ADMIN_USERNAME)"; admin_user="${admin_user:-admin}"
+    admin_pass="$(cur ADMIN_PASSWORD)"; admin_pass="${admin_pass:-litmus}"
+    start_control_plane_api || return 1
+
+    echo -e "${DIM}Waiting for chaos infrastructure  to reconnect after subscriber configuration…${NC}"
+    if ! "${SETUP_PYTHON}" "${REPO_ROOT}/scripts/register-chaos-infra.py" \
+            --auth-url "${ACE_AUTH_URL}" --gql-url "${ACE_GQL_URL}" \
+            --username "${admin_user}" --password "${admin_pass}" \
+            --wait-confirmed "${infra_id}" --timeout 300; then
+        warn "Chaos infrastructure  did not reconnect after subscriber configuration."
+        return 1
+    fi
+    ok "Chaos infrastructure  is connected and ready for experiments."
+}
+
 sync_subscriber_secret() {
     local ACE_NS="ace"
     local mongo_user mongo_pass mongo_output infra_id access_key LITMUS_NS
@@ -3027,6 +3073,8 @@ _seed_flash_agent_experiment() {
 
     jwt="$(curl -sf -X POST "${ACE_AUTH_URL:-http://localhost:${auth_port}}/login" \
         -H "Content-Type: application/json" \
+        -H "Origin: http://localhost" \
+        -H "Referer: http://localhost:2001/" \
         -d "{\"username\":\"${admin_user}\",\"password\":\"${admin_pass}\"}" \
         2>/dev/null \
         | "${SETUP_PYTHON}" -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))")" || true
@@ -3084,6 +3132,8 @@ req = urllib.request.Request(
     headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {jwt}",
+        "Origin": "http://localhost",
+        "Referer": "http://localhost:2001/",
     }
 )
 try:
@@ -3563,12 +3613,20 @@ k8s_deploy() {
 
     # 9c) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered)
     sync_subscriber_secret
+    if [[ ${_infra_ready} -eq 1 ]] && ! wait_for_chaos_infrastructure; then
+        _infra_ready=0
+    fi
 
     # 9d) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
     seed_flash_agent_comprehensive
 
     # 9e) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
     seed_flash_agent_5scenario
+    if [[ ${_infra_ready} -eq 0 ]]; then
+        stop_control_plane_api
+        warn "Setup is incomplete: chaos infrastructure did not reach Connected state. Resolve the subscriber/infra warnings above, then rerun ./scripts/setup.sh --restart."
+        return 1
+    fi
     stop_control_plane_api
 
     # 10) Print access URLs
@@ -3925,12 +3983,20 @@ OLLAMA_SVC_EOF
     local _infra_ready=1
     ensure_chaos_infrastructure || _infra_ready=0
     sync_subscriber_secret
+    if [[ ${_infra_ready} -eq 1 ]] && ! wait_for_chaos_infrastructure; then
+        _infra_ready=0
+    fi
 
     # 5e) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
     seed_flash_agent_comprehensive
 
     # 5f) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
     seed_flash_agent_5scenario
+    if [[ ${_infra_ready} -eq 0 ]]; then
+        stop_control_plane_api
+        warn "Setup is incomplete: chaos infrastructure did not reach Connected state. Resolve the subscriber/infra warnings above, then rerun ./scripts/setup.sh --restart."
+        return 1
+    fi
     stop_control_plane_api
 
     # 6) Print access URLs
@@ -3996,6 +4062,15 @@ if [[ ${EXPRESS_MODE} -eq 1 && ( "${_DEPLOY_CHOICE,,}" == "h" || "${_DEPLOY_CHOI
 fi
 
 # --- build (push to Docker Hub or local) ------------------------------------
+abort_after_build_failure() {
+    # Express setup may already be creating KinD in the background. Reap that
+    # job before exiting so a retry cannot race an orphaned cluster creation.
+    if [[ -n "${_KIND_PREWARM_PID:-}" ]]; then
+        wait "${_KIND_PREWARM_PID}" || true
+    fi
+    exit 1
+}
+
 declare -a LOCAL_BUILT_IMAGES=()   # tracks successfully built images for kind load
 
 if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
@@ -4007,6 +4082,21 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     echo -e "${CYAN}=======================================================${NC}"
     echo
     _build_ready=1
+    if [[ "${DO_LOCAL_BUILD}" -eq 1 ]]; then
+        _local_dh_user="$(cur DOCKERHUB_USERNAME)"
+        _local_dh_token="$(cur DOCKERHUB_TOKEN)"
+        if ! is_placeholder "${_local_dh_user}" && ! is_placeholder "${_local_dh_token}"; then
+            if printf '%s' "${_local_dh_token}" | docker login docker.io --username "${_local_dh_user}" --password-stdin >/dev/null; then
+                ok "Authenticated to Docker Hub for local base-image builds."
+            else
+                warn "Docker Hub login failed; local base-image builds may hit anonymous pull limits."
+                _build_ready=0
+            fi
+        else
+            warn "Docker Hub credentials are unset; local base-image builds may hit anonymous pull limits."
+        fi
+        unset _local_dh_user _local_dh_token
+    fi
     if [[ "${DO_BUILD}" -eq 1 ]]; then
         if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
             ok "Logged in to Docker Hub as ${DH_USER}"
@@ -4206,8 +4296,13 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 ok "All selected images built locally (${#LOCAL_BUILT_IMAGES[@]} images ready for KinD load)."
             fi
         else
-            warn "Completed with failures: ${BUILD_FAILED[*]}"
+            warn "Selected image builds failed: ${BUILD_FAILED[*]}"
+            warn "Setup cannot deploy those images; check the build logs above, then retry."
+            abort_after_build_failure
         fi
+    else
+        warn "Image build authentication failed; setup stopped before deployment."
+        abort_after_build_failure
     fi
     unset _build_ready _FP_FILE _fp_sha _fp_dirty _BUILD_PARALLELISM _BUILD_LOG_DIR _BUILD_RESULTS_DIR _idx _i _status _reason _build_pids _still_running _pid
     echo -e "${CYAN}=======================================================${NC}"

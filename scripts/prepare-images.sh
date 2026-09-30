@@ -73,6 +73,13 @@ HUB_BUNDLE_IMAGE="$(cur HUB_BUNDLE_IMAGE)"
 ITBENCH_EXPERIMENT_SRC="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"
 INSTALL_APP_IMAGE="$(cur INSTALL_APPLICATION_IMAGE)"
 INSTALL_AGENT_IMAGE="$(cur INSTALL_AGENT_IMAGE)"
+SUBSCRIBER_IMAGE="$(cur SUBSCRIBER_IMAGE)"
+EVENT_TRACKER_IMAGE="$(cur EVENT_TRACKER_IMAGE)"
+ARGO_WORKFLOW_CONTROLLER_IMAGE="$(cur ARGO_WORKFLOW_CONTROLLER_IMAGE)"
+ARGO_WORKFLOW_EXECUTOR_IMAGE="$(cur ARGO_WORKFLOW_EXECUTOR_IMAGE)"
+CHAOS_OPERATOR_IMAGE="$(cur CHAOS_OPERATOR_IMAGE)"
+CHAOS_RUNNER_IMAGE="$(cur CHAOS_RUNNER_IMAGE)"
+CHAOS_EXPORTER_IMAGE="$(cur CHAOS_EXPORTER_IMAGE)"
 
 APP_SRC="${APP_SRC:-dockerhub}"
 AGENT_SRC="${AGENT_SRC:-dockerhub}"
@@ -86,6 +93,13 @@ HUB_BUNDLE_SRC="${HUB_BUNDLE_SRC:-local}"
 HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
 INSTALL_APP_IMAGE="${INSTALL_APP_IMAGE:-agentcert/agentcert-install-app:latest}"
 INSTALL_AGENT_IMAGE="${INSTALL_AGENT_IMAGE:-agentcert/agentcert-install-agent:latest}"
+SUBSCRIBER_IMAGE="${SUBSCRIBER_IMAGE:-agentcert/litmusportal-subscriber:3.0.0}"
+EVENT_TRACKER_IMAGE="${EVENT_TRACKER_IMAGE:-litmuschaos/litmusportal-event-tracker:3.0.0}"
+ARGO_WORKFLOW_CONTROLLER_IMAGE="${ARGO_WORKFLOW_CONTROLLER_IMAGE:-litmuschaos/workflow-controller:v3.3.1}"
+ARGO_WORKFLOW_EXECUTOR_IMAGE="${ARGO_WORKFLOW_EXECUTOR_IMAGE:-litmuschaos/argoexec:v3.3.1}"
+CHAOS_OPERATOR_IMAGE="${CHAOS_OPERATOR_IMAGE:-litmuschaos/chaos-operator:3.0.0}"
+CHAOS_RUNNER_IMAGE="${CHAOS_RUNNER_IMAGE:-litmuschaos/chaos-runner:3.0.0}"
+CHAOS_EXPORTER_IMAGE="${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}"
 
 JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
 JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
@@ -187,6 +201,20 @@ is_docker_hub_image() {
     [[ "${image}" != */* || ( "${first_component}" != *.* && "${first_component}" != *:* && "${first_component}" != "localhost" ) ]]
 }
 
+# A restart can reuse images that Kubernetes already pulled into every KinD
+# node, even when they are absent from the host Docker cache. Check every
+# node so an image missing on one worker is still prepared normally.
+image_present_on_all_kind_nodes() {
+    local img="$1" nodes node
+    [[ "$(cluster_flavour)" == "kind" ]] || return 1
+    nodes="$(kind get nodes --name "${KIND_CLUSTER_NAME}" 2>/dev/null)" || return 1
+    [[ -n "${nodes}" ]] || return 1
+    while IFS= read -r node; do
+        [[ -n "${node}" ]] || continue
+        docker exec "${node}" crictl inspecti "${img}" >/dev/null 2>&1 || return 1
+    done <<< "${nodes}"
+}
+
 assert_runtime_images_are_available_or_authenticated() {
     local image missing_count=0
     local -a missing_images=()
@@ -196,14 +224,16 @@ assert_runtime_images_are_available_or_authenticated() {
     # will fail part-way through a customer setup because of registry quotas.
     dockerhub_credentials_are_configured && return 0
     for image in "$@"; do
-        if is_docker_hub_image "${image}" && ! docker image inspect "${image}" >/dev/null 2>&1; then
+        if is_docker_hub_image "${image}" \
+            && ! docker image inspect "${image}" >/dev/null 2>&1 \
+            && ! image_present_on_all_kind_nodes "${image}"; then
             missing_images+=("${image}")
         fi
     done
     missing_count="${#missing_images[@]}"
     [[ "${missing_count}" -eq 0 ]] && return 0
 
-    warn "${missing_count} Docker Hub workflow image(s) are missing locally and no usable Docker Hub credentials are configured."
+    warn "${missing_count} Docker Hub image(s) are missing from Docker and the cluster and no usable Docker Hub credentials are configured."
     for image in "${missing_images[@]:0:5}"; do
         warn "  missing: ${image}"
     done
@@ -349,11 +379,27 @@ node_crictl_pull() {
     if [[ -z "${nodes}" ]]; then
         return 1
     fi
-    local node ok_all=0
+    local node ok_all=0 mirror_img target_img normalized_img first_component
+    normalized_img="${img#docker.io/}"
+    first_component="${normalized_img%%/*}"
+    if [[ "${normalized_img}" != */* ]]; then
+        mirror_img="mirror.gcr.io/library/${normalized_img}"
+        target_img="docker.io/library/${normalized_img}"
+    elif [[ "${first_component}" == *.* || "${first_component}" == *:* || "${first_component}" == "localhost" ]]; then
+        mirror_img=""
+        target_img="${img}"
+    else
+        mirror_img="mirror.gcr.io/${normalized_img}"
+        target_img="docker.io/${normalized_img}"
+    fi
     while IFS= read -r node; do
         [[ -z "${node}" ]] && continue
         if docker exec "${node}" crictl pull "${img}" >/dev/null 2>&1; then
             ok "node pull: ${img} → node '${node}' (kind load fallback)"
+        elif [[ -n "${mirror_img}" ]] \
+             && docker exec "${node}" crictl pull "${mirror_img}" >/dev/null 2>&1 \
+             && docker exec "${node}" ctr --namespace=k8s.io images tag "${mirror_img}" "${target_img}" >/dev/null 2>&1; then
+            ok "node pull: ${mirror_img} → node '${node}' (public mirror fallback)"
         else
             warn "node pull fallback also failed for ${img} on node '${node}'"
             ok_all=1
@@ -558,12 +604,19 @@ bundled_application_images() {
 }
 
 pull_and_load_runtime_images() {
-    # Runtime dependencies that workflows/the platform must find in the node's
+    # Infrastructure and workflow images that Kubernetes must find in each node's
     # image store when running locally. Keep this aligned with the platform
     # metricsServer image and every image referenced by bundled fault templates.
     # For each image we also load an alias under any alternative registry names
     # that stored experiment manifests may reference (JFrog, Scarf proxy).
     local images=(
+        "${SUBSCRIBER_IMAGE}"
+        "${EVENT_TRACKER_IMAGE}"
+        "${ARGO_WORKFLOW_CONTROLLER_IMAGE}"
+        "${ARGO_WORKFLOW_EXECUTOR_IMAGE}"
+        "${CHAOS_OPERATOR_IMAGE}"
+        "${CHAOS_RUNNER_IMAGE}"
+        "${CHAOS_EXPORTER_IMAGE}"
         "litmuschaos/k8s:latest"
         "litmuschaos/litmus-checker:latest"
         "litmuschaos/litmus-app-deployer:latest"
@@ -618,14 +671,22 @@ pull_and_load_runtime_images() {
     rm -rf "${log_dir}"; mkdir -p "${log_dir}"
 
     _pull_and_load_one() {
-        local img="$1" idx="$2" attempt=1 pull_ok=0 pull_output retry_delay
+        local img="$1" idx="$2" attempt=1 pull_ok=0 pull_output retry_delay cached=0
         {
+            if [[ "${refresh_runtime_images}" != "1" ]] \
+                && ! docker image inspect "${img}" >/dev/null 2>&1 \
+                && image_present_on_all_kind_nodes "${img}"; then
+                echo "Already present on every KinD node: ${img}"
+                echo ok > "${results_dir}/${idx}.status"
+                return 0
+            fi
             # A local-first restart must be repeatable and offline. Docker pull
             # still contacts a registry for an already-cached mutable tag, so
             # avoid it unless an operator explicitly requests a refresh.
             if docker image inspect "${img}" >/dev/null 2>&1 && [[ "${refresh_runtime_images}" != "1" ]]; then
                 echo "Using cached local image ${img}"
                 pull_ok=1
+                cached=1
             else
                 echo "Pulling ${img} from its registry …"
                 while (( attempt <= pull_retries )); do
@@ -654,9 +715,25 @@ pull_and_load_runtime_images() {
                 local load_ok=1
                 if kind_load "${img}"; then
                     load_ok=0
-                elif node_crictl_pull "${img}"; then
-                    echo "kind load failed for ${img} but node-side crictl pull fallback succeeded"
-                    load_ok=0
+                else
+                    # A cached Docker image can have missing blobs (for example
+                    # after an interrupted pull). Refresh that public image once
+                    # before falling back to a direct pull inside the KinD node.
+                    if [[ "${cached}" -eq 1 ]]; then
+                        echo "Cached image ${img} failed to load; refreshing it from its registry …"
+                        if pull_output="$(docker pull "${img}" 2>&1)"; then
+                            printf "%s\n" "${pull_output}"
+                            if kind_load "${img}"; then
+                                load_ok=0
+                            fi
+                        else
+                            printf "%s\n" "${pull_output}"
+                        fi
+                    fi
+                    if [[ "${load_ok}" -ne 0 ]] && node_crictl_pull "${img}"; then
+                        echo "kind load failed for ${img} but node-side crictl pull fallback succeeded"
+                        load_ok=0
+                    fi
                 fi
                 if [[ "${img}" == "litmuschaos/go-runner:latest" ]]; then
                     local scarf="litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest"

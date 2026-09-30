@@ -13,6 +13,35 @@ spec:
       labels:
         app: auth
     spec:
+      initContainers:
+        - name: wait-for-mongodb
+          image: {{ .Values.images.mongodb }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          command: [bash, -c]
+          args:
+            - |
+              echo "Waiting for MongoDB RS to be initialized..."
+              until mongosh --quiet --host mongodb:27017 \
+                -u "${MONGODB_USERNAME:-admin}" \
+                -p "${MONGODB_PASSWORD:-1234}" \
+                --authenticationDatabase admin \
+                --eval "rs.status().ok" 2>/dev/null | grep -q 1; do
+                echo "  still waiting..."; sleep 5
+              done
+              echo "MongoDB RS ready."
+          env:
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_USERNAME
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: MONGODB_PASSWORD
+                  optional: true
       containers:
         - name: auth
           image: {{ .Values.images.auth }}

@@ -31,7 +31,15 @@ class ApiError(RuntimeError):
 
 
 def _post_json(url, payload, token=None, timeout=30):
-    headers = {"Content-Type": "application/json"}
+    # Auth and GraphQL enforce browser-style origin checks. urllib does not
+    # add Origin automatically, so local setup requests would get HTTP 403.
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": "http://localhost",
+        # Older local GraphQL images still require Referer when constructing
+        # the generated install manifest; keep setup compatible with upgrades.
+        "Referer": "http://localhost:2001/",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)

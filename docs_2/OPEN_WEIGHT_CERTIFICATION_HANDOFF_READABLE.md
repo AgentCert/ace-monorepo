@@ -3193,3 +3193,82 @@ The fourth: if a scheduled launch was cancelled or failed, its reserved slot was
 **One honest caveat:** this is verified at the database level, not under real concurrent load with a rebuilt image. That test still needs to happen.
 
 One behaviour is intentional and worth knowing: if a run gets wedged and never finishes, the batch waits rather than launching more runs behind it. That is deliberate — stacking runs behind a stuck one is what caused the original explosion — but it is silent, so the log now spells out how to clear it.
+
+## §130 — Why the user-built workflow "passed" without injecting anything, and what was fixed (2026-09-30, uncommitted)
+
+**What the user saw.** A two-run experiment (Sock Shop + Flash Agent + the resource-quota fault) showed every step green in Argo, yet the fault summary said `resourcequotas "memory" is forbidden` for the `litmus-admin` account, the final cleanup step failed on both runs, and a certificate was produced anyway.
+
+**The main cause was stale permissions, not broken code.** The account every fault runs as (`litmus-admin`) gets its permissions from a manifest applied once, when the chaos infrastructure is first connected. This cluster's infrastructure was connected while an older server build was running, so it got a much narrower role: 128 permissions short of what the current source grants. Nothing ever updates that role afterwards. The same gap also made both teardown steps fail silently. The checker Argo uses exits "success" even when the fault itself errored, which is why everything looked green.
+
+That live role could not be repaired from this session: applying cluster permissions was blocked by the permission system, so it is left to the user (steps below). What *was* changed is that the server now checks this before a run starts. If `litmus-admin` is missing permissions the current manifest grants, the run is refused with a message saying exactly how to fix it, instead of running a fault that cannot inject.
+
+**Other real bugs found and fixed:**
+
+- **Certificates belonged to the wrong thing.** Every certificate was recorded against the chaos infrastructure's id instead of the agent under test, because the server looked for the agent in the workflow's own namespace (`litmus`), where no agent ever is. It also looked agents up by namespace alone. All three agents install into the app's namespace, so once one agent was registered there, runs of a different agent were credited to the first one. Agents are now identified by namespace *and* chart name. The certificate records one agent per experiment, and the UI and server can no longer disagree about which.
+- **The cleanup step failed every time.** It shares the install-agent image, so several "patch the install-agent step" passes also patched the cleanup. One of them labelled it as an install step, which froze the cleanup script at whatever version the experiment was first saved with. That is fixed. The cleanup also no longer treats "helm says release not found" as a failure when the release is actually gone, and it removes chaos engines from the namespace they really live in.
+- **Multi-run only worked once.** The first batch ran to its full count, but its "batch done" flag was never cleared, so every later batch of the same experiment stopped after one run. The background safety net was also rebuilding its counters from every run the experiment ever had. Now each batch the user starts is a fresh batch with its own start time, and only its own runs count. The safety net never overwrites progress and waits longer than the configured delay. Pressing Stop now stops the whole batch.
+- **Node-level faults could take the whole platform down.** Twelve faults (drain, taint, kubelet kill, node hogs, …) are marked "dangerous on a single node" in the catalog, but nothing read that flag. On this single-node cluster, which also runs ACE itself, they are now refused, with an explicit override if someone really wants them.
+- **Agents couldn't see bookinfo or otel-demo.** The shipped MCP URLs were pinned to Sock Shop. They now follow the experiment's app, and setup rewrites the old default in existing `.env` files.
+- **Agent id never reached the agent pod**, in all three agent charts. Fixed.
+- **The CrewAI agent crash-looped.** It ran one investigation, before any fault was injected, and then exited. It now keeps scanning like the other agents.
+- **Some faults could never hit their target:**
+  - Bookinfo's three "reviews" versions matched no pods. Each workload now carries a unique label.
+  - The container-level ITBench faults couldn't find bookinfo's containers. They now use the only container when there is exactly one.
+  - The feature-flag fault edited a file flagd never re-reads. It now restarts flagd after injecting and after reverting.
+  - Four catalog entries were corrected so the builder only offers those faults where they actually work.
+
+**Checked:** the server and litmus-go build, and all related tests pass, including new ones for each fix. The chart changes render correctly. Nothing has been run end-to-end yet; that needs rebuilt images and the permission repair first.
+
+**What the user needs to do:**
+
+1. Re-apply the chaos infrastructure manifest for the infrastructure named `test`. Either use the UI (Environments → `test` → download the manifest → `kubectl apply`), or set `ACE_INFRA_NAME=test` in `.env` and run `./scripts/setup.sh --restart`. Don't let setup register a second infrastructure in the same namespace.
+2. Rebuild with `./scripts/setup.sh --restart --local-build`, including the install-app, install-agent, itbench-experiment and CrewAI agent images.
+3. Push the chaos-charts change: the fault catalog is read from GitHub, so it only takes effect once pushed.
+
+**Still open:**
+
+- the HPA fault (no app ships an HPA);
+- the pod-failure fault, which likely does nothing;
+- HTTP faults' default port, which is wrong for bookinfo and otel-demo;
+- helper images that aren't preloaded;
+- the certification pipeline can't recover after a server restart;
+- the certification gate counts every run the experiment ever had, not just the current batch.
+
+## §131 — ITBench faults now pass or fail like standard faults: "did the fault inject and roll back?" (2026-10-01, uncommitted, image not rebuilt)
+
+**The problem.** A scaled-to-zero run on sock-shop's carts-db showed FAILED, although the fault worked perfectly: it scaled carts-db to 0, held it for 300 s and restored it. The "Fail" came from our own litmus-go fork, which graded the *agent*: carts-db was still down at the end of the window because flash-agent only diagnoses. A broken injection shows FAILED too, so the two cases looked the same. Meanwhile the certifier already measures detection and mitigation from the agent's trace and never reads this verdict.
+
+**The principle (user decision).** ACE can certify any SRE agent. A fault's job is to inject and roll back successfully. Whether the agent fixes it is recorded, and only the certificate judges it. Standard faults such as pod-cpu-hog already work this way, because they run the upstream image with no probes.
+
+**What changed (litmus-go only).**
+- An ITBench fault now passes when it injected, held and reverted cleanly, exactly like the standard faults.
+- A failed injection or a failed revert is still an Error.
+- The end-of-window recovery check still runs, but only writes an `[Observation]` line to the fault's log.
+- The fork's grading file is deleted.
+- The ChaosResult code is back to its original upstream form.
+
+**Worth knowing.**
+- Some bundled experiment templates attach recovery probes to ITBench faults. Those probes now run after the revert, so they check that the rollback worked.
+- Their retry budget is short (about 15–20 s), which may be too little for a slow-starting app.
+- Separately, flash-agent *could* have scaled carts-db back. Its prompt told it not to, because every sock-shop Deployment carries a static `litmuschaos.io/chaos` annotation.
+
+**Checked:** litmus-go builds, vets and passes its tests.
+
+**Still to do:**
+1. Rebuild the itbench-experiment image and re-run the fault. It should show COMPLETED, with the observation in the log.
+2. Decide whether GraphQL should count "Error" verdicts. Today one errored fault in a multi-fault run doesn't mark the run FAILED.
+
+---
+
+## §132 — Pre-commit review of §130/§131 (2026-10-05, uncommitted)
+
+Before committing, every uncommitted change was checked for hardcoded values, scaling problems and duplicated work. Two things were wrong and are fixed:
+
+- **sre-agent-crewai never received its run-time limit.** The chart put the limit in its ConfigMap, but its Deployment never handed it to the container. The agent would have kept scanning forever instead of stopping at the end of the experiment window. The Deployment now passes both settings.
+- **One Go file had its line endings flipped.** `chaos_experiment/handler/handler.go` is stored with Windows line endings. The edit saved it with Unix ones, so a 13-line change showed up as a 3,129-line diff. The original line endings are restored.
+
+**Still open, not changed here:**
+- The GraphQL server still has code for an "N/A" verdict that litmus-go no longer produces.
+- Two old Azure build scripts still point the agents' MCP servers at sock-shop.
+
+**Checked:** both Go modules build and pass their tests, all three agent charts render, and the crewai entrypoint compiles.

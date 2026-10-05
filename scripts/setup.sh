@@ -741,6 +741,22 @@ if ! grep -q '^HOST_KUBE_DIR=.\+' "${ENV_FILE}" 2>/dev/null; then
     unset _default_kube_dir
 fi
 
+# Agent MCP URLs must follow the experiment's application. Every app chart
+# (sock-shop, bookinfo -> book-info, otel-demo) ships both MCP servers in its
+# own namespace, and the graphql server substitutes the run's namespace for
+# {{workflow.parameters.appNamespace}}. Older .env files pinned the literal
+# sock-shop URLs, which pointed every bookinfo/otel-demo agent at MCP servers
+# that do not exist. Only the old shipped defaults are rewritten; any other
+# value is a deliberate override and is left alone.
+for _mcp in "K8S_MCP_URL|kubernetes-mcp-server|8081" "PROM_MCP_URL|prometheus-mcp-server|8083"; do
+    IFS='|' read -r _mcp_key _mcp_svc _mcp_port <<<"${_mcp}"
+    if [[ "$(cur "${_mcp_key}")" == "http://${_mcp_svc}.sock-shop.svc.cluster.local:${_mcp_port}/mcp" ]]; then
+        set_env "${_mcp_key}" "http://${_mcp_svc}.{{workflow.parameters.appNamespace}}.svc.cluster.local:${_mcp_port}/mcp"
+        ok "Set ${_mcp_key} to follow the experiment's app namespace (was pinned to sock-shop)"
+    fi
+done
+unset _mcp _mcp_key _mcp_svc _mcp_port
+
 # KinD's `kind load docker-image` exports each local image through `docker save`
 # before importing it into the node. By default kind stages that tarball in
 # /tmp, which is often on the host root filesystem even when Docker's own

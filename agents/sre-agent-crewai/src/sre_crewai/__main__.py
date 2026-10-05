@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from .crew import build_crew
@@ -66,6 +67,45 @@ def main() -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     output_path = args.output or str(workspace / "agent_output.json")
 
+    # The Helm chart runs this as a Deployment, so returning makes Kubernetes
+    # restart the pod and back off (CrashLoopBackOff), and a single pass runs
+    # before any fault is injected. Under the chart, scan every SCAN_INTERVAL
+    # seconds like the other agents, bounded by AGENT_MAX_RUNTIME_SECONDS, then
+    # idle until the workflow uninstalls the agent. With neither set (the
+    # standalone harness) it still makes exactly one pass.
+    scan_interval = int(os.environ.get("SCAN_INTERVAL", "0") or "0")
+    max_runtime = int(os.environ.get("AGENT_MAX_RUNTIME_SECONDS", "0") or "0")
+    deadline = time.monotonic() + max_runtime if max_runtime > 0 else None
+
+    iteration = 0
+    while True:
+        iteration += 1
+        print(f"[sre-crewai] scan iteration {iteration}", flush=True)
+        try:
+            _investigate(args, workspace, output_path)
+        except Exception as exc:  # a failed pass must not take the pod down
+            print(f"[sre-crewai] scan iteration {iteration} failed: {exc}", file=sys.stderr, flush=True)
+        if scan_interval <= 0:
+            break
+        sleep_for = scan_interval
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sleep_for = min(scan_interval, int(remaining))
+        if sleep_for <= 0:
+            break
+        print(f"[sre-crewai] sleeping {sleep_for}s before next scan", flush=True)
+        time.sleep(sleep_for)
+
+    if scan_interval > 0 and os.environ.get("AGENT_IDLE_AFTER_MAX_RUNTIME", "false").strip().lower() in ("1", "true", "yes"):
+        print("[sre-crewai] bounded scan loop complete; idling until workflow cleanup", flush=True)
+        while True:
+            time.sleep(3600)
+
+
+def _investigate(args: argparse.Namespace, workspace: Path, output_path: str) -> None:
+    """Run one crew investigation and write its diagnosis to output_path."""
     crew = build_crew(
         goal=args.goal,
         workspace_dir=str(workspace),

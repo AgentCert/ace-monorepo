@@ -9740,3 +9740,145 @@ TOTAL RUNS = 1 initial + 2 dispatched = 3  (maxRuns=3)
 Converges to exactly `maxRuns`. `go build ./...` and `go test` on the three affected packages pass (Go 1.24.13 via `golang:1.24-alpine`).
 
 **Still unverified:** no end-to-end run against a rebuilt image. The concurrency guards are proven at the database-semantics level, not under real concurrent load.
+
+### §130 — End-to-end audit of the user-built workflow (install/uninstall × 3 apps × 3 agents, multi-run, fault injectability, certification) (2026-09-30)
+
+**Status:** code fixes applied, compiled + unit-tested, **uncommitted**. Images NOT rebuilt; live cluster NOT changed (the one live RBAC repair attempted was denied by the permission classifier and is left to the user — see "Live state" below).
+
+**Trigger.** User-built experiment `test3` (sock-shop + flash-agent + `insufficient-kubernetes-resource-quota`, multi-run maxRuns=2) "succeeded" in Argo on both runs, but the fault summary was `NON_USER_FRIENDLY_ERROR: resourcequotas "memory" is forbidden: User "system:serviceaccount:litmus:litmus-admin" cannot get resource "resourcequotas"`, the onExit `uninstall-all` exited 1 on both runs, and certificates were issued anyway.
+
+**Method.** Live read-only inspection of the KinD cluster (`kind get kubeconfig --name agentcert-sachin-mourya`), MongoDB (`litmus` db), Argo workflow objects and ChaosResults; three parallel read-only code audits (install/uninstall, fault × app injectability incl. `helm template` of all three app charts, multi-run + certification); every finding acted on below was re-verified against source or live state before changing code.
+
+#### Root cause of the reported error — stale infra RBAC (NOT a code bug in the current source)
+
+- The live `litmus-admin-cluster-role` (created 03:52:19, `kubectl-client-side-apply`, never re-applied) is the narrow upstream set: **128 (group, resource, verb) grants short** of `AgentCert/chaoscenter/graphql/server/manifests/cluster/2b_litmus_admin_rbac.yaml` (checked by rendering the manifest baked into the running graphql image — byte-identical to source — and diffing rule sets). `infra-cluster-role` is also 1 grant short (`namespaces:get` resourceNames).
+- The infra ("test") was connected through the UI while the first (older) graphql image was running; the locally built graphql rolled out at 05:01/05:49 but the infra manifest is written only at connect time and nothing reconciles it.
+- **It also broke teardown:** every ChaosResult in `litmus` for `uninstall-application` (`cannot delete resource "namespaces"`) and `uninstall-agent` (`could not enumerate any resources for release "flash-agent" in sock-shop (13 list failures)`) has verdict **Error**. litmus-checker exits 0 on verdict Error, so Argo showed every step Succeeded.
+- `setup.sh`'s `ensure_chaos_infrastructure` only reconciles the infra named `ACE_INFRA_NAME` (default `ace-local`), which was never registered on this instance (only the UI-registered `test` exists) — so `--restart` would not have repaired it either.
+
+#### Fixes (all durable — in checked-in source)
+
+| # | Repo / file | Defect | Fix |
+|---|---|---|---|
+| 1 | AgentCert `pkg/chaos_experiment_run/handler/preflight_chaos.go` (new) + `handler.go` (call after `ValidateExperimentStructure` in `RunChaosWorkFlow`) | `preflightInfraRBAC` only checked the workflow SA `argo-chaos` (cluster-admin), never the fault SA `litmus-admin`, so a stale role let runs dispatch that could not inject anything | New run-time preflight: expands the shipped `2b` ClusterRole into (group,resource,verb) requirements and checks them against every ClusterRole bound to `litmus/litmus-admin`; on drift the run is refused with the missing grants and the remedy (re-apply the infra manifest). Cluster-scope infra only; any read failure logs and skips (never blocks on uncertainty) |
+| 2 | same file + `pkg/faultcatalog/catalog.go` | `singleNodeDanger: true` (12 node-level faults) was parsed by nothing server-side (`rawFault` ignored it); all 12 are `generic`, offered for every app on this single-node KinD that also hosts the platform | `Fault.SingleNodeDanger` decoded (YAML aliases covered by test); preflight refuses those faults when the cluster has ≤1 node; override `ACE_ALLOW_NODE_DESTRUCTIVE_FAULTS=true` |
+| 3 | AgentCert `pkg/chaos_experiment/ops/{validation.go,service.go,cleanup.go}`, `handler.go normalizeInstallTemplates` | The onExit `uninstall-all` template reuses the install-agent image, so every image-matched install-agent pass hit it: `InjectExperimentContextArgs` appended ~34 `--set` args, `applyInstallAgentTemplateOverridesFromMetadata` stamped `agentcert.io/install-type: agent`, and then `isInstallStepTemplate` (annotation checked first) classified it as the agent install step — so `ApplyGuaranteedCleanupPatch` re-run at run time overwrote `agentRelease` with "" and returned early, freezing every saved experiment's cleanup script at its first-save version | `isInstallStepTemplate` excludes `uninstall-all` by name before the annotation check; new `IsAgentInstallStep` used by `InjectExperimentContextArgs`, `applyAgentInstallNamespaceOverride`, `ExtractInstallAgentNamespace/Folder`; annotation no longer stamped on it; handler's `normalizeInstallTemplates` skips it (`ops.UninstallAllTemplateName`) |
+| 4 | AgentCert `pkg/chaos_experiment/ops/cleanup.go` | `uninstall-all` exited 1 on every run. Inferred mechanism (pod logs GC'd by `podGC: OnWorkflowCompletion`, so not directly observed): because of the RBAC failure both releases were still installed at onExit; every app chart templates its own release namespace, so `helm uninstall <app> --wait` deletes that namespace and the release Secret inside it before helm purges it → helm reports `release: not found` → counted as failure. Also deleted ChaosEngines in `$APP_NAMESPACE`, but engines live in the admin namespace (`litmus`); no pull policy on a `:latest` image ⇒ `Always` | A helm failure counts only if `helm status` still finds the release afterwards; engines deleted in `CHAOS_NAMESPACE` = `{{workflow.parameters.adminModeNamespace}}` when the workflow declares it; pull policy follows `INSTALL_AGENT_IMAGE_PULL_POLICY`; ChaosResults are no longer deleted (they never were in practice — wrong namespace — and the subscriber reads them) |
+| 5 | AgentCert `pkg/chaos_experiment_run/handler/handler.go` (auto-trigger), `pkg/certification/service.go` | **Certificates were keyed to the chaos infra id**: `agentID = wfRun.InfraID`, and the registry lookup used `executionData.Namespace` (the Argo workflow's namespace, `litmus`) where no agent is registered. Live: every `certificate_experiments` doc has `agentId = agentName = 71aba52f…` (infra id); real agent is `aa7f2627…` flash-agent | Auto-trigger resolves the agent from the experiment's install-agent step (`ops.ResolveManifestAgent`); infra id only as last resort. `StartCertificationGeneration` adopts the identity stored on the experiment's parent cert doc (before the guard and again after upsert), so the UI and server callers can never split one experiment's run docs across two agent ids |
+| 6 | AgentCert `pkg/agent_registry/operator.go` (+`GetAgentByNamespaceAndName`), `pkg/chaos_experiment/ops/agent_resolution.go` (new), `ops/service.go` save path, `handler.go` run path + trace identity | `GetAgentByNamespace` returns the FIRST agent in a namespace; all 3 agents install into the app namespace, so after flash-agent was registered in sock-shop, a sre-agent-comprehensive experiment on sock-shop got flash-agent's id injected as `agentId` and attributed. Trace identity used the infra namespace | `ResolveWorkflowAgent` matches (namespace, install step's chart folder == registered chart name); namespace-only lookup only when the step names no folder; an unregistered agent resolves to nil (install-agent self-registers) instead of borrowing another agent's id |
+| 7 | AgentCert web `controllers/ExperimentRunHistory/ExperimentRunHistory.tsx` | UI used `infra.infraID`/`infra.name` as agent id/name for auto-trigger, re-trigger and certificate download | Prefers the server-pinned `cs.agentID`, then the manifest's `agentId` param, infra id last; auto-trigger waits for the server's trigger instead of pinning the infra id; download uses the resolved id |
+| 8 | AgentCert `schema.go` (+`MultiRunState.StartedAt`), new `handler/multirun_batch.go`, `handler.go` (`RunChaosWorkFlow`, `advanceMultiRunChain`), `multirun_reconciler.go`, `pkg/chaos_experiment/handler/handler.go` (`StopExperimentRuns`) | (a) `multi_run_state` was never reset: once `batch_done=true`, the next batch's run-1 completion was rejected by guard 1 → **every batch after the first stopped at 1 run** (test3 is now latched). (b) The reconciler recomputed counters from **every run the experiment ever had** and overwrote them on every sweep even when not dispatching (explains live `launched: 0` after run 2 was dispatched; loosened the §129 ceiling by one; latched `batch_done` immediately on experiments with old runs). (c) Reconciler grace was a fixed 10 min while the UI allows delays up to 50 h → mid-delay double dispatch. (d) Stop didn't stop the batch | User-initiated runs (not chain/reconciler dispatches — marked via context `withMultiRunContinuation`) reset `multi_run_state` to a fresh batch with `started_at`; the chain ignores completions of runs created before `started_at`; the reconciler acts only on batches with `started_at`, counts only that batch's runs, never overwrites (`$addToSet` terminal ids, `$max` launched), grace = max(10 m, delay + 2 m); stopping runs latches the batch done |
+| 9 | agent-charts `charts/{flash-agent,sre-agent-comprehensive,sre-agent-crewai}/templates/configmap.yaml` | `AGENT_ID` rendered from `.Values.agent.id`, which nothing sets (installer/server set `agentId` and `agent.config.AGENT_ID`), and is in the catch-all's reserved list → always empty; flash/crewai also dropped `agent.config.WORKFLOW_UID` | `AGENT_ID` = `agent.config.AGENT_ID` \| `agentId` \| `agent.id`; `WORKFLOW_UID` = `agent.config.WORKFLOW_UID` \| `agent.workflowUid` (verified with `helm template`) |
+| 10 | superproject `agents/sre-agent-crewai/src/sre_crewai/__main__.py`, crewai chart configmap | Ran one `crew.kickoff()` and exited under a Deployment → CrashLoopBackOff, single investigation before any fault | Scans every `SCAN_INTERVAL` bounded by `AGENT_MAX_RUNTIME_SECONDS`, then idles when `AGENT_IDLE_AFTER_MAX_RUNTIME=true` (same contract as sre-agent-comprehensive); a failed pass is logged, not fatal; one pass when neither is set (harness). Chart now passes the two runtime keys through |
+| 11 | app-charts `charts/bookinfo/templates/bookinfo/*.yaml`, `charts/applications.chartserviceversion.yaml` | Catalogue services `reviews-v1/v2/v3` became `app=reviews-vN`, but pods are `app=reviews,version=vN` → every fault against the three reviews targets selected nothing | Each bookinfo Deployment (metadata + pod template, **not** selector) gets a unique `app.kubernetes.io/name` = catalogue service name; bookinfo `labelKey` → `app.kubernetes.io/name`. `app=` labels unchanged so existing experiments keep working (verified with `helm template`: unique, selectors unchanged) |
+| 12 | litmus-go `pkg/itbench/common/containerpatch.go` (+test) | Container-level ITBench faults default the container name to the workload name; bookinfo `details-v1` runs container `details` → "container not found" | When `TARGET_CONTAINER` is unset and no name matches, a single-container workload's only container is used; multi-container stays an error |
+| 13 | litmus-go `experiments/itbench/opentelemetry-demo-feature-flag/experiment/experiment.go` | Edited ConfigMap `flagd-config`, but flagd reads an emptyDir copy made by its init container at pod start (verified in the rendered 0.40.9 chart) → silent no-op | Rollout-restart `deployment/flagd` after injecting and after reverting |
+| 14 | chaos-charts `faults/fault-capabilities.yaml` | `modified-...-environment-variable` catalogued generic but its defaults (`QUOTE_ADDR`) exist only on otel-demo `shipping`; `chaos-mesh-pod-failure` hard-codes `TARGET_CONTAINER=checkout`; http-abort blocks 8080 on services that don't listen on it; `pod-*-hog-exec` missing the 7 distroless otel-demo targets | env-var fault → `application-specific` otel-demo `[shipping]`; pod-failure `requiredServices: [checkout]`; http-abort `knownFailingTargets` flagd/kafka/valkey-cart/image-provider/load-generator; exec faults add otel-demo checkout/product-catalog/shipping/payment/frontend/fraud-detection/flagd. `scripts/validate-fault-capabilities.py`: 60 faults, 0 errors (3 pre-existing warnings) |
+| 15 | superproject `.env.example`, `scripts/setup.sh` | `K8S_MCP_URL`/`PROM_MCP_URL` shipped pinned to `…sock-shop.svc…`; the env var overrides the server's per-app default, so every bookinfo/otel-demo agent pointed at MCP servers that don't exist | Default is `{{workflow.parameters.appNamespace}}`-templated (Helm doesn't `tpl` `.Values.env`, so it reaches the server literally); setup.sh rewrites only the exact old sock-shop defaults in an existing `.env` (tested on a scratch env file) |
+
+#### Verification performed
+
+- `go build ./...` + `go test` for `pkg/chaos_experiment/ops`, `pkg/chaos_experiment_run/handler`, `pkg/certification`, `pkg/agent_registry`, `pkg/faultcatalog`, `pkg/chaos_experiment/handler` — all pass (golang:1.24-alpine, source mounted read-only). New tests: `agent_resolution_test.go` (namespace+folder resolution, no identity borrowing, stored-manifest parse, uninstall-all not an install step and gets no context args, cleanup re-apply keeps releases + targets the chaos namespace), `multirun_batch_test.go`, `preflight_chaos_test.go` (shipped 2b parses; stale role rejected with remedy; shipped + wildcard roles accepted), `TestSingleNodeDangerSurvivesYAMLAliases`.
+- litmus-go: `go build ./...` + `go test ./pkg/itbench/...` pass (new `TestSoleContainerFallback`).
+- `helm template` of all three agent charts (AGENT_ID/WORKFLOW_UID/runtime keys render) and bookinfo (labels unique, selectors unchanged).
+- Web: a full `tsc` is blocked by a pre-existing toolchain mismatch (TS 4.4 cannot parse the installed `@types/node` `ffi.d.ts`, which suppresses all semantic diagnostics); a scoped check reported no errors in the edited file.
+- **Not done: no end-to-end run.** Needs rebuilt images and the RBAC re-apply first.
+
+#### Live state (bridge NOT applied)
+
+- Applying the rendered current RBAC roles to the live cluster was **denied by the auto-mode permission classifier**; per its instruction no workaround was attempted (including a `setup.sh` auto-reconcile of the ClusterRole, which is the same outcome). The user must re-apply the infra manifest for infra `test`: UI → Environments → infra `test` → download manifest → `kubectl --kubeconfig <kind> apply -f`, or set `ACE_INFRA_NAME=test` in `.env` and run `./scripts/setup.sh --restart` (do **not** let setup register a second infra `ace-local` into the same `litmus` namespace — it would replace `test`'s subscriber). Until then the new preflight (once deployed) refuses runs with a message naming this remedy.
+- `test3`'s `multi_run_state.batch_done=true` is harmless after the rebuild (the next user-started run resets it). Existing `certificate_*` docs keep the infra id as `agentId` (the parent doc pins identity); a fresh experiment gets the correct agent.
+
+#### Known, not fixed (need a product decision or larger work)
+
+- `misconfigured-kubernetes-horizontal-pod-autoscaler`: no app chart ships an HPA → always fails "no horizontalpodautoscalers found". Either ship an HPA in an app chart or have the fault create one.
+- `chaos-mesh-pod-failure-replacement`: `kill -STOP 1` from an ephemeral container sharing the PID namespace is ignored by the kernel for the namespace's init (pid_namespaces(7)) → likely no-op that reports success (not live-verified). Needs a cgroup-freeze / hostPID helper redesign.
+- `pod-http-*` default `TARGET_SERVICE_PORT=80`: bookinfo listens on 9080, otel-demo on 8080 → silent no-op unless tuned. `disk-fill` needs `EPHEMERAL_STORAGE_MEBIBYTES` (empty default) and targets with an ephemeral-storage limit. Helper images (`busybox:1.36`, `curlimages/curl`, `ubuntu:16.04`, …) not preloaded and `LIB_IMAGE_PULL_POLICY` defaults to `Always`; `Dockerfile.gorunner-overlay` is never built, so local litmus-go fixes to standard faults don't ship.
+- litmus-checker/Argo report a fault step Succeeded on ChaosResult verdict Error; the ITBench binary emits `NON_USER_FRIENDLY_ERROR` for every failure, so the server cannot distinguish "never injected" from "revert failed" — certification still runs for such runs (the new RBAC preflight removes the known cause).
+- Certification pipeline has no restart recovery: a graphql restart during bucketing/aggregation leaves docs in `*_RUNNING`/`AGGREGATION_IN_PROGRESS` forever (live: `b904e92d…` stuck); `runCounts` is never persisted; the ALL_RUNS_COMPLETED gate counts every run of the experiment, not the current batch.
+- The teardown step order is user-chosen in the builder (`test3` uninstalls the app before the agent); with correct RBAC `uninstall-agent`'s cluster-scoped sweep still works after the namespace is gone. The shared `monitoring` namespace is not waited on at install nor swept at uninstall.
+- The agent registers into `LITMUS_PROJECT_ID` (`admin-project`) while experiments/certs live in the real project (`752925d5…`).
+
+#### Required to take effect
+
+`./scripts/setup.sh --restart --local-build` (graphql, web; `--restart` alone does not rebuild Go images), plus `prepare-images.sh` local builds of install-app (bookinfo chart is baked into it), install-agent (agent charts baked in), `agentcert/itbench-experiment:dev` (litmus-go), and the sre-agent-crewai image. The chaos hub (and so `fault-capabilities.yaml`) is cloned from `AgentCert/chaos-charts@stable_it_bench`, so the catalog corrections reach the running server only once that submodule is pushed (or via `FAULT_CAPABILITIES_PATH`). Then re-apply the infra RBAC as above.
+
+### §131 — ITBench fault verdict now follows the standard Litmus principle: Pass = injected + reverted cleanly; the agent's outcome is only recorded (2026-10-01)
+
+**Status:** uncommitted, code-only. The `agentcert/itbench-experiment:dev` image has NOT been rebuilt, so the live cluster still runs the old grading.
+
+**Why.** The user's principle: ACE certifies *any* SRE agent. A fault must inject and roll back successfully. Whether the agent fixes the damage is not the platform's concern; it is recorded, and only the certificate judges it.
+
+The fork broke that principle in two places:
+- §122/§120 (996bd7f9) graded the agent inside the chaos verdict.
+- fcc29f1c (`pkg/result/grading.go`) did the same, so observe-only agents made every ITBench run show FAILED.
+
+Observed case: a sock-shop `scaled-to-zero-kubernetes-workload` run on carts-db, in both runs of experiment test1 (2026-09-30).
+1. `defaultRecoveryAssertion` ran at the end of the hold, before the revert, and found readyReplicas=0.
+2. That led to `MarkGraded(false)`, verdict Fail, and a synthetic `agent-recovery-assertion` probe entry.
+3. GraphQL `reconcileRunPhase` then set `Completed_With_Probe_Failure`, and the UI showed "FAILED".
+
+A genuine harness error (verdict Error) also shows FAILED at run level, so the two cases could not be told apart.
+
+The verdict was never an input to the certificate:
+- Mitigation comes from the agent's trace: `certifier/aggregator/scripts/numeric_aggregation.py` L602-608.
+- The classifier drops `injection.verdict`: `certifier/fault_analyzer/scripts/classifier.py` L182.
+
+Standard faults already follow this principle. They run the upstream `litmuschaos/go-runner:latest` (`Dockerfile.gorunner-overlay` is never built), `pod-cpu-hog.go` L116-117 sets Pass straight after inject returns, they declare no probes, and they set `DEFAULT_HEALTH_CHECK=false`.
+
+**Agent side of the observed run** (separate issue, not changed): flash-agent diagnosed "carts-db scaled to 0" at about 12:01. `resources_scale` was available (kubernetes-mcp-server v0.0.67) and the sock-shop Role allows scaling. Its chaos-awareness prompt (`agents/flash-agent/flash_agent.py` ~L218-251, "Do NOT delete or scale") told it not to act. The prompt was triggered by the static `litmuschaos.io/chaos: "true"` annotation present on every sock-shop Deployment.
+
+| Repo | File | Change |
+|------|------|--------|
+| `litmus-go` | `pkg/itbench/common/orchestrator.go` | `Run()` sets `Verdict=Pass` once `inject()` returns nil (injected, held, reverted), mirroring the generic faults. The mid-chaos hook now only logs `[Observation]: end of fault window, before revert (recorded only, not graded): …`. Explicit probes run in the PostChaos phase *after* the revert (standard timing), and a failure goes through `RecordAfterFailure`. Removed the `MarkGraded`/`MarkUngraded` switch and the post-revert fallback assertion. Comments updated. |
+| `litmus-go` | `pkg/result/chaosresult.go`, `pkg/types/types.go` | Restored byte-identical to `fcc29f1c~1`: `downgradeUngradedPass`, the synthetic probe append, the `n/a` case and the `Graded`/`GradingDetail` fields are gone. |
+| `litmus-go` | `pkg/result/grading.go`, `pkg/result/grading_test.go` | Deleted (no remaining references anywhere in the monorepo). |
+
+**Unchanged:**
+- The inject/hold/revert helpers.
+- The abort path (Stopped).
+- Inject or revert failure → `RecordAfterFailure` → verdict Error.
+- `ITBENCH_DEFAULT_RECOVERY_CHECK`, which now gates only the observation log.
+- `recovery_test.go` and `orchestrator_test.go`.
+- GraphQL and the UI. The N/A / `Completed_Not_Graded` paths are now simply unused.
+
+**Behaviour change to know about:** these bundled templates attach explicit EOT recovery probes to ITBench faults: `otel-demo-itbench` (34), `otel-demo-itbench-starter`, `bookinfo-itbench`, `itbench-2scenario-5run` and `sre-agent-comprehensive-itbench-single`.
+- Those probes now run after the revert, so they verify the rollback, not the agent.
+- Their budget is `retry: 3`, `interval: 5s`, `probeTimeout: 15-20s`.
+- Readiness-type probes (`workload-ready`, `service-endpoints-restored`) can fail if the target needs longer than that to become Ready again after the revert.
+- The templates were not changed: the hub is read from GitHub.
+
+**Pre-existing gaps (not changed):**
+- `ProcessCompletedExperimentRun` does not count verdict `Error`, so one errored fault in a multi-fault run does not change the run phase.
+- `OnChaos` probes are not supported on ITBench faults, because the `DuringChaos` phase is never triggered.
+- Nothing waits for the target to be healthy after the revert (the `defaultHealthCheck` knob exists but is off).
+
+**Verified:** in `golang:1.24-alpine`, `go build ./...`, `go vet` (itbench/result/types/bin), and `go test ./pkg/itbench/... ./pkg/result/... ./pkg/types/... ./experiments/itbench/...` all pass. The changed lines are gofmt-clean; the orchestrator.go import-order nit is pre-existing.
+
+**Not runtime-tested.**
+- Rebuild the itbench image (`ITBENCH_EXPERIMENT_IMAGE_SOURCE=local`, via `scripts/prepare-images.sh` or `./scripts/setup.sh --restart --local-build`).
+- Then re-run scaled-to-zero. Expected: ChaosResult verdict Pass, probeSuccessPercentage 100, an `[Observation]` log line, and the run shown as COMPLETED.
+
+**Durability:** the change is in litmus-go source, so a fresh setup picks it up once the image is built.
+
+---
+
+### §132 — Pre-commit review of the uncommitted §130/§131 work (2026-10-05, uncommitted)
+
+Reviewed every uncommitted change in the monorepo root, `AgentCert`, `agent-charts`, `app-charts`, `chaos-charts` and `litmus-go` for hardcoding, scalability and duplicate work before committing. Two defects fixed:
+
+| Repo | File | Fix |
+|---|---|---|
+| `agent-charts` | `charts/sre-agent-crewai/templates/deployment.yaml` | The ConfigMap gained `AGENT_MAX_RUNTIME_SECONDS` / `AGENT_IDLE_AFTER_MAX_RUNTIME` and `__main__.py` reads them, but the Deployment passed neither to the container (this chart wires env one key at a time, no `envFrom`). The server always sends `780` / `true`, so crewai would have scanned forever instead of stopping at the experiment window and idling. Added both as `configMapKeyRef` entries, gated like `GOAL`. Verified with `helm template` (with and without the values set). |
+| `AgentCert` | `chaoscenter/graphql/server/pkg/chaos_experiment/handler/handler.go` | The file is CRLF in git; the edit had rewritten it as LF, turning a 13-line change into a 3,129-line diff. CRLF restored; diff is now the 13 added lines only. |
+
+**Checked and left as is:** the `.env.example` MCP URLs now match the server's own default (`{{workflow.parameters.appNamespace}}`), and the `setup.sh` rewrite only touches the old shipped sock-shop values; `preflight_chaos.go` reads `manifests/cluster/...` the same way `ManifestParser` does and the Dockerfile ships that directory; `singleNodeDanger` is set on all six node faults in `fault-capabilities.yaml`; the hardcoded `flagd` Deployment name matches the catalog target `otel-demo/flagd`; the agent-chart `AGENT_ID` fallback chain covers both writers (`agent.config.AGENT_ID` from the workflow, `agentId` from `agent_registry/helm.go`).
+
+**Leftovers, not changed (pre-existing):**
+- `chaos_experiment_run/service.go:186` and `handler.go:3166` still handle verdict `N/A`, which litmus-go no longer emits after §131.
+- `scripts/azure_build/start-agentcert-v2.sh:283` and `run.sh:183` still default the MCP URLs to `sock-shop`.
+- `go vet` fails repo-wide on unkeyed `bson.E` literals (house style); run it with `-composites=false`.
+
+**Verified:** `golang:1.24-alpine`: AgentCert `go build ./...`, `go vet -composites=false` and `go test` on ops, run handler, faultcatalog, certification and agent_registry; litmus-go `go build`, `go vet` and `go test ./pkg/itbench/... ./pkg/result/...`. `helm template` for all three agent charts and `helm lint` for bookinfo. `py_compile` on the crewai entrypoint.
+
+**Durability:** both fixes are in checked-in source.

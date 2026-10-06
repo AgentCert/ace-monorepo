@@ -3272,3 +3272,47 @@ Before committing, every uncommitted change was checked for hardcoded values, sc
 - Two old Azure build scripts still point the agents' MCP servers at sock-shop.
 
 **Checked:** both Go modules build and pass their tests, all three agent charts render, and the crewai entrypoint compiles.
+
+## §133 — Agent and app settings can now be changed from the experiment builder (2026-10-05, uncommitted, images not rebuilt)
+
+Before this, the builder could only choose which agent or app to install and which namespace to use. Every other value came from the chart or the server.
+
+Now, when you add an agent or app to an experiment, the drawer shows a **Settings** section for that chart: flash-agent's model and scan interval, sock-shop's replica counts, and so on. This works the same way for blank, ChaosHub-template and uploaded experiments. Nothing in the UI, the server or the installers is specific to one agent or app; the form is built from what each chart declares.
+
+**How a chart offers settings.** It lists them in a `configurations:` block of its own `values.yaml`. Each entry points at a value already in that file, and that value is the default. The README of each chart repo explains the format.
+
+**How the values travel.** The builder writes all of a step's settings into one argument, `-values-json=...`. The installer turns it into a values file for Helm. The platform's own values are still applied last, so a user setting can never override them. On every save and every run, the server checks the settings against what the chart declares. Anything the chart does not offer is rejected, so the form cannot be used to swap the agent's image or widen its permissions.
+
+**The model.** The model field starts on "Platform default", which leaves the choice to the platform exactly as before. If a model is picked, it becomes the experiment's model. The Chaos Studio model picker starts from it, and a model picked there when starting a run still wins. Saving the experiment clears any model picked for an earlier run.
+
+**Not offered, on purpose:**
+- Secrets: they would be stored in the experiment in plain text.
+- The agent mode and other values the platform sets on every install.
+- Settings stored in lists, such as otel-demo's load-generator users.
+- Agent values that the chart's templates never pass to the agent. A new check script, `scripts/validate-chart-configurations.py`, catches these.
+
+**Checked:**
+- The server's full test suite passes.
+- New tests cover rejected settings, model priority and template experiments.
+- Both installers' tests pass.
+- All nine charts pass the new render check.
+- The new UI tests pass, with no new type or lint errors. Other UI test files already failed to compile because of tool-version drift, unrelated to this change.
+
+**Not yet tried end to end.** The server, web, both installer images and the hub bundle need rebuilding first.
+
+## §134 — A cleaner settings drawer, and no more model dropdown in the Studio header (2026-10-05, uncommitted, web image not rebuilt)
+
+§133 worked end to end, so this round was about the UI.
+
+**The "Agent model" dropdown is gone from the Studio header.** The model is now one of the agent's settings, so there is a single place to choose it. Leaving it on "Platform default" keeps the platform's model, and the form shows which one that is.
+
+**The install drawer is organised into three numbered steps:** pick the agent or application, set the namespace, adjust the settings.
+- The Apply and Cancel buttons are always visible, and the old horizontal scrollbar is gone.
+- Opening an existing step goes straight to its settings, with a Change button to pick something else.
+- Settings are grouped into cards, two to a row.
+- A setting that differs from the chart's default can be reset in one click, and a summary line counts how many were changed.
+- Rarely used settings sit in a collapsible "Advanced settings" section. It opens by itself if one of them has an error.
+
+**Checked:** all related tests pass (38), including new ones that render the real drawer. There are no new type or lint errors.
+
+**Next, proposed and not started:** settings that adapt to the chart, and settings users can add themselves.

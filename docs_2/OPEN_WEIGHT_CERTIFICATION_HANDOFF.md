@@ -9882,3 +9882,166 @@ Reviewed every uncommitted change in the monorepo root, `AgentCert`, `agent-char
 **Verified:** `golang:1.24-alpine`: AgentCert `go build ./...`, `go vet -composites=false` and `go test` on ops, run handler, faultcatalog, certification and agent_registry; litmus-go `go build`, `go vet` and `go test ./pkg/itbench/... ./pkg/result/...`. `helm template` for all three agent charts and `helm lint` for bookinfo. `py_compile` on the crewai entrypoint.
 
 **Durability:** both fixes are in checked-in source.
+
+---
+
+### §133 — Agent and app settings configurable from the experiment builder (2026-10-05, uncommitted, images not rebuilt)
+
+**Goal (user request).** When an agent or app node is added in Chaos Studio (blank canvas, ChaosHub template or uploaded YAML), the user can see and change that chart's settings (e.g. flash-agent model, `SCAN_INTERVAL`) from the UI. The design is generic: no agent- or app-specific code in the UI, server or installers. Scope agreed with the user: apps sock-shop, otel-demo, bookinfo; agents flash-agent, sre-agent-crewai, sre-agent-comprehensive. New or user-supplied agents are later work.
+
+**Design.**
+- **Declaration:** each chart lists its settings in a top-level `configurations:` block of its own `values.yaml`. Each entry's `key` is an existing values path. The value there is the default, and its YAML type is the type written back (`"60"` stays a string for env vars, `replicas: 1` stays a number). No default is duplicated, and Helm ignores the block.
+- **Transport:** the builder writes one install-step arg, `-values-json=<JSON values document>`.
+  - `install-agent` / `install-app` write it to a temp file and pass `-f <file>` after `-values` and before `--set`.
+  - Precedence is therefore chart default < user setting < platform `--set`.
+  - Not a raw input artifact, because the server (`service.go:558`, run `handler.go:2600`) and the UI parse every template input artifact as a ChaosEngine.
+  - Not per-key `--set`, because that converts types (`"60"` to an int) and needs escaping. install-agent escapes commas and colons; install-app does not.
+- **Validation (fail closed):** `ValidateExperimentStructure`, which the save and run paths both call, checks every `-values-json` against the chart's declarations. It rejects:
+  - undeclared keys (so `agent.containerImage.*` or `rbac.*` cannot be smuggled in);
+  - wrong JSON type, out-of-range values, non-options, and `{{` (Argo would expand it);
+  - an unknown chart, and a path-traversal `-folder=`.
+- **Platform-owned keys:** the old hand-written `isStaleSetArg` prefix list moved to `chartconfig.platformOwnedKeys`. It is now one list with two uses:
+  - stripping stale `--set` args (same behaviour: exact key before `=`);
+  - refusing to let a chart offer those keys.
+
+  Secrets (`agent.secret.*`, whole-word `password|secret|token|api_key|credential|private_key` segments) cannot be offered, because the settings live in the manifest in plain text.
+- **Model:** `agent.config.MODEL_ALIAS` is the only platform-owned key a chart may offer, with `type: model`.
+  - The server still writes it on every install. `InjectExperimentContextArgs` now resolves it per step: run-time pick (Chaos Studio picker, or the pick persisted for multi-run) > the experiment's setting > env default (`FLASH_AGENT_MODEL` / `MODEL_ALIAS` / `AZURE_OPENAI_DEPLOYMENT`).
+  - The form's model starts on **"Platform default"**, which is not written. A snapshot of the chart literal `gpt-4o` would otherwise override the platform's configured model and fail on hosts without it.
+  - The Studio picker starts from the experiment's model until the user touches it.
+  - Saving an experiment whose agent step has settings deletes the `litmuschaos.io/modelAlias` run-pick annotation, so an older run pick cannot override a newly saved model on runs started without a pick (experiment-list Run, re-run cycles).
+- **Snapshot:** the UI writes every filled-in declared value, not only the changed ones, so a saved experiment keeps its configuration if a chart default changes. An emptied field falls back to the chart default.
+- **Template flows:**
+  - The form pre-fills from `-values-json`, then the template's own `--set` (with `{{workflow.parameters.X}}` resolved), then the chart default.
+  - On apply, the template `--set` for every declared key is removed (it would beat `-f`).
+  - The model is never adopted from a template `--set`: the server always stripped it, so adopting it would change what the template runs with.
+  - Re-applying the same chart keeps the step's other args (timeout, run-time `--set`). Previously `addInstallStepToManifest` replaced the whole container.
+  - `seedInstallStepParameters` no longer writes a parameter that references itself (`agentFolder={{workflow.parameters.agentFolder}}`).
+
+**Settings shipped (counts verified by the repository test):**
+
+| Chart | Settings |
+|---|---|
+| flash-agent (8) | `MODEL_ALIAS` (model), `LLM_REQUEST_TIMEOUT`*, `LLM_MAX_RETRIES`*, `SCAN_INTERVAL` (min 1), `SCAN_QUERY`*, `MCP_TIMEOUT`, `AGENT_RETRY_BACKOFF_MAX_SECONDS`, `LOG_LEVEL`* |
+| sre-agent-comprehensive (6) | `MODEL_ALIAS`, `SRE_AGENT_TEMPERATURE`* (0–2), `AGENT_GOAL`, `SCAN_INTERVAL`, `SRE_AGENT_MAX_STEPS`*, `MCP_TIMEOUT` |
+| sre-agent-crewai (4) | `MODEL_ALIAS`, `GOAL`, `SCAN_INTERVAL`, `MCP_TIMEOUT` (only keys its `configmap.yaml` names reach the container) |
+| sock-shop (8) | replicas of front-end, catalogue, carts, orders, payment, shipping, user, queue-master (1–5); not the DBs or rabbitmq |
+| bookinfo (8) | replicas of productpage, details, ratings, reviews v1–v3; load generator enabled + interval |
+| otel-demo (6) | memory limits of accounting, ad, fraud-detection, kafka, product-catalog, recommendation (`^[1-9][0-9]*(Mi\|Gi)$`) |
+
+\* added to `agent.config` with the agent code's own default (`LLM_REQUEST_TIMEOUT "120"`, `LLM_MAX_RETRIES "2"`, `SCAN_QUERY "Analyse the data from MCP tools and provide insights."`, `LOG_LEVEL "INFO"`, `SRE_AGENT_TEMPERATURE "0.2"`, `SRE_AGENT_MAX_STEPS "40"`), so behaviour is unchanged until a user edits them.
+
+Deliberately not offered:
+- `MAX_ITERATIONS`: >0 makes flash-agent exit mid-workflow.
+- `AGENT_MODE`: platform-owned; the server always sets it from env.
+- otel-demo `LOCUST_*`: they live in an `envOverrides` list, and lists are unsupported.
+
+**Files changed**
+
+| Repo | File | Change |
+|---|---|---|
+| `AgentCert` | `graphql/server/pkg/chartconfig/{chartconfig,values,platform,graphql}.go` + `chartconfig_test.go` (new) | Parse and check declarations (strict decode, so a misspelt attribute fails), validate value documents, the platform-key list, and the GraphQL mapping. A repo test loads every chart in the monorepo checkout and skips outside it. |
+| `AgentCert` | `graphql/definitions/shared/hubs.graphqls`; `graph/generated/generated.go`, `graph/model/models_gen.go` (regenerated) | `ConfigField`, `ConfigFieldType`, `ConfigValueKind`; `configurations: [ConfigField!]!` on `AgentHubEntry` and `AppHubEntry`. gqlgen regenerates with zero diff on a clean tree, so the generated diff is the schema change only. |
+| `AgentCert` | `pkg/agenthub/handler.go`, `pkg/apphub/handler.go` + `handler_test.go` (new) | List each chart's settings (`charts/<name>/values.yaml`). Invalid declarations are logged at Error and listed as []. |
+| `AgentCert` | `pkg/chaos_experiment/ops/install_config.go` + `_test.go` (new); `validation.go`; `service.go` | `validateInstallStepValues` (called from `ValidateExperimentStructure`); `resolveWorkflowParameter`; per-step model resolution; `isStaleSetArg` uses the shared list; run-pick annotation cleared on save; resolved model in the injection log. |
+| `AgentCert` | `pkg/chaos_experiment_run/handler/handler.go` | Annotation key derived from `ops.RunModelAliasAnnotation`; precedence comments updated. |
+| `AgentCert` | `web/src/api/entities/chartConfig.ts` (new), `agentHub.ts`, `appHub.ts`, `index.ts`; `api/core/{agenthub,apphub}/list*Categories.ts` | Types and query fields. |
+| `AgentCert` | `web/src/services/experiment/installStepSettings.ts` + `__tests__/{installStepSettings,installStepManifest}.test.ts` (new) | Pure read/write of `-values-json`, template `--set` adoption and removal, parameter resolution. |
+| `AgentCert` | `web/src/services/experiment/{KubernetesYamlService,ExperimentYamlService}.ts` | Merge instead of replace; selection carries its source args and parameters; `getConfiguredAgentModel`. |
+| `AgentCert` | `web/src/components/ChartSettingsForm/{ChartSettingsForm.tsx,chartSettingsFormUtils.ts,index.ts}` + test (new) | Generic Formik/uicore form: groups, advanced toggle (auto-opens on a submit error), Yup schema mirroring the server. Fields are named `setting<i>` because Formik reads dots as paths. |
+| `AgentCert` | `web/src/{views,controllers}/ExperimentCreationSelectInstallStep/*.tsx`, `views/ExperimentVisualBuilder/ExperimentVisualBuilder.tsx`, `views/ChaosStudio/ChaosStudio.tsx`, `strings/{strings.en.yaml,types.ts}` | Settings section in the install drawer; Apply vs Add; model picker sync (stable state setter passed down). |
+| `agent-charts` | `install-agent/{main.go,values.go,values_test.go}` | `-values-json` flag; `helmValuesArgs` shared by install and `helm template` adoption. |
+| `agent-charts` | `charts/{flash-agent,sre-agent-comprehensive,sre-agent-crewai}/values.yaml`, `README.md` | `configurations` blocks and the new defaults above; README section for chart authors. |
+| `app-charts` | `install-app/{main.go,values.go,values_test.go}`; `charts/{sock-shop,bookinfo,otel-demo}/values.yaml`, `README.md` | Same as for agents. |
+| monorepo root | `scripts/validate-chart-configurations.py` (new) | Render check: for each setting, `helm template` with the value changed through a values file; fails if the manifests do not change. Charts with dependencies are built in a temp copy. |
+
+**Verified.**
+- **Go server** (`golang:1.24-alpine`, rootless docker with the whole monorepo mounted):
+  - `go build ./...`, `go vet -composites=false` on the touched packages, and `go test ./...` across the whole server (23 packages ok).
+  - The new tests cover:
+    - declaration rejections (19 cases) and value rejections (16 cases);
+    - fail-closed for an unknown chart; path traversal; templated folder resolution;
+    - model precedence (platform < experiment < run) with exactly one `MODEL_ALIAS --set`;
+    - a non-platform `--set` surviving double injection.
+  - The repository test reports flash-agent 8, comprehensive 6, crewai 4, bookinfo 8, otel-demo 6 and sock-shop 8 settings.
+- **Installers** (`golang:1.22`): `go vet` and `go test` pass for both.
+- **Charts:**
+  - `scripts/validate-chart-configurations.py`: all nine charts ok, including otel-demo after `helm dependency build`.
+  - Negative check: declaring `CREWAI_TELEMETRY_OPT_OUT` on a scratch copy of the crewai chart fails as expected.
+  - `helm template flash-agent -f <json> --set agent.config.MODEL_ALIAS=platform-model` shows the JSON values applied, commas and colons intact, and the platform `--set` winning.
+- **Web:**
+  - The new jest suites pass (30 tests).
+  - The full suite shows 173/173 tests passing. 26 suites fail to compile on pre-existing type errors in untouched files (`strings/String.tsx` TS2698, uicore `IconProps` TS2322), from TS 4.9.5 / `@types` drift.
+  - `tsc` cannot type-check at HEAD because TS 4.9 cannot parse `@types/node@26`'s `ffi.d.ts`. With a scratch tsconfig without node types, the error set is identical before and after (357 = 357, zero new).
+  - eslint: 0 errors. The only remaining warning is a pre-existing non-null assertion.
+
+**Not runtime-tested.** No image was rebuilt and no experiment was run. To try it:
+- Rebuild graphql-server, web, install-agent, install-app and the hub bundle (`./scripts/setup.sh --restart --local-build`, with `INSTALL_*_IMAGE_SOURCE=local`).
+- Then add flash-agent in Chaos Studio, set `SCAN_INTERVAL`, save, run, and check `kubectl get cm flash-agent-metadata -o yaml`.
+
+**Durability:** all changes are in checked-in source (charts, installers, server, UI). They reach a cluster only after those five images are rebuilt. The server reads `values.yaml` from the hub bundle, and the installers install from their own baked chart copy, so both copies must come from the same commit.
+
+**Follow-ups, not done:**
+- **User-entered secrets** (needs a secret-reference design, not plain text in the manifest).
+- **List values** (otel-demo load generator).
+- **sre-agent-crewai, ciso-agent and sre-agent wiring:** they only pass named keys, so they need flash-agent's `envFrom` + loop before they can offer more.
+- **Existing quirks noticed, not fixed:**
+  - `contextInjection` in `agents.chartserviceversion.yaml` is never read.
+  - ChaosHub templates' `openaiModel`, `openaiBaseUrl` and `litellmUpstream` params are stripped by the server.
+  - flash-agent's injected `agent.config.OPENAI_API_KEY` is shadowed by the chart's `agent.secret.OPENAI_API_KEY` default.
+  - The injection log prints secret values in `args`.
+
+---
+
+### §134 — Install-step drawer redesign; Chaos Studio "Agent model" dropdown removed (2026-10-05, uncommitted, web image not rebuilt)
+
+**Context.** The user confirmed §133 works end to end (one run completed). They asked to (1) remove the Studio-header "Agent model" dropdown and (2) give the settings drawer a structured, modern layout. The screenshot showed:
+- a long flat list of fields;
+- a horizontal scrollbar;
+- the Add button cut off below the fold, because the drawer content was `height: 100%` underneath the title, so it overflowed `.leftPanel`.
+
+**Model dropdown removed.** The agent's model now lives only in its settings, as the `MODEL_ALIAS` field with `type: model`.
+- `views/ChaosStudio/ChaosStudio.tsx`: dropped `listAgentModelOptions`, the picker state and its effects, and the `<Select>`. `runChaosExperiment` no longer sends `modelAlias`.
+- `ChaosStudio.module.scss` + `.d.ts`: dropped `.modelSelector*`.
+- The §133 sync plumbing is gone: the `onAgentModelChange` prop in `ExperimentVisualBuilder.tsx`, `getConfiguredAgentModel` (concrete and abstract), and `AGENT_MODEL_SETTING_KEY`.
+- Server unchanged. `runChaosExperiment(modelAlias)` still exists for API callers, so the precedence is still: explicit run override > persisted run pick > experiment setting > env default.
+- Experiments saved with agent settings have the run-pick annotation cleared on save (§133). Legacy experiments without settings keep any old persisted pick, as before.
+
+**Drawer redesign** (`views/ExperimentCreationSelectInstallStep/ExperimentCreationSelectInstallStep.tsx` rewritten, with a new `.module.scss` + `.d.ts`):
+- **Layout:** a flex panel with a scrolling body (`overflow-x: hidden`) and a fixed footer, so Apply/Cancel are always visible. `components/Drawer/Drawer.tsx`: the `InstallStep` drawer grows from 760px to 880px.
+- **Three numbered sections:**
+  1. Agent under test / Target application, as a card grid with name, description, folder chip and settings count.
+  2. Namespace.
+  3. Settings.
+- **Editing an installed step** opens on its settings. Only the installed card is shown, with a Change button. The settings section is hidden rather than unmounted while choosing, so edits survive re-picking the same chart. Picking a different chart resets the form, which is keyed by folder.
+
+**Settings form** (`components/ChartSettingsForm/ChartSettingsForm.tsx` rewritten, with a new `.module.scss` + `.d.ts`):
+- One card per group, with a responsive grid that puts short inputs two to a row; text areas take the full row.
+- Each setting has a label (`*` when required), a "Reset" link shown only when the value differs from the chart default, and help text (description · "Allowed: 1 – 5").
+- A summary line ("N of M changed from the chart defaults" / "All M settings use the chart defaults") with "Reset all to defaults".
+- A collapsible "Advanced settings (n)" section that auto-opens on a submit error.
+- Booleans use `FormInput.Toggle`. The model select shows "Platform default (<isDefault model label>)", with the label passed from the controller.
+- New helpers in `chartSettingsFormUtils.ts`: `isSettingModified` (compares as text, because number inputs return numbers) and `rangeHint`.
+- `<Icon>` from `@harnessio/icons` is not used. In this checkout every `<Icon>` fails ts-jest type-checking (TS2322 `IconProps`, the same drift that breaks 26 existing suites), which would make the components untestable. The tick and chevron are drawn in CSS instead.
+
+**Strings** (`strings.en.yaml` + `types.ts`):
+- Added `advancedSettingsCount`, `allowedRange`, `changeSelection`, `installStepChooseAgent`, `installStepChooseApplication`, `installStepNamespaceHelp`, `resetAllToDefaults`, `resetSetting`, `resetToDefaultValue` (`{{{value}}}`), `settingsAllDefaults`, `settingsChangedFromDefaults`, `settingsCount` and `settingsGeneral`.
+- Removed §133's `showAdvancedSettings` / `hideAdvancedSettings`.
+- The duplicate-value check still reports only the 5 pre-existing errors.
+
+**Verified:**
+- **jest:** the five related suites pass, 38 tests.
+  - New: `views/ExperimentCreationSelectInstallStep/__tests__/ExperimentCreationSelectInstallStep.test.tsx` renders the real drawer, with `@strings` mocked because of the String.tsx drift. It covers:
+    - edit, change, Apply → `onSelect` payload;
+    - an out-of-range value is reported and nothing is applied;
+    - add from the catalogue → a chart with no settings → Add;
+    - per-setting reset and the summary line.
+  - Also new: `isSettingModified` and `rangeHint` tests.
+- **tsc** with the scratch tsconfig: 356 errors vs the 357 baseline, 0 new (one pre-existing `Icon` error disappeared with the rewrite).
+- **eslint:** 0 errors. The changed lines are prettier-clean, and the CRLF files kept CRLF.
+
+**Not runtime-tested** (the web image was not rebuilt).
+
+**Durability:** the changes are in source, and the web image must be rebuilt (`./scripts/setup.sh --restart --local-build`).
+
+**Open (proposed to the user, not started):** making settings dynamic, so users can add their own keys and repeated values come from the chart automatically instead of being listed one by one.

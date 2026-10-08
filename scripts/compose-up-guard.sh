@@ -37,6 +37,39 @@ warn() { echo -e "${YELLOW}[compose-guard]${NC} $*"; }
 
 command -v docker >/dev/null 2>&1 || { err "docker not found"; exit 1; }
 
+# Images: resolve every ${ACE_IMG_*} / ${*_IMAGE} in the compose files for
+# IMAGE_REGISTRY / the frozen agentcert/ copies (scripts/lib/registry.sh), and
+# log in when the registry needs credentials.
+# shellcheck source=lib/registry.sh
+source "${SCRIPT_DIR}/lib/registry.sh"
+registry_load "${REPO_ROOT}/.env" || exit 1
+compose_image_env "${REPO_ROOT}/.env" "${REPO_ROOT}/docker-compose.yml" "${REPO_ROOT}/compose/langfuse/docker-compose.yml"
+if [[ -n "${IMAGE_REGISTRY}" ]]; then
+    registry_login >/dev/null || warn "login to $(registry_host) failed — pulls may get 401"
+    # kind runs inside cluster-init with only docker.sock (no registry login):
+    # pull its node image on the host, where the login lives.
+    if [[ -n "${KIND_NODE_IMAGE:-}" ]]; then
+        docker pull -q "${KIND_NODE_IMAGE}" >/dev/null || warn "could not pull ${KIND_NODE_IMAGE}"
+    fi
+fi
+
+# Images graphql hands to the cluster (chaos infra, install-app/agent, Litmus
+# helper prefix) follow each *_IMAGE_SOURCE, exactly as on the Helm/kubectl
+# paths: graphql reads a resolved copy of .env (AGENTCERT_ENV_FILE, mode 600 —
+# it contains the .env secrets) and the LITMUS_CHAOS_* compose settings get the
+# resolved values.
+RESOLVED_ENV_REL=".tmp/ace-compose.env"
+mkdir -p "${REPO_ROOT}/.tmp"
+( umask 077
+  { cat "${REPO_ROOT}/.env"; echo
+    python3 "${SCRIPT_DIR}/lib/resolve_image_env.py" "${REPO_ROOT}/.env"; } > "${REPO_ROOT}/${RESOLVED_ENV_REL}" )
+export ACE_RESOLVED_ENV="${RESOLVED_ENV_REL}"
+for _k in CHAOS_OPERATOR_IMAGE CHAOS_RUNNER_IMAGE CHAOS_EXPORTER_IMAGE; do
+    _v="$(env_file_value "${_k}" "${REPO_ROOT}/${RESOLVED_ENV_REL}")"
+    [[ -n "${_v}" ]] && export "${_k}=${_v}"
+done
+unset _k _v
+
 # Every container_name docker-compose.yml (+ its `include`s) can create,
 # resolved through Compose's own config/interpolation so this list can never
 # drift out of sync with the compose file itself.

@@ -1,4 +1,8 @@
-FROM alpine:3.20
+# Base images: upstream names by default (plain `docker build` works anywhere).
+# scripts/build-and-push.sh, setup.sh and prepare-images.sh pass the copy from
+# IMAGE_REGISTRY / the frozen agentcert/ Docker Hub copies (scripts/lib/registry.sh).
+ARG ALPINE_IMAGE=alpine:3.20
+FROM ${ALPINE_IMAGE}
 
 ARG BUNDLE_CONTENT_SHA=unknown
 LABEL org.opencontainers.image.title="ACE local hub bundle" \

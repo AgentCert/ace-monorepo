@@ -97,9 +97,10 @@ spec:
     spec:
       securityContext:
         runAsUser: 0
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: web
-          image: {{ .Values.images.web }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.web "local" .Values.aceImagesLocal) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 2001

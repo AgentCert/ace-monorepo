@@ -14,6 +14,8 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 ## Quick Start
 
+> **Inside the Infosys network (JFrog) or outside it?** See [quickstart-registry.md](quickstart-registry.md): one `.env` setting, `IMAGE_REGISTRY`, switches every image between JFrog and Docker Hub.
+
 **Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh` checks them all first and prints the exact install command for anything missing.
 
 <div class="qs-steps">

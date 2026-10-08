@@ -155,9 +155,10 @@ spec:
     spec:
       serviceAccountName: metrics-server
       priorityClassName: system-cluster-critical
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: metrics-server
-          image: {{ .Values.images.metricsServer }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.metricsServer "local" .Values.runtimeImagesLocal) }}
           imagePullPolicy: {{ include "ace.infraPullPolicy" . }}
           args:
             - --cert-dir=/tmp

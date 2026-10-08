@@ -1,0 +1,159 @@
+# ACE image inventory — every container image the stack needs, in one place.
+#
+# Read by:
+#   scripts/check-registry-images.sh   is every image present in IMAGE_REGISTRY?
+#   scripts/mirror-images.sh           copies the "mirror" rows into IMAGE_REGISTRY
+#   scripts/build-and-push.sh          builds and pushes the "build" rows
+#
+# Naming rule (scripts/lib/registry.sh): an image is always written here by its
+# normal public name. When IMAGE_REGISTRY is set, the registry copy lives at
+# <IMAGE_REGISTRY>/<public name>, e.g.
+#   mongo:5                       -> infyartifactory.jfrog.io/docker-local/mongo:5
+#   quay.io/containers/x:v1       -> infyartifactory.jfrog.io/docker-local/quay.io/containers/x:v1
+# When IMAGE_REGISTRY is empty, images come from frozen Docker Hub copies under
+# IMAGE_MIRROR_NAMESPACE (default agentcert), with flat names because Docker Hub
+# repos cannot nest:
+#   mongo:5                       -> agentcert/mongo:5
+#   quay.io/containers/x:v1       -> agentcert/containers-x:v1
+# (IMAGE_MIRROR_NAMESPACE=none uses the upstream name as-is.)
+#
+# Columns, separated by "|":
+#   kind     build  = ACE-owned, built from this checkout by build-and-push.sh
+#            mirror = third-party, copied unchanged by mirror-images.sh
+#   group    platform | infra | workflow | agents | apps | build-base | local
+#   image    public name with tag
+#   context  build rows only: build context, relative to the repo root
+#   recipe   build rows only: Dockerfile path relative to the context, or a
+#            special recipe (hub-bundle). The Dockerfile may sit outside the
+#            context (compose/web/Dockerfile).
+#   flags    optional = not needed on the default AKS path; skipped unless
+#            --include-optional is passed
+#
+# When you add an image anywhere in the stack, add it here too.
+#
+# Deliberately NOT listed (never mirror these):
+#   quay.io/it-bench/hello-bench-invalid:1.0.0   INVALID_IMAGE — the fault needs the pull to fail
+#   arm64v8/busybox:1.36.1-musl                  INVALID_ARCH_IMAGE — same reason
+
+# ── ACE-owned images (built from this checkout) ──────────────────────────────
+build|platform|agentcert/agentcert-graphql:latest|AgentCert/chaoscenter/graphql|server/Dockerfile|
+build|platform|agentcert/agentcert-auth:latest|AgentCert/chaoscenter/authentication|Dockerfile|
+build|platform|agentcert/agentcert-web:latest|AgentCert/chaoscenter/web|../../../compose/web/Dockerfile|
+build|platform|agentcert/certifier:latest|certifier|Dockerfile|
+build|platform|agentcert/ace-hub-bundle:latest|.|hub-bundle|
+build|platform|agentcert/cluster-init:latest|compose/cluster-init|Dockerfile|
+build|infra|agentcert/litmusportal-subscriber:3.0.0|AgentCert/chaoscenter/subscriber|Dockerfile|
+build|workflow|agentcert/agentcert-install-app:latest|app-charts|install-app/Dockerfile|
+build|workflow|agentcert/agentcert-install-agent:latest|agent-charts|install-agent/Dockerfile|
+build|workflow|agentcert/itbench-experiment:dev|litmus-go|build/Dockerfile.itbench|
+build|agents|agentcert/agentcert-flash-agent:latest|agents/flash-agent|Dockerfile|
+build|agents|agentcert/sre-agent-comprehensive:latest|agents/sre-agent-comprehensive|Dockerfile|
+build|agents|agentcert/sre-agent-crewai:latest|agents/sre-agent-crewai|Dockerfile|
+build|agents|agentcert/agent-sidecar:latest|agent-sidecar|Dockerfile|
+
+# ── Platform (Helm chart "ace", docker-compose) ──────────────────────────────
+mirror|platform|litellm/litellm:v1.82.0-stable
+mirror|platform|mongo:5
+mirror|platform|postgres:17
+mirror|platform|redis:7
+mirror|platform|clickhouse/clickhouse-server:26.8
+mirror|platform|cgr.dev/chainguard/minio:latest
+mirror|platform|langfuse/langfuse:3
+mirror|platform|langfuse/langfuse-worker:3
+mirror|platform|busybox:1.36
+mirror|platform|registry.k8s.io/metrics-server/metrics-server:v0.7.2
+mirror|platform|python:3.11-slim
+
+# ── Chaos infrastructure (written by graphql from .env *_IMAGE values) ───────
+mirror|infra|litmuschaos/litmusportal-event-tracker:3.0.0
+mirror|infra|litmuschaos/workflow-controller:v3.3.1
+mirror|infra|litmuschaos/argoexec:v3.3.1
+mirror|infra|litmuschaos/chaos-operator:3.0.0
+mirror|infra|litmuschaos/chaos-runner:3.0.0
+mirror|infra|litmuschaos/chaos-exporter:3.0.0
+mirror|infra|quay.io/containers/kubernetes_mcp_server:v0.0.67
+mirror|infra|ghcr.io/pab1it0/prometheus-mcp-server:latest
+
+# ── Experiment workflows and fault pods (chaos-charts, litmus-go, graphql) ───
+mirror|workflow|litmuschaos/k8s:latest
+mirror|workflow|litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest
+mirror|workflow|litmuschaos/go-runner:latest
+mirror|workflow|litmuschaos/litmus-checker:latest
+mirror|workflow|litmuschaos/litmus-app-deployer:latest
+# alpine/k8s:1.29.2 is also the image of deploy/registry-secret-sync.yaml (kube-system).
+mirror|workflow|alpine/k8s:1.29.2
+mirror|workflow|alpine/k8s:1.18.2
+mirror|workflow|alpine:3.19
+mirror|workflow|alexeiled/stress-ng:latest-ubuntu
+mirror|workflow|gaiadocker/iproute2:latest
+mirror|workflow|ubuntu:16.04
+mirror|workflow|curlimages/curl:8.10.1
+mirror|workflow|registry.k8s.io/pause:3.9
+mirror|workflow|registry.access.redhat.com/ubi10-minimal:10.2-1782798957
+mirror|workflow|devth/alpine-bench:latest|||optional
+
+# ── Applications under test (app-charts: sock-shop, bookinfo, otel-demo) ─────
+mirror|apps|weaveworksdemos/front-end:0.3.12
+mirror|apps|weaveworksdemos/catalogue:0.3.5
+mirror|apps|weaveworksdemos/catalogue-db:0.3.0
+mirror|apps|weaveworksdemos/carts:0.4.8
+mirror|apps|weaveworksdemos/orders:0.4.7
+mirror|apps|weaveworksdemos/payment:0.4.3
+mirror|apps|weaveworksdemos/shipping:0.4.8
+mirror|apps|weaveworksdemos/user:0.4.7
+mirror|apps|weaveworksdemos/user-db:0.4.0
+mirror|apps|weaveworksdemos/queue-master:0.3.1
+mirror|apps|mongo:latest
+mirror|apps|rabbitmq:3.6.8
+mirror|apps|litmuschaos/chaos-exporter:1.13.3
+mirror|apps|prom/prometheus:v2.25.0
+mirror|apps|grafana/grafana:latest
+mirror|apps|registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+mirror|apps|registry.istio.io/release/examples-bookinfo-details-v1:1.20.3
+mirror|apps|registry.istio.io/release/examples-bookinfo-ratings-v1:1.20.3
+mirror|apps|registry.istio.io/release/examples-bookinfo-reviews-v1:1.20.3
+mirror|apps|registry.istio.io/release/examples-bookinfo-reviews-v2:1.20.3
+mirror|apps|registry.istio.io/release/examples-bookinfo-reviews-v3:1.20.3
+mirror|apps|registry.istio.io/release/examples-bookinfo-productpage-v1:1.20.3
+mirror|apps|registry.access.redhat.com/ubi9/ubi-minimal:latest
+mirror|apps|busybox:latest
+mirror|apps|ghcr.io/open-feature/flagd:v0.12.9
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-accounting
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-ad
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-cart
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-checkout
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-currency
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-email
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-flagd-ui
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-fraud-detection
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-frontend
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-frontend-proxy
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-image-provider
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-kafka
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-llm
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-load-generator
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-payment
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-product-catalog
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-product-reviews
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-quote
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-recommendation
+mirror|apps|ghcr.io/open-telemetry/demo:2.2.0-shipping
+mirror|apps|otel/opentelemetry-collector-contrib:0.151.0
+mirror|apps|postgres:17.6
+mirror|apps|valkey/valkey:9.0.1-alpine3.23
+
+# ── Dockerfile base images (needed to build ACE images inside Infosys) ───────
+mirror|build-base|python:3.12-slim
+mirror|build-base|golang:1.21-alpine
+mirror|build-base|golang:1.21-alpine3.19
+mirror|build-base|golang:1.22
+mirror|build-base|golang:1.24
+mirror|build-base|alpine:3.20
+mirror|build-base|node:20
+mirror|build-base|registry.access.redhat.com/ubi9/ubi-minimal:9.6
+mirror|build-base|registry.access.redhat.com/ubi8/ubi-minimal:8.10
+mirror|build-base|gcr.io/distroless/static-debian12:nonroot
+
+# ── Local-only (not used on AKS) ─────────────────────────────────────────────
+mirror|local|ollama/ollama:latest
+mirror|local|kindest/node:v1.35.0

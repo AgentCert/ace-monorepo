@@ -13,9 +13,10 @@ spec:
       labels:
         app: auth
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       initContainers:
         - name: wait-for-mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -44,7 +45,7 @@ spec:
                   optional: true
       containers:
         - name: auth
-          image: {{ .Values.images.auth }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.auth "local" .Values.aceImagesLocal) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 3000

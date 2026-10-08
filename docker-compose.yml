@@ -69,7 +69,7 @@ services:
   # ── Kubernetes provisioner (runs first; everything k8s-dependent waits) ─────
   cluster-init:
     build: ./compose/cluster-init
-    image: agentcert/cluster-init:latest
+    image: ${ACE_IMG_CLUSTER_INIT:-agentcert/cluster-init:latest}
     container_name: ace-cluster-init-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
     environment:
@@ -103,6 +103,8 @@ services:
       # every checkout on this host would otherwise share. Read directly by the
       # `kind` CLI's own environment — no entrypoint.sh change needed for this part.
       KIND_EXPERIMENTAL_DOCKER_NETWORK: kind-${ACE_INSTANCE_NAME:-unconfigured}
+      # kind node image (scripts/lib/registry.sh kind_node_image; empty = kind's default)
+      KIND_NODE_IMAGE: ${KIND_NODE_IMAGE:-}
     volumes:
       # Defaults to the shared root daemon's socket. Under a personal rootless
       # daemon (./scripts/setup.sh --rootless-docker), that script writes
@@ -139,7 +141,7 @@ services:
 
   # ── MongoDB (replSet rs0 + keyFile + root auth) ─────────────────────────────
   mongo-keyfile:
-    image: mongo:5
+    image: ${ACE_IMG_MONGO:-mongo:5}
     container_name: ace-mongo-keyfile-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     entrypoint:
@@ -151,7 +153,7 @@ services:
     restart: "no"
 
   mongo:
-    image: mongo:5
+    image: ${ACE_IMG_MONGO:-mongo:5}
     container_name: agentcert-mongo-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     # Bridge networking (NOT host) + a published port. The mongo image's
@@ -181,7 +183,7 @@ services:
   # One-shot: initialise the single-node replica set rs0 (idempotent).
   # On the compose network, so it reaches mongo by service name on 27017.
   mongo-init:
-    image: mongo:5
+    image: ${ACE_IMG_MONGO:-mongo:5}
     container_name: ace-mongo-init-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["mongo"]
     depends_on:
@@ -202,7 +204,7 @@ services:
     build:
       context: AgentCert/chaoscenter/authentication
       dockerfile: Dockerfile
-    image: agentcert/agentcert-auth:latest
+    image: ${ACE_IMG_AUTH:-agentcert/agentcert-auth:latest}
     container_name: agentcert-auth-${ACE_INSTANCE_NAME:-unconfigured}
     # Bridge networking (NOT host) + explicit ports: — same pattern as mongo/
     # certifier's `app` service above. Required for reachability under a
@@ -236,7 +238,7 @@ services:
     build:
       context: AgentCert/chaoscenter/graphql
       dockerfile: server/Dockerfile
-    image: agentcert/agentcert-graphql:latest
+    image: ${ACE_IMG_GRAPHQL:-agentcert/agentcert-graphql:latest}
     container_name: agentcert-graphql-${ACE_INSTANCE_NAME:-unconfigured}
     # Bridge networking (NOT host) + explicit ports:, same reasoning as auth
     # above. graphql additionally needs the `kind` network to reach the KinD
@@ -279,7 +281,9 @@ services:
       LITMUS_CHAOS_RUNNER_IMAGE: ${CHAOS_RUNNER_IMAGE:-litmuschaos/chaos-runner:3.0.0}
       LITMUS_CHAOS_EXPORTER_IMAGE: ${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}
       # godotenv.Overload re-reads this file at init, so .env stays authoritative.
-      AGENTCERT_ENV_FILE: /ace/.env
+      # scripts/compose-up-guard.sh points this at a copy of .env with every
+      # image resolved for IMAGE_REGISTRY (.tmp/ace-compose.env).
+      AGENTCERT_ENV_FILE: /ace/${ACE_RESOLVED_ENV:-.env}
       # The "internal" kubeconfig cluster-init writes (server: Docker-network
       # DNS name, not 127.0.0.1) — see KUBECONFIG_INTERNAL_OUT on cluster-init
       # and the `kind` network above. Required now that this container is on
@@ -352,25 +356,13 @@ services:
   web:
     build:
       context: AgentCert/chaoscenter/web
-      # Self-build dist (the repo ships no dist/); inline keeps it out of the
-      # AgentCert submodule.
-      dockerfile_inline: |
-        FROM node:20 AS builder
-        WORKDIR /web
-        COPY . .
-        RUN npm install --legacy-peer-deps
-        RUN npm run build
-        FROM registry.access.redhat.com/ubi8/ubi-minimal:8.10
-        RUN microdnf update --nodocs \
-            && microdnf module enable nginx:1.20 \
-            && microdnf install --nodocs nginx \
-            && microdnf clean all
-        COPY --from=builder /web/dist /opt/chaos
-        RUN chown 65534:0 -R /opt/chaos /var/log/nginx /etc/nginx
-        USER 65534
-        EXPOSE 2001
-        ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]
-    image: agentcert/agentcert-web:latest
+      # Self-build dist (the repo ships no dist/); the Dockerfile lives outside
+      # the AgentCert submodule.
+      dockerfile: ../../../compose/web/Dockerfile
+      args:
+        NODE_IMAGE: ${ACE_IMG_NODE:-node:20}
+        UBI_MINIMAL_IMAGE: ${ACE_IMG_UBI8_MINIMAL:-registry.access.redhat.com/ubi8/ubi-minimal:8.10}
+    image: ${ACE_IMG_WEB:-agentcert/agentcert-web:latest}
     container_name: agentcert-web-${ACE_INSTANCE_NAME:-unconfigured}
     # Bridge networking (NOT host) + explicit ports: — same reasoning as auth/
     # graphql above. web's nginx proxies to auth/graphql by Docker DNS now
@@ -404,7 +396,7 @@ services:
   # rootless daemon (./scripts/setup.sh --rootless-docker) gets its own
   # user-scoped spec under $HOME/.config/cdi — neither path touches the other.
   ollama:
-    image: ollama/ollama:latest
+    image: ${ACE_IMG_OLLAMA:-ollama/ollama:latest}
     container_name: ollama-${ACE_INSTANCE_NAME:-unconfigured}
     profiles: ["ollama"]
     ports:
@@ -461,7 +453,7 @@ services:
   # inside a host-mounted volume owned by root. This service pre-creates the
   # workspace tree and chowns it to uid 1000 before the certifier starts.
   workspace-init:
-    image: python:3.11-slim
+    image: ${ACE_IMG_PYTHON:-python:3.11-slim}
     container_name: ace-workspace-init-${ACE_INSTANCE_NAME:-unconfigured}
     user: root
     command: >
@@ -482,7 +474,7 @@ services:
       context: ./certifier
       dockerfile: Dockerfile
       target: runtime
-    image: ${CERTIFIER_IMAGE:-certifier:latest}
+    image: ${CERTIFIER_IMAGE:-agentcert/certifier:latest}
     container_name: certifier_app_${ACE_INSTANCE_NAME:-unconfigured}
     restart: unless-stopped
     depends_on:

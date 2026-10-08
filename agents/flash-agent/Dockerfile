@@ -1,5 +1,9 @@
 # Build stage
-FROM python:3.12-slim AS builder
+# Base images: upstream names by default (plain `docker build` works anywhere).
+# scripts/build-and-push.sh, setup.sh and prepare-images.sh pass the copy from
+# IMAGE_REGISTRY / the frozen agentcert/ Docker Hub copies (scripts/lib/registry.sh).
+ARG PYTHON_IMAGE=python:3.12-slim
+FROM ${PYTHON_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -7,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Final stage
-FROM python:3.12-slim
+FROM ${PYTHON_IMAGE}
 
 # Create non-root user
 RUN groupadd -g 1000 agent && useradd -u 1000 -g agent -m agent

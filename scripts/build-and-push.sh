@@ -2,28 +2,66 @@
 set -euo pipefail
 
 # =============================================================================
-# Build & Push All Docker Images to Docker Hub
+# Build & Push ACE's own Docker images
 # =============================================================================
-# Builds all AgentCert component images and pushes them to Docker Hub.
-# Reads DOCKERHUB_USERNAME and DOCKERHUB_TOKEN from the root .env file.
+# Builds every "build" row in deploy/images.txt from this checkout and pushes it
+# to IMAGE_REGISTRY (naming rule: scripts/lib/registry.sh).
+#
+#   IMAGE_REGISTRY set    -> push to <IMAGE_REGISTRY>/agentcert/<image>
+#   IMAGE_REGISTRY empty  -> push to Docker Hub as agentcert/<image> (unchanged
+#                            open-source behaviour)
+# Both log in with REGISTRY_USERNAME / REGISTRY_PASSWORD (legacy JFROG_* /
+# DOCKERHUB_* keys are read as a fallback, see scripts/lib/registry.sh).
+#
+# Every image is pushed twice: its normal tag (e.g. :latest) and a fixed tag
+# naming the source revision (e.g. :58512cc70a1b, or :58512cc70a1b-dirty when
+# the source had uncommitted changes). The revision is also stamped as the
+# org.opencontainers.image.revision label, which check-registry-images.sh uses
+# to spot registry copies that are older than the checkout.
 #
 # Usage:
 #   ./scripts/build-and-push.sh [--env-file PATH] [--local] [--kind-load]
+#                               [--only REGEX] [--allow-build-cache]
 #
 # Options:
-#   --env-file PATH   Path to env file (default: <repo-root>/.env)
-#   --local           Build only — skip Docker Hub login and push
-#   --kind-load       After building, load each image into the local KinD cluster
-#                     (reads KIND_CLUSTER_NAME / ACE_INSTANCE_NAME from .env;
-#                      implies --local)
+#   --env-file PATH       Path to env file (default: <repo-root>/.env)
+#   --local               Build only — skip login and push
+#   --kind-load           After building, load each image into the local KinD
+#                         cluster (reads KIND_CLUSTER_NAME / ACE_INSTANCE_NAME
+#                         from .env; implies --local)
+#   --only REGEX          Only images whose name matches REGEX
+#                         (e.g. --only 'graphql|auth')
+#   --allow-build-cache   Reuse Docker's build cache. Off by default: BuildKit
+#                         has been seen replaying stale COPY/go-build layers
+#                         after the source changed (same reason setup.sh builds
+#                         with --no-cache).
+#   --committed-only      When a source has uncommitted changes, build its
+#                         committed HEAD instead (exported to .tmp/build-src;
+#                         the working tree is not touched). Use for releases.
+#   --reuse-local         Skip the build when the local image was already built
+#                         from the same source revision (its
+#                         org.opencontainers.image.revision label matches), and
+#                         just tag + push it. Pushes the identical image to a
+#                         second registry without rebuilding.
+#
+# The revision tag is pushed before the moving tag. If the registry refuses to
+# overwrite an existing tag (JFrog without Delete/Overwrite permission), the
+# new build is still available under its revision tag and the summary says so.
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/registry.sh
+source "${SCRIPT_DIR}/lib/registry.sh"
 
 ENV_FILE="${REPO_ROOT}/.env"
+IMAGES_FILE="${REPO_ROOT}/deploy/images.txt"
 LOCAL_ONLY=false
 KIND_LOAD=false
+ONLY=""
+NO_CACHE_FLAG="--no-cache"
+COMMITTED_ONLY=false
+REUSE_LOCAL=false
 
 # Colors
 RED='\033[0;31m'
@@ -55,8 +93,24 @@ while [[ $# -gt 0 ]]; do
             LOCAL_ONLY=true
             shift
             ;;
+        --only)
+            ONLY="${2:-}"
+            shift 2
+            ;;
+        --allow-build-cache)
+            NO_CACHE_FLAG=""
+            shift
+            ;;
+        --committed-only)
+            COMMITTED_ONLY=true
+            shift
+            ;;
+        --reuse-local)
+            REUSE_LOCAL=true
+            shift
+            ;;
         --help|-h)
-            head -18 "$0" | tail -16
+            sed -n '4,45p' "$0"
             exit 0
             ;;
         *)
@@ -73,10 +127,17 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     exit 1
 fi
 
+if [[ ! -f "${IMAGES_FILE}" ]]; then
+    log_error "Image inventory not found: ${IMAGES_FILE}"
+    exit 1
+fi
+
 if ! command -v docker >/dev/null 2>&1; then
     log_error "docker not found"
     exit 1
 fi
+
+registry_load "${ENV_FILE}" || exit 1
 
 # ---------------------------------------------------------------------------
 # KinD cluster name (used with --kind-load)
@@ -136,52 +197,43 @@ restart_deployment() {
 }
 
 # ---------------------------------------------------------------------------
-# Docker Hub login (skipped in --local mode)
+# Registry login (skipped in --local mode)
 # ---------------------------------------------------------------------------
 if [[ "${LOCAL_ONLY}" == false ]]; then
-    DH_USER="$(grep -m1 '^DOCKERHUB_USERNAME=' "${ENV_FILE}" | cut -d= -f2-)"
-    DH_TOKEN="$(grep -m1 '^DOCKERHUB_TOKEN=' "${ENV_FILE}" | cut -d= -f2-)"
-
-    if [[ -z "${DH_USER}" || -z "${DH_TOKEN}" ]]; then
-        log_error "DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set in ${ENV_FILE}"
+    # Pushing always needs credentials: for IMAGE_REGISTRY, or for Docker Hub
+    # when it is empty (REGISTRY_USERNAME / REGISTRY_PASSWORD).
+    if ! registry_has_credentials; then
+        log_error "REGISTRY_USERNAME / REGISTRY_PASSWORD are not set in ${ENV_FILE} (needed to push to ${IMAGE_REGISTRY:-Docker Hub})"
         exit 1
     fi
-
-    echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin || {
-        log_error "Docker Hub login failed"
-        exit 1
-    }
-    log_success "Logged in to Docker Hub as ${DH_USER}"
+    registry_login || { log_error "Login to ${IMAGE_REGISTRY:-Docker Hub} failed"; exit 1; }
+    log_success "Pushing to ${IMAGE_REGISTRY:-Docker Hub}"
 fi
 
 # ---------------------------------------------------------------------------
-# Image definitions: (name, context_dir, dockerfile, tag)
-#
-# `tag` is optional and defaults to "latest" when omitted (the 4th field is
-# simply absent from most entries below). itbench-experiment is the one
-# exception: every chaos-charts/faults/itbench/*/fault.yaml hardcodes the
-# image reference as "agentcert/itbench-experiment:dev" (not :latest), so it
-# must be built/pushed under that exact tag or nothing referencing it would
-# actually resolve. NOTE: this entry exists so the image *can* be published
-# on request, but ITBENCH_EXPERIMENT_IMAGE_SOURCE currently defaults to
-# `local` (scripts/prepare-images.sh) precisely because this has never
-# actually been pushed to Docker Hub — see OPEN_WEIGHT_CERTIFICATION_HANDOFF.md
-# for the exact steps to flip that over once it has been.
+# Builders. Each builds the plain local name (e.g. agentcert/certifier:latest,
+# which is what KinD clusters reference today) with the revision label.
 # ---------------------------------------------------------------------------
-declare -a IMAGES=(
-    "agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile"
-    # Every certified agent in AgentHub must have a published image.
-    "agentcert/sre-agent-comprehensive|${REPO_ROOT}/agents/sre-agent-comprehensive|Dockerfile"
-    "agentcert/sre-agent-crewai|${REPO_ROOT}/agents/sre-agent-crewai|Dockerfile"
-    "agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile"
-    "agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile"
-    "agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile"
-    "agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile"
-    "agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile"
-    "agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile"
-    "agentcert/agentcert-web|${REPO_ROOT}/AgentCert/chaoscenter/web|Dockerfile"
-    "agentcert/itbench-experiment|${REPO_ROOT}/litmus-go|build/Dockerfile.itbench|dev"
-)
+
+# Plain Dockerfile build. $3 is the Dockerfile's path (it may live outside the
+# build context, e.g. compose/web/Dockerfile); base images come from the
+# registry (dockerfile_base_image_args).
+build_dockerfile() {
+    local image="$1" ctx="$2" dockerfile="$3" revision="$4"
+    # shellcheck disable=SC2086  # NO_CACHE_FLAG is intentionally word-split (may be empty)
+    docker_build_resolved "${dockerfile}" ${NO_CACHE_FLAG} \
+        --label "${ACE_REVISION_LABEL}=${revision}" \
+        -t "${image}" "${ctx}"
+}
+
+# Hub bundle: the chart/fault trees packed into one image (shared recipe in
+# scripts/lib/registry.sh, also used by scripts/prepare-images.sh).
+build_hub_bundle() {
+    local image="$1" revision="$2"
+    # shellcheck disable=SC2086
+    hub_bundle_build "${REPO_ROOT}" "${image}" ${NO_CACHE_FLAG} \
+        --label "${ACE_REVISION_LABEL}=${revision}"
+}
 
 # ---------------------------------------------------------------------------
 # Build (+ optional push / kind-load)
@@ -193,38 +245,125 @@ if [[ "${KIND_LOAD}" == true ]]; then
 elif [[ "${LOCAL_ONLY}" == true ]]; then
     echo -e "${CYAN}  Build Only (local)${NC}"
 else
-    echo -e "${CYAN}  Build & Push All Images${NC}"
+    echo -e "${CYAN}  Build & Push to ${IMAGE_REGISTRY:-Docker Hub}${NC}"
 fi
 echo -e "${CYAN}======================================${NC}"
 echo ""
 
 FAILED=()
+PUSHED=()
+NOT_OVERWRITTEN=()
 RESTARTED_DEPLOYMENTS=()
 
-for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r img_name context_dir dockerfile tag <<< "$entry"
-    tag="${tag:-latest}"
-    full_ref="${img_name}:${tag}"
+# Tag the local image as $2 and push it. Sets PUSH_OVERWRITE_DENIED=true when
+# the registry refused because the tag already exists and may not be replaced.
+PUSH_OVERWRITE_DENIED=false
+push_ref() {
+    local image="$1" ref="$2" out rc
+    PUSH_OVERWRITE_DENIED=false
+    if [[ "${ref}" != "${image}" ]]; then
+        docker tag "${image}" "${ref}" || return 1
+    fi
+    log_info "Pushing ${ref} ..."
+    out="$(mktemp)"
+    docker push "${ref}" 2>&1 | tee "${out}"
+    rc="${PIPESTATUS[0]}"
+    if [[ "${rc}" -ne 0 ]] && grep -qiE 'permission to overwrite|overwrite.*(not allowed|forbidden)' "${out}"; then
+        PUSH_OVERWRITE_DENIED=true
+    fi
+    rm -f "${out}"
+    return "${rc}"
+}
 
-    if [[ ! -f "${context_dir}/${dockerfile}" ]]; then
-        log_warn "Dockerfile not found: ${context_dir}/${dockerfile} — skipping ${img_name}"
-        FAILED+=("${img_name} (no Dockerfile)")
-        continue
+# Export the committed (HEAD) state of a build context into a scratch dir, so
+# an image can be built from committed code while the working tree has
+# uncommitted changes. Prints the export dir.
+export_committed_context() {
+    local ctx_dir="$1" name="$2" prefix top out
+    prefix="$(git -C "${ctx_dir}" rev-parse --show-prefix)" || return 1
+    top="$(git -C "${ctx_dir}" rev-parse --show-toplevel)" || return 1
+    out="${REPO_ROOT}/.tmp/build-src/${name}"
+    rm -rf "${out}" && mkdir -p "${out}" || return 1
+    # Run from the repo top level: from a subdirectory, git archive also
+    # filters by that subdirectory's path, which yields an empty archive.
+    git -C "${top}" archive --format=tar "HEAD:${prefix%/}" | tar -x -C "${out}" || return 1
+    printf '%s' "${out}"
+}
+
+while IFS='|' read -r _kind _group image ctx recipe _flags; do
+    img_name="${image%:*}"
+    [[ -n "${ONLY}" && ! "${image}" =~ ${ONLY} ]] && continue
+    context_dir="${REPO_ROOT}/${ctx}"
+    revision="$(source_revision "${REPO_ROOT}" "${ctx}" "${recipe}")"
+
+    # --reuse-local: the image already built from exactly this revision is
+    # pushed as-is. With --committed-only that is the committed revision.
+    target_revision="${revision}"
+    if [[ "${COMMITTED_ONLY}" == true && "${revision}" == *-dirty \
+          && "${recipe}" != hub-bundle ]]; then
+        target_revision="${revision%-dirty}"
+    fi
+    if [[ "${REUSE_LOCAL}" == true ]] \
+       && [[ "$(docker image inspect "${image}" --format "{{index .Config.Labels \"${ACE_REVISION_LABEL}\"}}" 2>/dev/null)" == "${target_revision}" ]]; then
+        revision="${target_revision}"
+        log_success "${image}: local image already built from ${revision} — reusing it (no rebuild)"
+        reused=true
+    else
+        reused=false
     fi
 
-    log_info "Building ${full_ref} ..."
-    if docker build -t "${full_ref}" -f "${context_dir}/${dockerfile}" "${context_dir}"; then
-        log_success "Built: ${full_ref}"
+    if [[ "${reused}" == false && "${COMMITTED_ONLY}" == true && "${revision}" == *-dirty ]]; then
+        case "${recipe}" in
+            hub-bundle)
+                log_warn "${img_name}: --committed-only is not supported for recipe '${recipe}' — building the working tree"
+                ;;
+            *)
+                if export_dir="$(export_committed_context "${context_dir}" "${img_name//\//_}")"; then
+                    log_info "${img_name}: source has uncommitted changes — building committed HEAD from ${export_dir}"
+                    context_dir="${export_dir}"
+                    revision="${revision%-dirty}"
+                else
+                    log_error "Could not export committed source for ${img_name}"
+                    FAILED+=("${img_name} (export)")
+                    continue
+                fi
+                ;;
+        esac
+    fi
+
+    build_ok=false
+    if [[ "${reused}" == true ]]; then
+        build_ok=true
     else
+        log_info "Building ${image} (revision ${revision}) ..."
+        case "${recipe}" in
+            hub-bundle)
+                build_hub_bundle "${image}" "${revision}" && build_ok=true
+                ;;
+            *)
+                # The Dockerfile path is relative to the checkout's context
+                # (not an exported --committed-only copy), as it may sit outside it.
+                dockerfile_path="$(realpath -m "${REPO_ROOT}/${ctx}/${recipe}")"
+                if [[ ! -f "${dockerfile_path}" ]]; then
+                    log_warn "Dockerfile not found: ${dockerfile_path} — skipping ${img_name}"
+                    FAILED+=("${img_name} (no Dockerfile)")
+                    continue
+                fi
+                build_dockerfile "${image}" "${context_dir}" "${dockerfile_path}" "${revision}" && build_ok=true
+                ;;
+        esac
+    fi
+    if [[ "${build_ok}" != true ]]; then
         log_error "Build failed: ${img_name}"
         FAILED+=("${img_name} (build)")
         continue
     fi
+    if [[ "${reused}" == false ]]; then log_success "Built: ${image}"; fi
 
     if [[ "${KIND_LOAD}" == true ]]; then
-        log_info "Loading ${full_ref} into KinD cluster ${KIND_CLUSTER} ..."
-        if kind load docker-image "${full_ref}" --name "${KIND_CLUSTER}"; then
-            log_success "Loaded: ${full_ref}"
+        log_info "Loading ${image} into KinD cluster ${KIND_CLUSTER} ..."
+        if kind load docker-image "${image}" --name "${KIND_CLUSTER}"; then
+            log_success "Loaded: ${image}"
             # Restart the matching deployment so running pods immediately use the
             # new image — kind load replaces the containerd cache entry but
             # IfNotPresent won't restart already-running pods on its own.
@@ -234,17 +373,40 @@ for entry in "${IMAGES[@]}"; do
             FAILED+=("${img_name} (kind-load)")
         fi
     elif [[ "${LOCAL_ONLY}" == false ]]; then
-        log_info "Pushing ${full_ref} ..."
-        if docker push "${full_ref}"; then
-            log_success "Pushed: ${full_ref}"
+        dst="$(registry_ref "${image}")"
+        dst_rev="${dst%:*}:${revision}"
+        # Revision tag first: it is new on every source change, so it lands
+        # even on registries that refuse to overwrite an existing tag (JFrog
+        # without Delete/Overwrite permission). The moving tag (:latest etc.)
+        # is pushed second.
+        # A revision tag the registry refuses to replace is fine when it already
+        # holds a build of the same revision (e.g. pushed by an earlier run).
+        rev_ok=false
+        if push_ref "${image}" "${dst_rev}"; then
+            rev_ok=true
+        elif [[ "${PUSH_OVERWRITE_DENIED}" == true && "$(remote_revision "${dst_rev}")" == "${revision}" ]]; then
+            log_warn "${dst_rev} already exists with a build of revision ${revision} — keeping it"
+            rev_ok=true
+        fi
+        if [[ "${rev_ok}" == true ]]; then
+            if push_ref "${image}" "${dst}"; then
+                log_success "Pushed: ${dst} and :${revision}"
+                PUSHED+=("${dst} (+ :${revision})")
+            elif [[ "${PUSH_OVERWRITE_DENIED}" == true ]]; then
+                log_warn "Pushed ${dst_rev}, but ${dst} already exists and this account may not overwrite it"
+                NOT_OVERWRITTEN+=("${dst} (new build is at :${revision})")
+            else
+                log_error "Push failed: ${dst}"
+                FAILED+=("${img_name} (push)")
+            fi
         else
-            log_error "Push failed: ${img_name}"
+            log_error "Push failed: ${dst_rev}"
             FAILED+=("${img_name} (push)")
         fi
     fi
 
     echo ""
-done
+done < <(inventory_rows "${IMAGES_FILE}" build)
 
 # ---------------------------------------------------------------------------
 # Wait for restarted deployments to finish rolling out
@@ -252,7 +414,7 @@ done
 if [[ ${#RESTARTED_DEPLOYMENTS[@]} -gt 0 ]]; then
     echo ""
     log_info "Waiting for rollouts to complete ..."
-    for target in "${RESTARTED_DEPLOYMENTS[@]}"; do
+    for target in ${RESTARTED_DEPLOYMENTS[@]+"${RESTARTED_DEPLOYMENTS[@]}"}; do
         ns="${target%%/*}"
         deploy="${target##*/}"
         if kubectl rollout status "deployment/${deploy}" -n "${ns}" --timeout=120s; then
@@ -268,11 +430,21 @@ fi
 # Summary
 # ---------------------------------------------------------------------------
 echo -e "${CYAN}======================================${NC}"
+for p in ${PUSHED[@]+"${PUSHED[@]}"}; do
+    echo -e "    ${GREEN}✓${NC} $p"
+done
+if [[ ${#NOT_OVERWRITTEN[@]} -gt 0 ]]; then
+    echo -e "${YELLOW}  Existing tags NOT overwritten (account lacks overwrite permission):${NC}"
+    for p in ${NOT_OVERWRITTEN[@]+"${NOT_OVERWRITTEN[@]}"}; do
+        echo -e "    ${YELLOW}!${NC} $p"
+    done
+    FAILED+=("${#NOT_OVERWRITTEN[@]} moving tag(s) not overwritten — see above")
+fi
 if [[ ${#FAILED[@]} -eq 0 ]]; then
     echo -e "${GREEN}  All images built successfully!${NC}"
 else
     echo -e "${YELLOW}  Completed with failures:${NC}"
-    for f in "${FAILED[@]}"; do
+    for f in ${FAILED[@]+"${FAILED[@]}"}; do
         echo -e "    ${RED}✗${NC} $f"
     done
 fi

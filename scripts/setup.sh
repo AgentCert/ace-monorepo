@@ -52,6 +52,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -P "${SCRIPT_DIR}/.." && pwd -P)"
 ENV_FILE="${REPO_ROOT}/.env"
+# Shared image-registry naming rule + login (same code the build/mirror/check
+# scripts use). Only defines functions; nothing runs on source.
+# shellcheck source=lib/registry.sh
+source "${SCRIPT_DIR}/lib/registry.sh"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 # Force UTF-8 as Python's default text encoding (PEP 540) for every embedded
@@ -757,6 +761,71 @@ for _mcp in "K8S_MCP_URL|kubernetes-mcp-server|8081" "PROM_MCP_URL|prometheus-mc
 done
 unset _mcp _mcp_key _mcp_svc _mcp_port
 
+# Image registry settings now live in one place: IMAGE_REGISTRY (+
+# REGISTRY_USERNAME / REGISTRY_PASSWORD, IMAGE_PULL_SECRET_NAME), and every
+# *_IMAGE_SOURCE is "local" or "registry" (docs/setup/registry-migration-plan.md).
+# Migrate .env files written with the older JFROG_* / DOCKERHUB_* keys and the
+# jfrog|dockerhub source values. Old keys are left in place (unused), so this
+# is safe to run on every setup/restart and never loses a value.
+_legacy_jfrog_src=0
+for _src_key in INSTALL_APP_IMAGE_SOURCE INSTALL_AGENT_IMAGE_SOURCE LITMUS_IMAGES_SOURCE \
+                SRE_AGENTS_IMAGE_SOURCE ITBENCH_EXPERIMENT_IMAGE_SOURCE; do
+    case "$(cur "${_src_key}")" in
+        jfrog)     _legacy_jfrog_src=1; set_env "${_src_key}" registry
+                   ok "Migrated ${_src_key}=jfrog to registry (pulls from IMAGE_REGISTRY)" ;;
+        dockerhub) set_env "${_src_key}" registry
+                   ok "Migrated ${_src_key}=dockerhub to registry (pulls from IMAGE_REGISTRY, or Docker Hub when it is empty)" ;;
+    esac
+done
+_legacy_jfrog_repo=""
+if [[ -n "$(cur JFROG_HOST)" ]]; then
+    _legacy_jfrog_repo="$(cur JFROG_HOST)/$(cur JFROG_REGISTRY_PATH)"
+    _legacy_jfrog_repo="${_legacy_jfrog_repo%/}"
+fi
+_image_registry="$(cur IMAGE_REGISTRY)"
+if [[ -z "${_image_registry}" && "${_legacy_jfrog_src}" -eq 1 && -n "${_legacy_jfrog_repo}" ]]; then
+    set_env IMAGE_REGISTRY "${_legacy_jfrog_repo}"
+    ok "Set IMAGE_REGISTRY=${_legacy_jfrog_repo} (from JFROG_HOST/JFROG_REGISTRY_PATH)"
+elif [[ "${_image_registry}" == *jfrog.io && "${_image_registry}" != */* && -n "$(cur JFROG_REGISTRY_PATH)" ]]; then
+    # A bare JFrog host cannot work: pulls need host/<repository>.
+    set_env IMAGE_REGISTRY "${_image_registry}/$(cur JFROG_REGISTRY_PATH)"
+    ok "Set IMAGE_REGISTRY=${_image_registry}/$(cur JFROG_REGISTRY_PATH) (a JFrog host needs its repository path)"
+fi
+_image_registry="$(cur IMAGE_REGISTRY)"
+# Credentials: JFROG_* belonged to the private registry, DOCKERHUB_* to Docker
+# Hub — copy whichever matches the current IMAGE_REGISTRY setting.
+if [[ -n "${_image_registry}" ]]; then _legacy_user_key=JFROG_USER; _legacy_pass_key=JFROG_TOKEN
+else _legacy_user_key=DOCKERHUB_USERNAME; _legacy_pass_key=DOCKERHUB_TOKEN; fi
+if value_is_unset "$(cur REGISTRY_USERNAME)" && ! value_is_unset "$(cur "${_legacy_user_key}")" \
+   && ! value_is_unset "$(cur "${_legacy_pass_key}")"; then
+    set_env REGISTRY_USERNAME "$(cur "${_legacy_user_key}")"
+    set_env REGISTRY_PASSWORD "$(cur "${_legacy_pass_key}")"
+    ok "Copied ${_legacy_user_key}/${_legacy_pass_key} into REGISTRY_USERNAME/REGISTRY_PASSWORD"
+fi
+[[ -z "$(cur IMAGE_PULL_SECRET_NAME)" ]] && set_env IMAGE_PULL_SECRET_NAME registry-pull
+# The old jfrog flow stored a registry here; it is now derived at deploy time
+# (scripts/lib/resolve_image_env.py), and a stale value would keep prefixing
+# Litmus helper images after IMAGE_REGISTRY changes.
+case "$(cur LITMUS_HELPER_IMAGES_REGISTRY_PREFIX)" in
+    ""|docker.io|docker.io/) ;;
+    *) set_env LITMUS_HELPER_IMAGES_REGISTRY_PREFIX ""
+       ok "Cleared LITMUS_HELPER_IMAGES_REGISTRY_PREFIX (now derived from IMAGE_REGISTRY at deploy time)" ;;
+esac
+# The old jfrog flow wrote full registry paths into these two keys. They now
+# hold public names; the registry is prepended at deploy time.
+for _img_key in INSTALL_APPLICATION_IMAGE INSTALL_AGENT_IMAGE; do
+    _img_val="$(cur "${_img_key}")"
+    for _legacy_prefix in "${_image_registry}" "${_legacy_jfrog_repo}"; do
+        if [[ -n "${_legacy_prefix}" && "${_img_val}" == "${_legacy_prefix}/"* ]]; then
+            set_env "${_img_key}" "${_img_val#"${_legacy_prefix}/"}"
+            ok "Set ${_img_key} to its public name (${_img_val#"${_legacy_prefix}/"}); the registry is added at deploy time"
+            break
+        fi
+    done
+done
+unset _legacy_jfrog_src _legacy_jfrog_repo _image_registry _legacy_user_key _legacy_pass_key \
+      _src_key _img_key _img_val _legacy_prefix
+
 # KinD's `kind load docker-image` exports each local image through `docker save`
 # before importing it into the node. By default kind stages that tarball in
 # /tmp, which is often on the host root filesystem even when Docker's own
@@ -941,6 +1010,15 @@ _resolve_monitored_image_digests() {
         [[ -n "${d}" ]] || d="$(timeout 25 docker manifest inspect "${i}" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')" || d=""
         printf '%s\t%s\n' "${i}" "${d}"
     }
+    # Key each entry by the image the cluster actually pulls (IMAGE_REGISTRY /
+    # frozen Docker Hub copy, scripts/lib/registry.sh), so switching registry
+    # never compares digests of two different copies.
+    local resolved=""
+    for img in ${imgs}; do
+        resolved+="$(IMAGE_REGISTRY="$(registry_normalize "$(cur IMAGE_REGISTRY)")" \
+                     IMAGE_MIRROR_NAMESPACE="$(cur IMAGE_MIRROR_NAMESPACE)" registry_ref "${img}") "
+    done
+    imgs="${resolved}"
     for img in ${imgs}; do _one_image_digest "${img}" & done
     wait || true
     unset -f _one_image_digest
@@ -1118,7 +1196,7 @@ declare -a ALL_BUILD_IMAGES=(
     "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
     "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
     "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
-    "8|web|agentcert/agentcert-web|||compose:web"
+    "8|web|agentcert/agentcert-web|${REPO_ROOT}/AgentCert/chaoscenter/web|../../../compose/web/Dockerfile|direct"
     "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
     "10|subscriber|${_SUBSCRIBER_IMAGE_TAG}|${REPO_ROOT}/AgentCert/chaoscenter/subscriber|Dockerfile|direct"
     "11|sre-agent-comprehensive|agentcert/sre-agent-comprehensive|${REPO_ROOT}/agents/sre-agent-comprehensive|Dockerfile|direct"
@@ -1153,13 +1231,13 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
                 SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
                 ;;
             push)
-                DH_USER="$(cur DOCKERHUB_USERNAME)"
-                DH_TOKEN="$(cur DOCKERHUB_TOKEN)"
+                DH_USER="$(cur REGISTRY_USERNAME)"
+                DH_TOKEN="$(cur REGISTRY_PASSWORD)"
                 if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
                     DO_BUILD=1
                     SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
                 else
-                    warn "PLATFORM_IMAGE_SOURCE=push but DOCKERHUB_USERNAME/TOKEN not set — skipping build."
+                    warn "PLATFORM_IMAGE_SOURCE=push but REGISTRY_USERNAME/REGISTRY_PASSWORD not set — skipping build."
                 fi
                 ;;
         esac
@@ -1271,6 +1349,38 @@ ask() {
     printf '%s' "${reply:-$def}"
 }
 
+# Map a wizard answer to an image source. "r" = registry; the older "d"
+# (Docker Hub) and "j" (JFrog) answers mean the same thing now, because which
+# registry is decided by IMAGE_REGISTRY alone. Anything else = local.
+image_source_choice() {
+    case "${1,,}" in
+        r|d|j|registry) printf 'registry' ;;
+        *)              printf 'local' ;;
+    esac
+}
+
+# Where "push" / "registry" go, for prompt labels.
+_PUSH_TARGET_LABEL="$(cur IMAGE_REGISTRY)"; _PUSH_TARGET_LABEL="${_PUSH_TARGET_LABEL:-Docker Hub}"
+
+# Ask for the image registry once — the single place a registry is chosen.
+# Sets _IMAGE_REGISTRY_ASKED=1 plus _IMAGE_REGISTRY / _REGISTRY_USER /
+# _REGISTRY_PASS for the .env writer below. "-" clears a saved registry.
+_IMAGE_REGISTRY_ASKED=0; _IMAGE_REGISTRY=""; _REGISTRY_USER=""; _REGISTRY_PASS=""
+ask_image_registry() {
+    echo -e "  ${BOLD}Image registry${NC}  ${DIM}every image is pulled from here. Empty = Docker Hub (ACE's frozen agentcert/ copies, no login).${NC}"
+    echo -e "  ${DIM}Inside the Infosys network: infyartifactory.jfrog.io/docker-local   (type - to clear)${NC}"
+    _IMAGE_REGISTRY="$(ask IMAGE_REGISTRY 'IMAGE_REGISTRY')"
+    _IMAGE_REGISTRY="$(printf '%s' "${_IMAGE_REGISTRY}" | tr -d '[:space:]')"
+    [[ "${_IMAGE_REGISTRY}" == "-" ]] && _IMAGE_REGISTRY=""
+    _IMAGE_REGISTRY_ASKED=1
+    if [[ -n "${_IMAGE_REGISTRY}" ]]; then
+        _REGISTRY_USER="$(ask REGISTRY_USERNAME 'Registry username')"
+        _REGISTRY_PASS="$(ask REGISTRY_PASSWORD 'Registry password / access token')"
+        _REGISTRY_USER="$(printf '%s' "${_REGISTRY_USER}" | tr -d '[:space:]')"
+        _REGISTRY_PASS="$(printf '%s' "${_REGISTRY_PASS}" | tr -d '[:space:]')"
+    fi
+}
+
 if [[ "$SETUP_MODE" == "setup" ]]; then
 
 echo
@@ -1301,14 +1411,14 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo
 
     # Build
-    echo -e "${BOLD}▸ Build images?${NC}  p=push to Docker Hub  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
+    echo -e "${BOLD}▸ Build images?${NC}  p=push to ${_PUSH_TARGET_LABEL}  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
     DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
     declare -a SELECTED_BUILD_IMAGES=()
     read -rp "  Choice [p/l/A/n]: " _eb
     case "${_eb,,}" in
         "") DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}"); _ALL_LOCAL=1 ;;
-        p)  DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
-            DH_TOKEN="$(ask DOCKERHUB_TOKEN   'Docker Hub token')"
+        p)  DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
+            DH_TOKEN="$(ask REGISTRY_PASSWORD "Registry password / token (${_PUSH_TARGET_LABEL})")"
             DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
             DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
             if [[ -n "$DH_USER" && -n "$DH_TOKEN" ]]; then
@@ -1333,22 +1443,16 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
         echo -e "${BOLD}▸ Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
         _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
     else
-        echo -e "${BOLD}▸ Experiment image sources${NC}  l=local build (recommended — matches this checkout)  d=Docker Hub  j=JFrog"
-        read -rp "  install-application  (agentcert-install-app)   [l/d/j, Enter=l]: " _ans
-        case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; d) _INSTALL_APP_SRC="dockerhub" ;; *) _INSTALL_APP_SRC="local" ;; esac
-        read -rp "  install-agent        (agentcert-install-agent) [l/d/j, Enter=l]: " _ans
-        case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; d) _INSTALL_AGENT_SRC="dockerhub" ;; *) _INSTALL_AGENT_SRC="local" ;; esac
-        read -rp "  workflow runtime images (apps/Litmus/tools)    [l/d,   Enter=l]: " _ans
-        case "${_ans,,}" in d) _LITMUS_SRC="dockerhub" ;; *) _LITMUS_SRC="local" ;; esac
+        echo -e "${BOLD}▸ Experiment image sources${NC}  l=local build (recommended — matches this checkout)  r=registry (${_PUSH_TARGET_LABEL})"
+        read -rp "  install-application  (agentcert-install-app)   [l/r, Enter=l]: " _ans
+        _INSTALL_APP_SRC="$(image_source_choice "${_ans}")"
+        read -rp "  install-agent        (agentcert-install-agent) [l/r, Enter=l]: " _ans
+        _INSTALL_AGENT_SRC="$(image_source_choice "${_ans}")"
+        read -rp "  workflow runtime images (apps/Litmus/tools)    [l/r, Enter=l]: " _ans
+        _LITMUS_SRC="$(image_source_choice "${_ans}")"
         unset _ans
     fi
-    if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
-        echo -e "  ${BOLD}JFrog credentials${NC}"
-        _JFROG_HOST="$(ask JFROG_HOST          'JFrog host')"
-        _JFROG_PATH="$(ask JFROG_REGISTRY_PATH 'Registry path')"
-        _JFROG_USER="$(ask JFROG_USER          'Username')"
-        _JFROG_TOKEN="$(ask JFROG_TOKEN        'Token / password')"
-    fi
+    ask_image_registry
     echo
 
     # LiteLLM / Azure OpenAI
@@ -1449,7 +1553,7 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo
 fi
 
-# --- Build: push to Docker Hub or build locally (optional) ------------------
+# --- Build: push to the image registry or build locally (optional) ----------
 if [[ $EXPRESS_MODE -eq 0 ]]; then
 DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
 declare -a SELECTED_BUILD_IMAGES=()
@@ -1460,8 +1564,8 @@ if [[ "${BUILD_MODE}" == "local" ]]; then
     DO_LOCAL_BUILD=1
 else
     echo -e "${BOLD}Build Docker images?${NC}"
-    echo -e "   ${BOLD}p${NC}  Build and push to Docker Hub"
-    echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD; Docker Hub auth may be needed for base images)${NC}"
+    echo -e "   ${BOLD}p${NC}  Build and push to ${_PUSH_TARGET_LABEL}"
+    echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD; registry auth may be needed for base images)${NC}"
     echo -e "   ${BOLD}a${NC}  Build ALL locally   ${DIM}(platform + experiment images — also auto-fills and skips the image-source questions below)${NC}"
     echo -e "   ${BOLD}n${NC}  Skip"
     read -rp "$(echo -e "Choice ${DIM}[p/l/A/n]${NC}: ")" _build_ans
@@ -1491,12 +1595,12 @@ else
     fi
     if [[ "${_sel_mode}" == "push" && ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
         echo
-        DH_USER="$(ask DOCKERHUB_USERNAME 'Docker Hub username')"
-        DH_TOKEN="$(ask DOCKERHUB_TOKEN 'Docker Hub token (dckr_pat_...)')"
+        DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
+        DH_TOKEN="$(ask REGISTRY_PASSWORD "Registry password / token (${_PUSH_TARGET_LABEL})")"
         DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
         DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
         [[ -n "$DH_USER" && -n "$DH_TOKEN" ]] && DO_BUILD=1 \
-            || warn "Docker Hub credentials missing — skipping build."
+            || warn "Registry credentials missing — skipping build."
     elif [[ "${_sel_mode}" == "local" && ${#SELECTED_BUILD_IMAGES[@]} -gt 0 ]]; then
         DO_LOCAL_BUILD=1
     fi
@@ -1516,8 +1620,11 @@ fi # EXPRESS_MODE -eq 0 (build section)
 # Wizard is skipped in --restart mode (sources are already in .env), and also
 # skipped here — auto-filled to local instead — when "a" (build ALL locally)
 # was chosen in the build prompt above.
-_INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
-_JFROG_HOST=""; _JFROG_PATH=""; _JFROG_USER=""; _JFROG_TOKEN=""
+# Express mode already answered these above; only reset for guided/restart
+# (resetting unconditionally used to discard the express-mode answers).
+if [[ $EXPRESS_MODE -eq 0 ]]; then
+    _INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
+fi
 if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
     if [[ "${_ALL_LOCAL:-0}" -eq 1 ]]; then
         echo -e "${BOLD}Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
@@ -1529,30 +1636,22 @@ if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
     echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
     echo
     echo -e "   ${BOLD}l${NC}  Local build  ${DIM}build from source in this repo, loaded into KinD — matches this checkout (recommended)${NC}"
-    echo -e "   ${BOLD}d${NC}  Docker Hub   ${DIM}public :latest images — may not match this checkout's charts${NC}"
-    echo -e "   ${BOLD}j${NC}  JFrog        ${DIM}Infosys Artifactory — requires credentials${NC}"
+    echo -e "   ${BOLD}r${NC}  Registry     ${DIM}pull at run time from ${_PUSH_TARGET_LABEL} — publish with scripts/build-and-push.sh first${NC}"
     echo
-    read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [l/d/j, Enter=l]${NC}: ")" _ans
-    case "${_ans,,}" in j) _INSTALL_APP_SRC="jfrog" ;; d) _INSTALL_APP_SRC="dockerhub" ;; *) _INSTALL_APP_SRC="local" ;; esac
-    read -rp "$(echo -e "  install-agent        ${DIM}(agentcert-install-agent) [l/d/j, Enter=l]${NC}: ")" _ans
-    case "${_ans,,}" in j) _INSTALL_AGENT_SRC="jfrog" ;; d) _INSTALL_AGENT_SRC="dockerhub" ;; *) _INSTALL_AGENT_SRC="local" ;; esac
-    read -rp "$(echo -e "  workflow runtime images ${DIM}(apps/Litmus/tools)       [l/d, Enter=l]${NC}: ")" _ans
-    case "${_ans,,}" in d) _LITMUS_SRC="dockerhub" ;; *) _LITMUS_SRC="local" ;; esac
+    read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [l/r, Enter=l]${NC}: ")" _ans
+    _INSTALL_APP_SRC="$(image_source_choice "${_ans}")"
+    read -rp "$(echo -e "  install-agent        ${DIM}(agentcert-install-agent) [l/r, Enter=l]${NC}: ")" _ans
+    _INSTALL_AGENT_SRC="$(image_source_choice "${_ans}")"
+    read -rp "$(echo -e "  workflow runtime images ${DIM}(apps/Litmus/tools)       [l/r, Enter=l]${NC}: ")" _ans
+    _LITMUS_SRC="$(image_source_choice "${_ans}")"
     unset _ans
-
-    if [[ "${_INSTALL_APP_SRC}" == "jfrog" || "${_INSTALL_AGENT_SRC}" == "jfrog" ]]; then
-        echo
-        echo -e "  ${BOLD}JFrog Artifactory credentials${NC}"
-        _JFROG_HOST="$(ask JFROG_HOST   'JFrog host')"
-        _JFROG_PATH="$(ask JFROG_REGISTRY_PATH 'Registry path')"
-        _JFROG_USER="$(ask JFROG_USER   'Username')"
-        _JFROG_TOKEN="$(ask JFROG_TOKEN 'Token / password')"
-    fi
     echo
     fi
+    ask_image_registry
+    echo
 fi
 export _INSTALL_APP_SRC _INSTALL_AGENT_SRC _LITMUS_SRC \
-       _JFROG_HOST _JFROG_PATH _JFROG_USER _JFROG_TOKEN
+       _IMAGE_REGISTRY_ASKED _IMAGE_REGISTRY _REGISTRY_USER _REGISTRY_PASS
 
 # --- Sections 1-4: LiteLLM, Flash, Cluster, CA cert (guided mode only) ------
 if [[ $EXPRESS_MODE -eq 0 ]]; then
@@ -1725,8 +1824,8 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}" \
        _INSTALL_APP_SRC="${_INSTALL_APP_SRC:-}" _INSTALL_AGENT_SRC="${_INSTALL_AGENT_SRC:-}" \
        _LITMUS_SRC="${_LITMUS_SRC:-}" \
-       _JFROG_HOST="${_JFROG_HOST:-}" _JFROG_PATH="${_JFROG_PATH:-}" \
-       _JFROG_USER="${_JFROG_USER:-}" _JFROG_TOKEN="${_JFROG_TOKEN:-}"
+       _IMAGE_REGISTRY_ASKED="${_IMAGE_REGISTRY_ASKED:-0}" _IMAGE_REGISTRY="${_IMAGE_REGISTRY:-}" \
+       _REGISTRY_USER="${_REGISTRY_USER:-}" _REGISTRY_PASS="${_REGISTRY_PASS:-}"
 "${SETUP_PYTHON}" - "${ENV_FILE}" <<'PY'
 import os, sys, re
 path = sys.argv[1]
@@ -1827,13 +1926,18 @@ else:
         sets["OLLAMA_MODEL_LAST_USED"] = prev_ollama_model
     sets["OLLAMA_MODEL"] = ""
 
-# ── Docker Hub ────────────────────────────────────────────────────────────────
-dh_user = os.environ.get("_DH_USER", "")
-dh_token = os.environ.get("_DH_TOKEN", "")
-if dh_user:
-    sets["DOCKERHUB_USERNAME"] = dh_user
-if dh_token:
-    sets["DOCKERHUB_TOKEN"] = dh_token
+# ── Image registry (single source of truth) ───────────────────────────────────
+# IMAGE_REGISTRY is written whenever the wizard asked for it (empty = public
+# registries). Push credentials from the build prompt and registry credentials
+# from the registry prompt are the same REGISTRY_* pair.
+if os.environ.get("_IMAGE_REGISTRY_ASKED", "0") == "1":
+    sets["IMAGE_REGISTRY"] = os.environ.get("_IMAGE_REGISTRY", "")
+reg_user = os.environ.get("_REGISTRY_USER", "") or os.environ.get("_DH_USER", "")
+reg_pass = os.environ.get("_REGISTRY_PASS", "") or os.environ.get("_DH_TOKEN", "")
+if reg_user:
+    sets["REGISTRY_USERNAME"] = reg_user
+if reg_pass:
+    sets["REGISTRY_PASSWORD"] = reg_pass
 
 # ── Corporate proxy CA cert path ─────────────────────────────────────────────
 custom_ca = os.environ.get("_CUSTOM_CA_CERT_PATH", "")
@@ -1846,17 +1950,10 @@ if custom_ca:
 app_src    = os.environ.get("_INSTALL_APP_SRC",   "")
 agent_src  = os.environ.get("_INSTALL_AGENT_SRC", "")
 litmus_src = os.environ.get("_LITMUS_SRC",        "")
-jfrog_host = os.environ.get("_JFROG_HOST", "") or "infyartifactory.jfrog.io"
-jfrog_path = os.environ.get("_JFROG_PATH", "") or "docker-local"
-jfrog_user = os.environ.get("_JFROG_USER",  "")
-jfrog_tok  = os.environ.get("_JFROG_TOKEN", "")
 
 if app_src:
     sets["INSTALL_APP_IMAGE_SOURCE"] = app_src
-    if app_src == "jfrog":
-        sets["INSTALL_APPLICATION_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-app:latest"
-        sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Always"
-    elif app_src == "local":
+    if app_src == "local":
         # "local" means prepare-images.sh built and kind-loaded this image under
         # this tag and nothing else should ever be pulled for it -- but the same
         # tag also exists as a real published image on Docker Hub. IfNotPresent
@@ -1874,17 +1971,15 @@ if app_src:
         sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
         sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Never"
     else:
-        # "dockerhub": production/default mode genuinely wants the registry copy
-        # and should refresh the public :latest tag at run time.
+        # "registry": pull the published copy at run time and refresh :latest.
+        # The public name is stored; the deploy step prepends IMAGE_REGISTRY
+        # (scripts/lib/resolve_image_env.py).
         sets["INSTALL_APPLICATION_IMAGE"]             = "agentcert/agentcert-install-app:latest"
         sets["INSTALL_APPLICATION_IMAGE_PULL_POLICY"] = "Always"
 
 if agent_src:
     sets["INSTALL_AGENT_IMAGE_SOURCE"] = agent_src
-    if agent_src == "jfrog":
-        sets["INSTALL_AGENT_IMAGE"]             = f"{jfrog_host}/{jfrog_path}/agentcert/agentcert-install-agent:latest"
-        sets["INSTALL_AGENT_IMAGE_PULL_POLICY"] = "Always"
-    elif agent_src == "local":
+    if agent_src == "local":
         # See the matching "local" branch above for install-app -- same
         # kind-loaded-image-vs-Docker-Hub-tag-collision reasoning applies here,
         # and this is in fact the exact image/flag this bit itself was found on.
@@ -1896,31 +1991,15 @@ if agent_src:
 
 if litmus_src:
     sets["LITMUS_IMAGES_SOURCE"] = litmus_src
-    if litmus_src == "jfrog":
-        # GraphQL server will rewrite all litmus helper image refs to JFrog URLs at
-        # workflow submission time (applyLitmusHelperImageOverrides).
-        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = f"{jfrog_host}/{jfrog_path}/"
-        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "Always"
-    elif litmus_src == "local":
-        # Images are pre-loaded into KinD under their Docker Hub names; IfNotPresent
+    # LITMUS_HELPER_IMAGES_REGISTRY_PREFIX is no longer stored in .env: the
+    # deploy step derives it from IMAGE_REGISTRY + LITMUS_IMAGES_SOURCE
+    # (scripts/lib/resolve_image_env.py).
+    if litmus_src == "local":
+        # Images are pre-loaded into KinD under their public names; IfNotPresent
         # means the node uses the cached copy and never contacts the registry.
-        # docker.io prefix normalises any registry prefix in the source YAML
-        # (JFrog, Scarf, bare Docker Hub) to a canonical docker.io/ ref so the
-        # lookup always hits the KinD image cache regardless of what branch the
-        # ChaosHub is cloned from.
-        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = "docker.io"
-        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "IfNotPresent"
-    else:  # dockerhub
-        # Normalise to explicit docker.io prefix so the pull always goes to
-        # Docker Hub even when the source YAML carries a different registry.
-        sets["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = "docker.io"
-        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"]     = "Always"
-
-if jfrog_user:  sets["JFROG_USER"]          = jfrog_user
-if jfrog_tok:   sets["JFROG_TOKEN"]         = jfrog_tok
-if app_src == "jfrog" or agent_src == "jfrog":
-    sets["JFROG_HOST"]          = jfrog_host
-    sets["JFROG_REGISTRY_PATH"] = jfrog_path
+        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"] = "IfNotPresent"
+    else:  # registry
+        sets["LITMUS_HELPER_IMAGES_PULL_POLICY"] = "Always"
 
 # Network endpoints in-cluster pods use to reach the control plane on this host
 # (so SUBSCRIBER_CALLBACK_URL is never left as the YOUR_HOST_LAN_IP placeholder).
@@ -2138,13 +2217,23 @@ pick_kind_hostport() {
 
 # apply_ace_env_secret — dedup .env then create/update the ace-env Secret
 apply_ace_env_secret() {
-    local ns="${1:-ace}"
+    local ns="${1:-ace}" resolved
     dedup_env "${ENV_FILE}"
+    # Same image resolution as the Helm path: .env keeps public names, the
+    # Secret gets <IMAGE_REGISTRY>/<name> where the component pulls from the
+    # registry. Overrides are appended, so they win (last value wins).
+    resolved="$(mktemp)"   # mode 0600; holds .env secrets — always removed below
+    # shellcheck disable=SC2064  # expand now: the local is gone when RETURN fires
+    trap "rm -f '${resolved}'" RETURN
+    cat "${ENV_FILE}" > "${resolved}"
+    "${SETUP_PYTHON}" "${SCRIPT_DIR}/lib/resolve_image_env.py" "${ENV_FILE}" >> "${resolved}"
+    dedup_env "${resolved}"
     kubectl create secret generic ace-env \
         --namespace "${ns}" \
-        --from-env-file="${ENV_FILE}" \
+        --from-env-file="${resolved}" \
         --dry-run=client -o yaml \
         | kubectl apply -f - >/dev/null
+    rm -f "${resolved}"
     ok "ace-env Secret up to date."
 }
 
@@ -2183,6 +2272,38 @@ create_ca_configmap() {
         return 1
     fi
     ok "ace-ca-certs ConfigMap up to date (${ca_src})."
+}
+
+# apply_registry_prereqs — give the cluster the private-registry login before
+# any pod starts (scripts/apply_cluster_prereqs.sh: pull secret in kube-system,
+# ace and the chaos-infra namespace, ServiceAccounts patched, and
+# registry-secret-sync for namespaces created later). Runs only when
+# IMAGE_REGISTRY is set, so the open-source path never sees a registry prompt.
+# Switching back to public registries removes registry-secret-sync.
+apply_registry_prereqs() {
+    if [[ -n "$(cur IMAGE_REGISTRY)" ]]; then
+        echo -e "${DIM}Applying registry pull credentials (IMAGE_REGISTRY=$(cur IMAGE_REGISTRY))…${NC}"
+        ACE_NAMESPACE="${1:-ace}" "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --env-file "${ENV_FILE}" </dev/null \
+            || { warn "Registry prerequisites failed — pods pulling from $(cur IMAGE_REGISTRY) would get 401."; return 1; }
+    elif kubectl get deployment registry-secret-sync -n kube-system >/dev/null 2>&1; then
+        "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --env-file "${ENV_FILE}" --uninstall
+    fi
+}
+
+# apply_manifest_resolved FILE — kubectl apply a plain manifest (deploy/k8s)
+# with every image resolved for IMAGE_REGISTRY / the frozen agentcert/ copies
+# and the pull secret added (scripts/lib/resolve_image_env.py, the same rule
+# as the Helm chart). Images this script built or side-loaded keep their names.
+apply_manifest_resolved() {
+    local f="$1" keep=()
+    if [[ "$(cur PLATFORM_IMAGE_SOURCE)" == local || "${DO_LOCAL_BUILD:-0}" -eq 1 ]]; then
+        keep+=(--keep-ace-images)
+    fi
+    if [[ "$(cur HUB_BUNDLE_IMAGE_SOURCE)" != registry ]]; then
+        keep+=(--keep "$(cur HUB_BUNDLE_IMAGE)")
+    fi
+    "${SETUP_PYTHON}" "${SCRIPT_DIR}/lib/resolve_image_env.py" --rewrite-manifests "${ENV_FILE}" "${keep[@]}" < "${f}" \
+        | kubectl apply -f -
 }
 
 # post_cloud_setup — after a cloud deployment, poll for the web service LoadBalancer
@@ -2720,7 +2841,17 @@ PY
 
     echo -e "${DIM}Creating kind cluster '${cluster_name}' (this takes ~1-2 min)…${NC}"
     echo -e "${DIM}Using kind config: ${kind_cfg}${NC}"
-    if ! kind create cluster --name "${cluster_name}" --config "${kind_cfg}"; then
+    # Node image from IMAGE_REGISTRY when one is set (KIND_NODE_IMAGE overrides).
+    local node_image node_args=()
+    node_image="$(unset IMAGE_REGISTRY IMAGE_MIRROR_NAMESPACE REGISTRY_USERNAME REGISTRY_PASSWORD
+                  registry_load "${ENV_FILE}" && kind_node_image "${ENV_FILE}")"
+    if [[ -n "${node_image}" ]]; then
+        echo -e "${DIM}Using kind node image: ${node_image}${NC}"
+        node_args=(--image "${node_image}")
+        ( unset IMAGE_REGISTRY REGISTRY_USERNAME REGISTRY_PASSWORD
+          registry_load "${ENV_FILE}" && registry_login >/dev/null ) || true
+    fi
+    if ! kind create cluster --name "${cluster_name}" --config "${kind_cfg}" "${node_args[@]}"; then
         warn "kind create cluster failed for '${cluster_name}' (config: ${kind_cfg})."
         warn "Common causes: one of the KIND_HOSTPORT_* ports picked above got taken by something else"
         warn "between the pick and cluster creation; the containerd 2.3 shim bug on this host"
@@ -3414,8 +3545,8 @@ offer_mongodb_restore() {
 # are called below) -- it does NOT need mongodb/graphql/anything the blocking
 # wait is actually waiting on, so there is no reason to make it wait in line
 # behind them. This only ever matters when INSTALL_APP_IMAGE_SOURCE/
-# INSTALL_AGENT_IMAGE_SOURCE/LITMUS_IMAGES_SOURCE is local or jfrog -- the
-# default (dockerhub for all three) makes this a no-op, same as before.
+# INSTALL_AGENT_IMAGE_SOURCE/LITMUS_IMAGES_SOURCE is local, or registry with
+# IMAGE_REGISTRY set -- public registry pulls make this a no-op, same as before.
 # _PREPARE_IMAGES_LAUNCHED keeps this from running twice: once here in the
 # background, and once more via the old unconditional call further down in
 # the outer script (which still runs it -- synchronously, via the same two
@@ -3434,8 +3565,13 @@ maybe_launch_prepare_images_bg() {
     sre_src="$(cur SRE_AGENTS_IMAGE_SOURCE)"; sre_src="${sre_src:-local}"
     itbench_src="$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)"; itbench_src="${itbench_src:-local}"
     hub_bundle_src="$(cur HUB_BUNDLE_IMAGE_SOURCE)"; hub_bundle_src="${hub_bundle_src:-local}"
-    if [[ "${app_src}" == "local" || "${app_src}" == "jfrog" || \
-          "${agent_src}" == "local" || "${agent_src}" == "jfrog" || \
+    # "registry" + IMAGE_REGISTRY set needs the pull secret prepare-images.sh
+    # creates; plain public pulls ("registry" with IMAGE_REGISTRY empty) need
+    # nothing. jfrog is the legacy name for registry.
+    local reg_needs_prep=0
+    [[ -n "$(cur IMAGE_REGISTRY)" ]] && reg_needs_prep=1
+    if [[ "${app_src}" == "local" || "${agent_src}" == "local" || \
+          ( "${reg_needs_prep}" -eq 1 && ( "${app_src}" =~ ^(registry|jfrog)$ || "${agent_src}" =~ ^(registry|jfrog)$ ) ) || \
           "${litmus_src}" == "local" || "${sre_src}" == "local" || \
           "${itbench_src}" == "local" || "${hub_bundle_src}" == "local" ]]; then
         mkdir -p "${REPO_ROOT}/.tmp"
@@ -3576,6 +3712,9 @@ k8s_deploy() {
     echo -e "${DIM}Creating/updating ace-ca-certs ConfigMap…${NC}"
     create_ca_configmap "${NS}"
 
+    # 5c) Registry pull credentials before pods start (only when IMAGE_REGISTRY is set)
+    apply_registry_prereqs "${NS}" || return 1
+
     # 6) Create (or update) the ace-env Secret from .env
     echo -e "${DIM}Creating/updating ace-env Secret from .env…${NC}"
     apply_ace_env_secret "${NS}"
@@ -3591,13 +3730,18 @@ k8s_deploy() {
               "${K8S_DIR}"/litellm.yaml \
               "${K8S_DIR}"/certifier.yaml \
               "${K8S_DIR}"/langfuse.yaml; do
-        [[ -f "$f" ]] && kubectl apply -f "$f"
+        [[ -f "$f" ]] && apply_manifest_resolved "$f"
     done
     # Application charts no longer ship metrics-server; the platform owns it.
     if metrics_api_served_elsewhere; then
         ok "Cluster already provides metrics-server — not installing the platform copy."
     else
-        kubectl apply -f "${K8S_DIR}/metrics-server.yaml"
+        # Preloaded with the workflow runtime images in local mode: keep its name.
+        if [[ "$(image_source_normalize "$(cur LITMUS_IMAGES_SOURCE)")" == local ]]; then
+            kubectl apply -f "${K8S_DIR}/metrics-server.yaml"
+        else
+            apply_manifest_resolved "${K8S_DIR}/metrics-server.yaml"
+        fi
     fi
     # For cloud clusters, switch the web service to LoadBalancer so browsers can reach it.
     # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
@@ -3697,9 +3841,9 @@ generate_helm_values_env() {
     local out="${REPO_ROOT}/deploy/helm/ace/values-env.yaml"
     local litellm_cfg="${REPO_ROOT}/agentcert-stack/litellm-setup/litellm_config.yaml"
     dedup_env "${ENV_FILE}"
-    "${SETUP_PYTHON}" - "${ENV_FILE}" "${out}" "${litellm_cfg}" <<'PY'
+    "${SETUP_PYTHON}" - "${ENV_FILE}" "${out}" "${litellm_cfg}" "${SCRIPT_DIR}/lib" <<'PY'
 import sys, re, os
-env_path, out_path, litellm_cfg = sys.argv[1], sys.argv[2], sys.argv[3]
+env_path, out_path, litellm_cfg, lib_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 # collect keys in order, last value wins
 keys_order, seen = [], {}
 for ln in open(env_path).read().splitlines():
@@ -3707,6 +3851,15 @@ for ln in open(env_path).read().splitlines():
     if not m:
         continue
     k, v = m.group(1), m.group(2)
+    if k not in seen:
+        keys_order.append(k)
+    seen[k] = v
+# .env holds public image names; put IMAGE_REGISTRY in front where the
+# component pulls from the registry (scripts/lib/resolve_image_env.py).
+sys.path.insert(0, lib_dir)
+import resolve_image_env
+overrides, _ = resolve_image_env.resolve(resolve_image_env.read_env(env_path))
+for k, v in overrides.items():
     if k not in seen:
         keys_order.append(k)
     seen[k] = v
@@ -3719,7 +3872,11 @@ if os.path.isfile(litellm_cfg):
     cfg = open(litellm_cfg).read()
     lines += ["", "litellm:", "  config: |"]
     lines += ["    " + l for l in cfg.splitlines()]
-open(out_path, "w").write("\n".join(lines) + "\n")
+# Contains every .env secret: readable by the owner only (shared hosts).
+fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as fh:
+    fh.write("\n".join(lines) + "\n")
+os.chmod(out_path, 0o600)
 PY
     ok "Generated values-env.yaml (env + litellm config)."
 }
@@ -3788,6 +3945,9 @@ helm_deploy() {
     echo -e "${DIM}Creating/updating ace-ca-certs ConfigMap…${NC}"
     create_ca_configmap "${NS}"
 
+    # 4c) Registry pull credentials before helm installs pods (only when IMAGE_REGISTRY is set)
+    apply_registry_prereqs "${NS}" || return 1
+
     # 5) Run helm — it owns namespace, secret, and all workloads
     if ! command -v helm >/dev/null 2>&1; then
         warn "helm not found on PATH — cannot deploy. Install it, e.g.:"
@@ -3819,6 +3979,21 @@ helm_deploy() {
     if [[ "${_hub_bundle_source}" == "local" ]]; then
         helm_cmd+=(--set chartsHub.bundleImagePullPolicy=Never)
     fi
+
+    # Image registry (.env -> chart values; templates/_helpers.tpl "ace.image").
+    # Images this script built or side-loaded keep their public names.
+    local _ace_local=false _runtime_local=false _bundle_local=false
+    [[ "$(cur PLATFORM_IMAGE_SOURCE)" == local || "${DO_LOCAL_BUILD:-0}" -eq 1 ]] && _ace_local=true
+    [[ "$(image_source_normalize "$(cur LITMUS_IMAGES_SOURCE)")" == local ]] && _runtime_local=true
+    [[ "${_hub_bundle_source}" == local ]] && _bundle_local=true
+    helm_cmd+=(
+        --set-string "imageRegistry=$(registry_normalize "$(cur IMAGE_REGISTRY)")"
+        --set-string "imageMirrorNamespace=$(cur IMAGE_MIRROR_NAMESPACE)"
+        --set-string "imagePullSecretName=$(cur IMAGE_PULL_SECRET_NAME)"
+        --set "aceImagesLocal=${_ace_local}"
+        --set "runtimeImagesLocal=${_runtime_local}"
+        --set "chartsHub.bundleLocal=${_bundle_local}"
+    )
 
     # The certifier's cert-report-export hostPath volume only makes sense against a
     # KinD cluster this repo's own render-kind-config.sh created (its extraMounts
@@ -4084,7 +4259,7 @@ if [[ ${EXPRESS_MODE} -eq 1 && ( "${_DEPLOY_CHOICE,,}" == "h" || "${_DEPLOY_CHOI
     _KIND_PREWARM_PID=$!
 fi
 
-# --- build (push to Docker Hub or local) ------------------------------------
+# --- build (push to the image registry or local) ----------------------------
 abort_after_build_failure() {
     # Express setup may already be creating KinD in the background. Reap that
     # job before exiting so a retry cannot race an orphaned cluster creation.
@@ -4105,27 +4280,32 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     echo -e "${CYAN}=======================================================${NC}"
     echo
     _build_ready=1
-    if [[ "${DO_LOCAL_BUILD}" -eq 1 ]]; then
-        _local_dh_user="$(cur DOCKERHUB_USERNAME)"
-        _local_dh_token="$(cur DOCKERHUB_TOKEN)"
-        if ! is_placeholder "${_local_dh_user}" && ! is_placeholder "${_local_dh_token}"; then
-            if printf '%s' "${_local_dh_token}" | docker login docker.io --username "${_local_dh_user}" --password-stdin >/dev/null; then
-                ok "Authenticated to Docker Hub for local base-image builds."
+    # IMAGE_REGISTRY + REGISTRY_* from .env (scripts/lib/registry.sh). Exported
+    # so the background build subshells below push to the same place.
+    unset IMAGE_REGISTRY REGISTRY_USERNAME REGISTRY_PASSWORD
+    registry_load "${ENV_FILE}" || { warn "Fix IMAGE_REGISTRY in .env — images were NOT built."; _build_ready=0; }
+    # Credentials typed this run win over .env: the Image-registry answers
+    # (_REGISTRY_*, asked for the registry actually used) before the push
+    # prompt's (DH_*, asked before the registry could change).
+    if [[ -n "${_REGISTRY_USER:-}" && -n "${_REGISTRY_PASS:-}" ]]; then
+        REGISTRY_USERNAME="${_REGISTRY_USER}"; REGISTRY_PASSWORD="${_REGISTRY_PASS}"
+    elif [[ -n "${DH_USER:-}" && -n "${DH_TOKEN:-}" ]]; then
+        REGISTRY_USERNAME="${DH_USER}"; REGISTRY_PASSWORD="${DH_TOKEN}"
+    fi
+    export REGISTRY_USERNAME REGISTRY_PASSWORD
+    if [[ "${_build_ready}" -eq 1 && ( "${DO_LOCAL_BUILD}" -eq 1 || "${DO_BUILD}" -eq 1 ) ]]; then
+        if [[ -n "${REGISTRY_USERNAME}" && -n "${REGISTRY_PASSWORD}" ]]; then
+            if registry_login >/dev/null; then
+                ok "Logged in to ${IMAGE_REGISTRY:-Docker Hub} as ${REGISTRY_USERNAME}"
             else
-                warn "Docker Hub login failed; local base-image builds may hit anonymous pull limits."
+                warn "Login to ${IMAGE_REGISTRY:-Docker Hub} failed — images were NOT built."
                 _build_ready=0
             fi
-        else
-            warn "Docker Hub credentials are unset; local base-image builds may hit anonymous pull limits."
-        fi
-        unset _local_dh_user _local_dh_token
-    fi
-    if [[ "${DO_BUILD}" -eq 1 ]]; then
-        if echo "${DH_TOKEN}" | docker login -u "${DH_USER}" --password-stdin 2>&1; then
-            ok "Logged in to Docker Hub as ${DH_USER}"
-        else
-            warn "Docker Hub login failed — images were NOT built."
+        elif [[ "${DO_BUILD}" -eq 1 ]]; then
+            warn "REGISTRY_USERNAME/REGISTRY_PASSWORD are unset — cannot push; images were NOT built."
             _build_ready=0
+        else
+            warn "Registry credentials are unset; local base-image builds may hit anonymous Docker Hub pull limits."
         fi
     fi
     if [[ "${_build_ready}" -eq 1 ]]; then
@@ -4222,7 +4402,8 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 elif [[ ! -f "${ctx}/${df}" ]]; then
                     echo "Dockerfile not found: ${ctx}/${df}"
                 else
-                    docker build ${_no_cache_flag} -t "${tag}" -f "${ctx}/${df}" "${ctx}" && build_ok=1
+                    # Base images from IMAGE_REGISTRY / frozen copies (scripts/lib/registry.sh).
+                    docker_build_resolved "$(realpath -m "${ctx}/${df}")" ${_no_cache_flag} -t "${tag}" "${ctx}" && build_ok=1
                 fi
                 if [[ "${build_ok}" -eq 1 ]]; then
                     echo "${tag}" > "${_BUILD_RESULTS_DIR}/${idx}.built"
@@ -4235,7 +4416,11 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                             > "${_BUILD_RESULTS_DIR}/${idx}.fp"
                     fi
                     if [[ "${DO_BUILD}" -eq 1 ]]; then
-                        if docker push "${tag}"; then
+                        # agentcert/x:latest -> <IMAGE_REGISTRY>/agentcert/x:latest
+                        # (unchanged, i.e. Docker Hub, when IMAGE_REGISTRY is empty).
+                        _push_ref="$(registry_ref "${tag}")"
+                        if { [[ "${_push_ref}" == "${tag}" ]] || docker tag "${tag}" "${_push_ref}"; } \
+                            && docker push "${_push_ref}"; then
                             echo pushed > "${_BUILD_RESULTS_DIR}/${idx}.status"
                         else
                             echo "push-failed" > "${_BUILD_RESULTS_DIR}/${idx}.status"
@@ -4395,7 +4580,8 @@ if [[ "${SETUP_MODE}" == "setup" && $EXPRESS_MODE -eq 0 \
 fi
 
 # --- Prepare experiment images -----------------------------------------------
-# Runs whenever any image source is non-default (local or jfrog). If the
+# Runs whenever any image source is non-default (local, or registry with
+# IMAGE_REGISTRY set). If the
 # stack was actually deployed just now (choice k/h above), this already ran
 # in the background — overlapped with that deploy's own long blocking wait
 # (mongodb-rs-init hook for helm, "wait for core services" for kubectl) via

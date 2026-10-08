@@ -25,9 +25,10 @@ spec:
       labels:
         app: postgres
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: postgres
-          image: {{ .Values.images.postgres }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.postgres "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 5432
@@ -106,9 +107,10 @@ spec:
       labels:
         app: redis
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: redis
-          image: {{ .Values.images.redis }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.redis "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [redis-server]
           args:
@@ -217,9 +219,10 @@ spec:
         runAsUser: 101
         runAsGroup: 101
         fsGroup: 101
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: clickhouse
-          image: {{ .Values.images.clickhouse }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.clickhouse "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 8123
@@ -310,9 +313,10 @@ spec:
       labels:
         app: minio
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: minio
-          image: {{ .Values.images.minio }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.minio "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [sh]
           args:
@@ -383,9 +387,10 @@ spec:
       labels:
         app: langfuse-worker
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: langfuse-worker
-          image: {{ .Values.images.langfuseWorker }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.langfuseWorker "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           envFrom:
             - secretRef:
@@ -426,6 +431,7 @@ spec:
       labels:
         app: langfuse-web
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       initContainers:
         # langfuse-web runs the Prisma DB migrations on startup and exits 1 if the
         # database is unreachable — on a from-scratch deploy Postgres can take a
@@ -438,7 +444,7 @@ spec:
         # main container, via the ace.langfuse.dbEnv helper), so there is no
         # separately-hardcoded "postgres:5432" to drift.
         - name: wait-for-db
-          image: {{ .Values.images.postgres }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.postgres "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command:
             - sh
@@ -453,7 +459,7 @@ spec:
             {{- include "ace.langfuse.dbEnv" . | nindent 12 }}
       containers:
         - name: langfuse-web
-          image: {{ .Values.images.langfuseWeb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.langfuseWeb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           ports:
             - containerPort: 3000

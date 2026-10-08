@@ -9,7 +9,7 @@ Publish the monorepo's Docker images to `docker.io/agentcert/*`.
 
 ## Prerequisites
 
-- `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` set in the root `.env`.
+- `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` set in the root `.env` (Docker Hub credentials when `IMAGE_REGISTRY` is empty; the target registry's otherwise).
 - Docker logged in / able to push to the `agentcert` org.
 
 ## Steps

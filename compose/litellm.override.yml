@@ -29,6 +29,8 @@
 # =============================================================================
 services:
   litellm-proxy:
+    # Resolved for IMAGE_REGISTRY / frozen copies by start-local-services.sh.
+    image: ${LITELLM_PROXY_IMAGE:-litellm/litellm:v1.82.0-stable}
     container_name: ${LITELLM_CONTAINER_NAME:-litellm-proxy}
     ports: !override
       - "${LITELLM_PORT:-14000}:4000"

@@ -24,9 +24,10 @@ spec:
       labels:
         app: certifier
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       initContainers:
         - name: wait-for-mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -54,14 +55,14 @@ spec:
                   key: MONGODB_PASSWORD
                   optional: true
         - name: workspace-init
-          image: {{ .Values.images.busybox }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.busybox "local" false) }}
           command: [sh, -c, "mkdir -p /ws/cert && chown -R 1000:1000 /ws && chmod 755 /ws"]
           volumeMounts:
             - name: workspace
               mountPath: /ws
         {{- if .Values.certHostExport.enabled }}
         - name: cert-export-init
-          image: {{ .Values.images.busybox }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.busybox "local" false) }}
           command: [sh, -c, "mkdir -p /export && chown -R 1000:1000 /export && chmod 755 /export"]
           volumeMounts:
             - name: cert-export
@@ -69,7 +70,7 @@ spec:
         {{- end }}
       containers:
         - name: certifier
-          image: {{ .Values.images.certifier }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.certifier "local" .Values.aceImagesLocal) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 8000

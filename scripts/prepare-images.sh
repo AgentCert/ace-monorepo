@@ -6,13 +6,15 @@
 # Safe to run standalone at any time to rebuild / reload / re-create secrets.
 #
 # Reads from .env:
-#   INSTALL_APP_IMAGE_SOURCE       dockerhub | jfrog | local
-#   INSTALL_AGENT_IMAGE_SOURCE     dockerhub | jfrog | local
-#   LITMUS_IMAGES_SOURCE           dockerhub | local
-#   SRE_AGENTS_IMAGE_SOURCE        dockerhub | local
-#   ITBENCH_EXPERIMENT_IMAGE_SOURCE local (no dockerhub image is published for
-#                                    this one — see below)
-#   JFROG_HOST, JFROG_REGISTRY_PATH, JFROG_USER, JFROG_TOKEN
+#   INSTALL_APP_IMAGE_SOURCE       registry | local
+#   INSTALL_AGENT_IMAGE_SOURCE     registry | local
+#   LITMUS_IMAGES_SOURCE           registry | local
+#   SRE_AGENTS_IMAGE_SOURCE        registry | local
+#   ITBENCH_EXPERIMENT_IMAGE_SOURCE registry | local (published only to the
+#                                    Infosys registry — see below)
+#     (legacy values "jfrog" and "dockerhub" are read as "registry")
+#   IMAGE_REGISTRY, REGISTRY_USERNAME, REGISTRY_PASSWORD, IMAGE_PULL_SECRET_NAME
+#     (scripts/lib/registry.sh; IMAGE_REGISTRY empty = public registries)
 #   HUB_BUNDLE_IMAGE_SOURCE        local | registry
 #   HUB_BUNDLE_IMAGE               image reference used by the GraphQL init container
 #   KIND_CLUSTER_NAME, ACE_INSTANCE_NAME
@@ -24,16 +26,19 @@
 #   sre-agent-comprehensive / sre-agent-crewai — build from agents/ + kind load
 #   runtime dependencies         — pull pinned/public images + kind load
 #                                  (Litmus helpers, stress/network tools, and
-#                                  the platform-owned metrics-server)
+#                                  the platform-owned metrics-server). Pulled
+#                                  from IMAGE_REGISTRY when it is set, then
+#                                  tagged with the public name the cluster uses.
 #   itbench-experiment           — docker build from litmus-go/ (Dockerfile.itbench) + kind load
 #                                   (single dispatcher binary shared by every fault under
 #                                   chaos-charts/faults/itbench/*/fault.yaml — see EXPERIMENT_NAME
 #                                   switch in litmus-go/bin/itbench-experiment/main.go)
-# For "jfrog":
-#   Creates a docker-registry Secret and patches the argo-chaos ServiceAccount
-#   in every experiment namespace that exists on the cluster.
-# For "dockerhub":
-#   No action (Kubernetes pulls at runtime; IfNotPresent reuses cached copies).
+# For "registry":
+#   IMAGE_REGISTRY set   — creates the IMAGE_PULL_SECRET_NAME docker-registry
+#                          Secret and patches the argo-chaos ServiceAccount in
+#                          every experiment namespace that exists on the cluster.
+#   IMAGE_REGISTRY empty — no action (Kubernetes pulls the public images at
+#                          runtime; IfNotPresent reuses cached copies).
 
 set -euo pipefail
 
@@ -64,6 +69,10 @@ fi
 # reached its own `${SRE_AGENTS_SRC:-local}` fallback three lines down.
 cur() { grep -E "^${1}=" "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
 
+# shellcheck source=lib/registry.sh
+source "${REPO_ROOT}/scripts/lib/registry.sh"
+registry_load "${ENV_FILE}" || exit 1   # also sets IMAGE_PULL_SECRET_NAME
+
 APP_SRC="$(cur INSTALL_APP_IMAGE_SOURCE)"
 AGENT_SRC="$(cur INSTALL_AGENT_IMAGE_SOURCE)"
 LITMUS_SRC="$(cur LITMUS_IMAGES_SOURCE)"
@@ -81,14 +90,14 @@ CHAOS_OPERATOR_IMAGE="$(cur CHAOS_OPERATOR_IMAGE)"
 CHAOS_RUNNER_IMAGE="$(cur CHAOS_RUNNER_IMAGE)"
 CHAOS_EXPORTER_IMAGE="$(cur CHAOS_EXPORTER_IMAGE)"
 
-APP_SRC="${APP_SRC:-dockerhub}"
-AGENT_SRC="${AGENT_SRC:-dockerhub}"
-LITMUS_SRC="${LITMUS_SRC:-dockerhub}"
-SRE_AGENTS_SRC="${SRE_AGENTS_SRC:-local}"
-# No dockerhub image has ever been published for this one (confirmed: Docker Hub API
-# 404s on agentcert/itbench-experiment) — local is the only source that can work today,
-# so it's the default regardless of what .env says, same as SRE_AGENTS_SRC's rationale.
-ITBENCH_EXPERIMENT_SRC="${ITBENCH_EXPERIMENT_SRC:-local}"
+APP_SRC="$(image_source_normalize "${APP_SRC:-registry}")"
+AGENT_SRC="$(image_source_normalize "${AGENT_SRC:-registry}")"
+LITMUS_SRC="$(image_source_normalize "${LITMUS_SRC:-registry}")"
+SRE_AGENTS_SRC="$(image_source_normalize "${SRE_AGENTS_SRC:-local}")"
+# No Docker Hub image has ever been published for this one (Docker Hub API 404s
+# on agentcert/itbench-experiment); it exists only in the Infosys registry. local
+# is therefore the default, same as SRE_AGENTS_SRC's rationale.
+ITBENCH_EXPERIMENT_SRC="$(image_source_normalize "${ITBENCH_EXPERIMENT_SRC:-local}")"
 HUB_BUNDLE_SRC="${HUB_BUNDLE_SRC:-local}"
 HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
 INSTALL_APP_IMAGE="${INSTALL_APP_IMAGE:-agentcert/agentcert-install-app:latest}"
@@ -101,12 +110,6 @@ CHAOS_OPERATOR_IMAGE="${CHAOS_OPERATOR_IMAGE:-litmuschaos/chaos-operator:3.0.0}"
 CHAOS_RUNNER_IMAGE="${CHAOS_RUNNER_IMAGE:-litmuschaos/chaos-runner:3.0.0}"
 CHAOS_EXPORTER_IMAGE="${CHAOS_EXPORTER_IMAGE:-litmuschaos/chaos-exporter:3.0.0}"
 
-JFROG_HOST="$(cur JFROG_HOST)"; JFROG_HOST="${JFROG_HOST:-infyartifactory.jfrog.io}"
-JFROG_PATH="$(cur JFROG_REGISTRY_PATH)"; JFROG_PATH="${JFROG_PATH:-docker-local}"
-JFROG_USER="$(cur JFROG_USER)"
-JFROG_TOKEN="$(cur JFROG_TOKEN)"
-DOCKERHUB_USER="$(cur DOCKERHUB_USERNAME)"
-DOCKERHUB_TOKEN="$(cur DOCKERHUB_TOKEN)"
 RUNTIME_IMAGES_ARCHIVE="${RUNTIME_IMAGES_ARCHIVE:-$(cur RUNTIME_IMAGES_ARCHIVE)}"
 RUNTIME_IMAGES_EXPORT_PATH="${RUNTIME_IMAGES_EXPORT_PATH:-$(cur RUNTIME_IMAGES_EXPORT_PATH)}"
 
@@ -135,6 +138,7 @@ fi
 echo
 echo -e "${CYAN}=======================================================${NC}"
 echo -e "${CYAN}  Preparing experiment images${NC}"
+echo -e "${CYAN}  registry: ${IMAGE_REGISTRY:-public registries}${NC}"
 echo -e "${CYAN}  hub-bundle: ${HUB_BUNDLE_SRC}   install-app: ${APP_SRC}   install-agent: ${AGENT_SRC}   litmus: ${LITMUS_SRC}   sre-agents: ${SRE_AGENTS_SRC}   itbench-experiment: ${ITBENCH_EXPERIMENT_SRC}${NC}"
 echo -e "${CYAN}=======================================================${NC}"
 echo
@@ -154,31 +158,46 @@ image_already_built() {
     [[ "${ALREADY_BUILT_IMAGES}" == *" $1 "* ]]
 }
 
-dockerhub_credentials_are_configured() {
-    [[ -n "${DOCKERHUB_USER}" && -n "${DOCKERHUB_TOKEN}" ]] || return 1
-    case "${DOCKERHUB_USER}:${DOCKERHUB_TOKEN}" in
-        *YOUR_*|*REPLACE_ME*|*CHANGE_ME*) return 1 ;;
-    esac
+ensure_runtime_registry_login() {
+    # Local runtime preparation preloads every image the bundled charts render.
+    # With IMAGE_REGISTRY set they all come from that registry, which needs a
+    # login. With it empty they come from public registries, where Docker Hub's
+    # anonymous quota is easily exceeded in a fresh client environment, so the
+    # optional credentials are used when present. Tokens are never echoed.
+    if ! registry_has_credentials; then
+        if [[ -n "${IMAGE_REGISTRY}" ]]; then
+            warn "IMAGE_REGISTRY=${IMAGE_REGISTRY} but REGISTRY_USERNAME/REGISTRY_PASSWORD are not set in .env — cannot pull runtime images."
+            return 1
+        fi
+        warn "Registry credentials are not configured; cached images may work, but a full local runtime preload can hit Docker Hub's anonymous pull limits."
+        warn "Set REGISTRY_USERNAME and REGISTRY_PASSWORD (Docker Hub) in .env, then re-run this script."
+        return 0
+    fi
+
+    if registry_login >/dev/null; then
+        ok "Authenticated to ${IMAGE_REGISTRY:-Docker Hub} for workflow runtime image preload."
+        return 0
+    fi
+
+    warn "Login to ${IMAGE_REGISTRY:-Docker Hub} failed; refusing the runtime preload. Verify REGISTRY_USERNAME/REGISTRY_PASSWORD."
+    return 1
 }
 
-ensure_dockerhub_runtime_login() {
-    # Local runtime preparation preloads every image the bundled charts render.
-    # That includes public application images such as Sock Shop, which can
-    # easily exceed Docker Hub's anonymous quota in a fresh client environment.
-    # Reuse the documented build/push credentials without ever echoing a token.
-    if ! dockerhub_credentials_are_configured; then
-        warn "Docker Hub credentials are not configured; cached images may work, but a full local runtime preload can hit anonymous pull limits."
-        warn "Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in .env, then re-run this script."
-        return 0
+# Pull an image the cluster knows by its public name. With IMAGE_REGISTRY set
+# the copy is pulled from the registry and tagged with the public name, so
+# kind-loaded images keep the names the manifests reference. Prints docker's
+# output; returns docker's status.
+pull_runtime_image() {
+    local img="$1" src out rc
+    src="$(registry_ref "${img}")"
+    if [[ "${src}" == "$(image_canonical "${img}")" ]]; then
+        docker pull "${img}" 2>&1
+        return $?
     fi
-
-    if printf '%s' "${DOCKERHUB_TOKEN}" | docker login docker.io --username "${DOCKERHUB_USER}" --password-stdin >/dev/null; then
-        ok "Authenticated to Docker Hub for workflow runtime image preload."
-        return 0
-    fi
-
-    warn "Docker Hub login failed; refusing a likely rate-limited runtime preload. Verify DOCKERHUB_USERNAME/DOCKERHUB_TOKEN."
-    return 1
+    out="$(docker pull "${src}" 2>&1)"; rc=$?
+    printf '%s\n' "${out}"
+    [[ "${rc}" -eq 0 ]] || return "${rc}"
+    docker tag "${src}" "${img}"
 }
 
 preload_runtime_images_archive() {
@@ -222,7 +241,10 @@ assert_runtime_images_are_available_or_authenticated() {
     # An image archive can make a local setup fully offline. If it did not
     # contain every Docker Hub image, do not begin a large anonymous pull that
     # will fail part-way through a customer setup because of registry quotas.
-    dockerhub_credentials_are_configured && return 0
+    registry_has_credentials && return 0
+    # With IMAGE_REGISTRY set every pull needs credentials; that case is
+    # reported by ensure_runtime_registry_login.
+    [[ -n "${IMAGE_REGISTRY}" ]] && return 0
     for image in "$@"; do
         if is_docker_hub_image "${image}" \
             && ! docker image inspect "${image}" >/dev/null 2>&1 \
@@ -233,14 +255,14 @@ assert_runtime_images_are_available_or_authenticated() {
     missing_count="${#missing_images[@]}"
     [[ "${missing_count}" -eq 0 ]] && return 0
 
-    warn "${missing_count} Docker Hub image(s) are missing from Docker and the cluster and no usable Docker Hub credentials are configured."
+    warn "${missing_count} Docker Hub image(s) are missing from Docker and the cluster and no Docker Hub credentials (REGISTRY_USERNAME/REGISTRY_PASSWORD) are configured."
     for image in "${missing_images[@]:0:5}"; do
         warn "  missing: ${image}"
     done
     if (( missing_count > 5 )); then
         warn "  ... plus $(( missing_count - 5 )) more"
     fi
-    warn "Set DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or provide a complete RUNTIME_IMAGES_ARCHIVE, then re-run scripts/prepare-images.sh."
+    warn "Set REGISTRY_USERNAME/REGISTRY_PASSWORD, or provide a complete RUNTIME_IMAGES_ARCHIVE, then re-run scripts/prepare-images.sh."
     return 1
 }
 
@@ -419,15 +441,7 @@ build_and_load_hub_bundle() {
         return 1
     fi
 
-    content_sha="$(
-        cd "${REPO_ROOT}"
-        find app-charts/charts agent-charts/charts chaos-charts/faults chaos-charts/experiments \
-            -type f -print0 \
-            | LC_ALL=C sort -z \
-            | xargs -0 sha256sum \
-            | sha256sum \
-            | awk '{print $1}'
-    )"
+    content_sha="$(hub_bundle_content_sha "${REPO_ROOT}")"
     if [[ -z "${content_sha}" ]]; then
         warn "Could not compute hub bundle content digest"
         return 1
@@ -441,24 +455,8 @@ build_and_load_hub_bundle() {
         ok "${HUB_BUNDLE_IMAGE} already matches local hub content (${content_sha:0:12})"
     else
         info "Building ${HUB_BUNDLE_IMAGE} from local hub trees (${content_sha:0:12}) …"
-        (
-            cd "${REPO_ROOT}"
-            # BuildKit requires explicit archive entries for parent directories;
-            # GNU tar does not emit app-charts/ when only app-charts/charts is
-            # named, which makes COPY fail with mkdirat ... no such directory.
-            tar -cf - \
-                --no-recursion app-charts agent-charts chaos-charts deploy deploy/hub-bundle \
-                --recursion \
-                deploy/hub-bundle/Dockerfile \
-                app-charts/charts \
-                agent-charts/charts \
-                chaos-charts/faults \
-                chaos-charts/experiments
-        ) | docker build \
-            --build-arg "BUNDLE_CONTENT_SHA=${content_sha}" \
-            --tag "${HUB_BUNDLE_IMAGE}" \
-            --file deploy/hub-bundle/Dockerfile \
-            - || { warn "Building ${HUB_BUNDLE_IMAGE} failed"; return 1; }
+        hub_bundle_build "${REPO_ROOT}" "${HUB_BUNDLE_IMAGE}" \
+            || { warn "Building ${HUB_BUNDLE_IMAGE} failed"; return 1; }
         ok "Built ${HUB_BUNDLE_IMAGE}"
     fi
 
@@ -494,7 +492,7 @@ build_and_load_install_app() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+    docker_build_resolved "${dockerfile}" -t "${img}" "${ctx}" \
         || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
@@ -515,7 +513,7 @@ build_and_load_install_agent() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+    docker_build_resolved "${dockerfile}" -t "${img}" "${ctx}" \
         || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
@@ -535,7 +533,7 @@ build_and_load_sre_agent() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker build --network=host -t "${img}" -f "${dockerfile}" "${ctx}" \
+    docker_build_resolved "${dockerfile}" --network=host -t "${img}" "${ctx}" \
         || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
@@ -554,7 +552,7 @@ build_and_load_itbench_experiment() {
         return 1
     fi
     info "Building ${img} from ${ctx} (Dockerfile.itbench) …"
-    docker build -t "${img}" -f "${dockerfile}" "${ctx}" \
+    docker_build_resolved "${dockerfile}" -t "${img}" "${ctx}" \
         || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
@@ -688,9 +686,9 @@ pull_and_load_runtime_images() {
                 pull_ok=1
                 cached=1
             else
-                echo "Pulling ${img} from its registry …"
+                echo "Pulling ${img} from $(registry_ref "${img}") …"
                 while (( attempt <= pull_retries )); do
-                    if pull_output="$(docker pull "${img}" 2>&1)"; then
+                    if pull_output="$(pull_runtime_image "${img}")"; then
                         printf '%s\n' "${pull_output}"
                         echo "Pulled ${img}"
                         pull_ok=1
@@ -698,7 +696,7 @@ pull_and_load_runtime_images() {
                     fi
                     printf '%s\n' "${pull_output}"
                     if [[ "${pull_output}" =~ [Rr]ate[[:space:]-]*limit|429[[:space:]]Too[[:space:]]Many[[:space:]]Requests ]]; then
-                        echo "Pull rate limit reached for ${img}; authenticate Docker Hub (DOCKERHUB_USERNAME/DOCKERHUB_TOKEN) or wait for its quota window."
+                        echo "Pull rate limit reached for ${img}; set REGISTRY_USERNAME/REGISTRY_PASSWORD (Docker Hub) or wait for its quota window."
                         break
                     fi
                     if (( attempt == pull_retries )); then
@@ -721,7 +719,7 @@ pull_and_load_runtime_images() {
                     # before falling back to a direct pull inside the KinD node.
                     if [[ "${cached}" -eq 1 ]]; then
                         echo "Cached image ${img} failed to load; refreshing it from its registry …"
-                        if pull_output="$(docker pull "${img}" 2>&1)"; then
+                        if pull_output="$(pull_runtime_image "${img}")"; then
                             printf "%s\n" "${pull_output}"
                             if kind_load "${img}"; then
                                 load_ok=0
@@ -795,15 +793,15 @@ pull_and_load_runtime_images() {
     return "${failed}"
 }
 
-# ─── jfrog: create pull secret + patch service account ───────────────────────
+# ─── registry: create pull secret + patch service account ────────────────────
 
-ensure_jfrog_pull_secret() {
-    if [[ -z "${JFROG_USER}" || -z "${JFROG_TOKEN}" ]]; then
-        warn "JFROG_USER or JFROG_TOKEN not set in .env — cannot create pull secret"
-        warn "Set them and re-run this script, or run:"
-        warn "  kubectl create secret docker-registry jfrog-pull-secret \\"
-        warn "    --docker-server=${JFROG_HOST} \\"
-        warn "    --docker-username=<user> --docker-password=<token> -n <namespace>"
+ensure_registry_pull_secret() {
+    if [[ -z "${IMAGE_REGISTRY}" ]]; then
+        return 0   # public registries — nothing to authenticate
+    fi
+    if ! registry_has_credentials; then
+        warn "REGISTRY_USERNAME or REGISTRY_PASSWORD not set in .env — cannot create pull secret"
+        warn "Set them and re-run this script (or scripts/apply_cluster_prereqs.sh)."
         return 1
     fi
 
@@ -811,30 +809,27 @@ ensure_jfrog_pull_secret() {
     namespaces="$(experiment_namespaces)"
     if [[ -z "${namespaces}" ]]; then
         warn "No experiment namespaces found on the cluster (itbench, sock-shop, book-info, otel-demo)."
-        warn "Re-run this script after the experiment namespace is created."
+        warn "registry-secret-sync (scripts/apply_cluster_prereqs.sh) covers them once they are created."
         return 0
     fi
 
+    # Same helpers as scripts/apply_cluster_prereqs.sh (scripts/lib/registry.sh).
     while IFS= read -r ns; do
         [[ -z "${ns}" ]] && continue
-        info "Namespace ${ns}: creating/updating jfrog-pull-secret …"
-        # Replace instead of fail if already exists
-        kubectl create secret docker-registry jfrog-pull-secret \
-            --docker-server="${JFROG_HOST}" \
-            --docker-username="${JFROG_USER}" \
-            --docker-password="${JFROG_TOKEN}" \
-            -n "${ns}" \
-            --dry-run=client -o yaml \
-        | kubectl apply -f - -n "${ns}"
-        ok "jfrog-pull-secret applied in namespace ${ns}"
-
-        # Patch argo-chaos service account to use it
-        if kubectl get serviceaccount argo-chaos -n "${ns}" &>/dev/null; then
-            kubectl patch serviceaccount argo-chaos -n "${ns}" \
-                -p '{"imagePullSecrets":[{"name":"jfrog-pull-secret"}]}'
-            ok "argo-chaos patched with imagePullSecrets in namespace ${ns}"
+        if registry_ns_opted_out "${ns}"; then
+            info "${ns}: skipped (labelled ace.registry-sync=disabled)"
+            continue
+        fi
+        if registry_secret_apply "${ns}"; then
+            ok "${IMAGE_PULL_SECRET_NAME} applied in namespace ${ns}"
         else
-            warn "argo-chaos service account not found in ${ns} — skipping patch"
+            warn "could not apply ${IMAGE_PULL_SECRET_NAME} in namespace ${ns}"
+            continue
+        fi
+        if registry_sa_attach "${ns}" argo-chaos; then
+            ok "argo-chaos uses ${IMAGE_PULL_SECRET_NAME} in namespace ${ns}"
+        else
+            warn "argo-chaos service account not found in ${ns} — skipping"
         fi
     done <<< "${namespaces}"
 }
@@ -884,12 +879,11 @@ case "${APP_SRC}" in
             _failures+=("install-application")
         fi
         ;;
-    jfrog)
-        info "install-application: JFrog (${JFROG_HOST}/${JFROG_PATH}/agentcert/agentcert-install-app:latest)"
-        ensure_jfrog_pull_secret && _did_something=1
-        ;;
-    dockerhub)
-        info "install-application: Docker Hub — no action needed (pulled at runtime)"
+    registry)
+        info "install-application: registry ($(registry_ref "${INSTALL_APP_IMAGE}"), pulled at runtime)"
+        if [[ -n "${IMAGE_REGISTRY}" ]]; then
+            ensure_registry_pull_secret && _did_something=1
+        fi
         ;;
 esac
 
@@ -902,28 +896,26 @@ case "${AGENT_SRC}" in
             _failures+=("install-agent")
         fi
         ;;
-    jfrog)
-        info "install-agent: JFrog (${JFROG_HOST}/${JFROG_PATH}/agentcert/agentcert-install-agent:latest)"
-        # Pull secret already created above if APP_SRC was also jfrog; idempotent if called again
-        [[ "${APP_SRC}" != "jfrog" ]] && ensure_jfrog_pull_secret
-        _did_something=1
-        ;;
-    dockerhub)
-        info "install-agent: Docker Hub — no action needed (pulled at runtime)"
+    registry)
+        info "install-agent: registry ($(registry_ref "${INSTALL_AGENT_IMAGE}"), pulled at runtime)"
+        # Pull secret already created above if APP_SRC was also registry; idempotent if called again
+        if [[ -n "${IMAGE_REGISTRY}" && "${APP_SRC}" != "registry" ]]; then
+            ensure_registry_pull_secret && _did_something=1
+        fi
         ;;
 esac
 
 case "${LITMUS_SRC}" in
     local)
         info "runtime dependencies: pull once + load into the local cluster"
-        if ensure_dockerhub_runtime_login && pull_and_load_runtime_images; then
+        if ensure_runtime_registry_login && pull_and_load_runtime_images; then
             _did_something=1
         else
             _failures+=("workflow-runtime-images")
         fi
         ;;
-    dockerhub)
-        info "workflow runtime images: registry mode — pulled by Kubernetes at runtime"
+    registry)
+        info "workflow runtime images: registry mode — pulled by Kubernetes at runtime from ${IMAGE_REGISTRY:-public registries}"
         ;;
 esac
 
@@ -957,8 +949,8 @@ case "${SRE_AGENTS_SRC}" in
             _failures+=("sre-agent-crewai")
         fi
         ;;
-    dockerhub)
-        info "sre-agents: Docker Hub — no action needed (pulled at runtime)"
+    registry)
+        info "sre-agents: registry — no action needed (pulled at runtime from ${IMAGE_REGISTRY:-Docker Hub})"
         ;;
 esac
 
@@ -971,10 +963,14 @@ case "${ITBENCH_EXPERIMENT_SRC}" in
             _failures+=("itbench-experiment")
         fi
         ;;
-    dockerhub)
-        warn "itbench-experiment: dockerhub selected, but no image has ever been published to" \
-             "docker.io/agentcert/itbench-experiment — every ITBench fault under" \
-             "chaos-charts/faults/itbench/ will hit ImagePullBackOff. Use 'local' instead."
+    registry)
+        if [[ -z "${IMAGE_REGISTRY}" ]]; then
+            warn "itbench-experiment: registry selected with IMAGE_REGISTRY empty, but no image has" \
+                 "ever been published to docker.io/agentcert/itbench-experiment — every ITBench" \
+                 "fault under chaos-charts/faults/itbench/ will hit ImagePullBackOff. Use 'local' instead."
+        else
+            info "itbench-experiment: registry ($(registry_ref agentcert/itbench-experiment:dev), pulled at runtime)"
+        fi
         ;;
 esac
 
@@ -999,6 +995,6 @@ if [[ "${_did_something}" -eq 1 ]]; then
         warn "graphql deployment not found in namespace ace — skipping restart"
     fi
 else
-    ok "Nothing to do — all sources are 'dockerhub' (images pulled at runtime)."
+    ok "Nothing to do — all sources are 'registry' (images pulled at runtime from ${IMAGE_REGISTRY:-public registries})."
 fi
 echo

@@ -8,7 +8,11 @@
 # It exits 0 once a working kube context exists; every app service that needs
 # Kubernetes `depends_on` it with condition: service_completed_successfully.
 # =============================================================================
-FROM alpine:3.20
+# Base images: upstream names by default (plain `docker build` works anywhere).
+# scripts/build-and-push.sh, setup.sh and prepare-images.sh pass the copy from
+# IMAGE_REGISTRY / the frozen agentcert/ Docker Hub copies (scripts/lib/registry.sh).
+ARG ALPINE_IMAGE=alpine:3.20
+FROM ${ALPINE_IMAGE}
 
 ARG KIND_VERSION=v0.31.0
 ARG KUBECTL_VERSION=v1.29.0

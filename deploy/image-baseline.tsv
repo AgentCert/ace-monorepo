@@ -1,12 +1,15 @@
 # ACE monitored third-party service images — reference digests for the floating-tag
 # drift check in scripts/setup.sh. Columns: <image>\t<sha256 of registry manifest>\t<recorded UTC>
+# Keyed by the image the cluster pulls with the open-source defaults (IMAGE_REGISTRY
+# empty: frozen agentcert/ copies on Docker Hub). Other registries are tracked per host.
 # Regenerate from a known-good local setup: ./scripts/setup.sh --record-image-baseline
-busybox:1.36	73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662	2026-09-01T05:48:13Z
-cgr.dev/chainguard/minio	1e408150bcf1bff07a2e468b9ac91347d4da261258921faeaedbe2ed7f0818b4	2026-09-01T05:48:13Z
-clickhouse/clickhouse-server:26.8	9f8fa0d51f86611fda226c4085cdafdddce35312a60c934de2e4450d61fcb99a	2026-09-01T05:48:13Z
-langfuse/langfuse:3	a921990b3cf6f62e9452eaf8ab9bea045852375a6883abd1fdbe63afa08defa0	2026-09-01T05:48:13Z
-langfuse/langfuse-worker:3	7d0f28214bd2d1bb03056439f810442b147f0143c7ebf9bdf0f39dc4e47df6cd	2026-09-01T05:48:13Z
-litellm/litellm:v1.82.0-stable	71bf7283767ca436edcfa9f1f26c1743487b5fa29736c61c3eb6977776007c42	2026-09-01T05:48:13Z
-mongo:5	54bcd8da3ea5eec561b68c605046c55c6b304387dc4c2bf5b3a5f5064fbb7495	2026-09-01T05:48:13Z
-postgres:17	67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675	2026-09-01T05:48:13Z
-redis:7	71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7	2026-09-01T05:48:13Z
+agentcert/busybox:1.36	b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f	2026-10-07T13:20:53Z
+agentcert/chainguard-minio:latest	b1aebdf16848fc63ea03747c4d9e3e7a2b9a37950a8431adaa00f76e74850ebd	2026-10-07T13:20:53Z
+agentcert/clickhouse-clickhouse-server:26.8	9afc6df112ee611c360e39ad89b5183f4c095c5bb9118dc515d1c320c64b0928	2026-10-07T13:20:53Z
+agentcert/langfuse-langfuse:3	919ce3d2c4c2a84d0217b779d0f50063055367be48bfcc9d9e1400329e38c9c1	2026-10-07T13:20:53Z
+agentcert/langfuse-langfuse-worker:3	1cc3adfecde5d2170707da5719d74e38eb335cc527408cb5b2459e88ba9d97df	2026-10-07T13:20:53Z
+agentcert/litellm-litellm:v1.82.0-stable	56d709783ef23f2c8f7e1ba9bffa1e0471c28c2821f3abca4d833a8368a7f9f1	2026-10-07T13:20:53Z
+agentcert/metrics-server-metrics-server:v0.7.2	78e46b57096ec75e302fbc853e36359555df5c827bb009ecfe66f97474cc2a5a	2026-10-07T13:20:53Z
+agentcert/mongo:5	f7a950ee4a1cc048300cd3b3da3e939974eb8278525101ac917dbed1a3ce3d51	2026-10-07T13:20:53Z
+agentcert/postgres:17	3cec7eb015ba8adb28139fa5c83b8489cdf0e666e53dfdf20f598ae0cc8739e3	2026-10-07T13:20:53Z
+agentcert/redis:7	cd745595f143052dd6a743bc5651d3ce4b03979fe5c99c7fcfab73461f6f217b	2026-10-07T13:20:53Z

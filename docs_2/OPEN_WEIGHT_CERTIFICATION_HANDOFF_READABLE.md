@@ -3316,3 +3316,65 @@ Now, when you add an agent or app to an experiment, the drawer shows a **Setting
 **Checked:** all related tests pass (38), including new ones that render the real drawer. There are no new type or lint errors.
 
 **Next, proposed and not started:** settings that adapt to the chart, and settings users can add themselves.
+
+---
+
+## §135 — JFrog now has every image ACE needs (registry Phase 0) (2026-10-07, uncommitted)
+
+**What:** a single list of all 105 images (`deploy/images.txt`) plus three scripts: check what's in the registry, copy third-party images into it, and build-and-push our own. JFrog went from 46 missing images to 0.
+
+**Why:** later phases only switch image names to JFrog; if an image isn't there, pods fail. Filling the registry first means later failures point at code, not missing images.
+
+**Catch:** this JFrog account can add tags but not overwrite them. Ten of our images still have an old `:latest`; their new build is under a commit tag. Fix: overwrite permission on `docker-local/agentcert/**`, or pin commit tags.
+
+**Verified:** naming tests, both registry paths, every generated link.
+
+## §136 — `.env` is now the single source for the image registry (registry Phase 1) (2026-10-07, uncommitted)
+
+**What:** one setting, `IMAGE_REGISTRY` (empty = public registries), plus `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`. The old JFrog/Docker Hub keys are gone from `.env.example`, and each image source is now just `local` or `registry`. At deploy time a small helper puts the registry in front of the images that pull from it; `.env` itself always keeps public names.
+
+**Why:** the registry used to be spread across about eight keys. Now one line switches between the Infosys and open-source setups.
+
+**Existing `.env` files** are migrated automatically on the next `setup.sh` run; old keys are left in place.
+
+**Also fixed:** express setup silently threw away its image-source answers.
+
+**Verified:** resolver and migration tests, both deploy paths (Helm and kubectl), a real pull from JFrog. A full `setup.sh` deploy was not run.
+
+## §137 — The cluster gets the registry login automatically (registry Phase 2) (2026-10-07, uncommitted)
+
+**What:** when `IMAGE_REGISTRY` is set, `setup.sh` now runs `apply_cluster_prereqs.sh`. It puts the registry login (one secret name everywhere) into the cluster's namespaces and service accounts, and installs a small sync that copies it into every namespace created later, within about 4 seconds. With `IMAGE_REGISTRY` empty nothing happens; switching back to empty removes the sync.
+
+**Why:** pointing images at JFrog is only half the job. Without the login, JFrog answers 401. Experiments create namespaces at run time, so a one-off script can't cover them.
+
+**Also:** duplicated code from Phases 0–2 was moved into `scripts/lib/registry.sh`, and `scripts/tests/test-registry-tooling.sh` now re-runs every check in under a minute.
+
+**Verified:** on a temporary KinD cluster, from 401 before to a running pod pulled from JFrog after.
+
+## §138 — Open-source installs use frozen copies of third-party images (2026-10-07, uncommitted)
+
+**What:** every third-party image ACE uses (Prometheus, Kubernetes MCP, Litmus, ...) was copied once to public repos under `docker.io/agentcert/`. With `IMAGE_REGISTRY` empty, ACE pulls those copies instead of the upstream images.
+
+**Why:** upstream tags such as `:latest` change without notice. Frozen copies mean an outside user gets the same images we tested with.
+
+**Verified:** 61 automated naming checks; all 14 ACE images were also pushed to Docker Hub.
+
+## §139 — Platform, experiments and demo apps now follow the one registry setting (registry Phases 3–5) (2026-10-07, uncommitted)
+
+**What:** the Helm platform chart, the graphql server (experiment workflows, chaos infra, agent installs) and the app/agent installers now take every image from `IMAGE_REGISTRY` (or the frozen `agentcert/` copies when it is empty), attach the pull secret, and leave locally built images alone. The demo apps are handled by a Helm post-renderer, because the otel-demo upstream chart can't be redirected through its settings.
+
+**Why:** most pods are created while an experiment runs, not by setup, so graphql and the installers had to learn the same rule as the setup scripts.
+
+**Verified:** 114 automated checks plus a real cluster test, in which all 15 sock-shop pods and the agent pulled from JFrog with no errors.
+
+**Still to do:** build and publish the new images once committed; Phase 6 (compose, flat manifests, Dockerfile base images).
+
+## §140 — Compose, Dockerfiles and kind follow the registry setting too; review fixes; merged with upstream (2026-10-08, uncommitted)
+
+**What:** Dockerfile base images, the Docker Compose stack, the kind node image and the flat `deploy/k8s` manifests now take their images from `IMAGE_REGISTRY`, like the Helm chart and graphql already did. Only images we actually froze under `agentcert/` are renamed in open-source mode; anything else, such as a user's own chart, keeps its normal name. Review fixes: the registry password is no longer visible in the process list, and generated files that contain secrets are now private to the owner. The branch was then merged with the latest upstream (one Go conflict, resolved by keeping upstream's version and adding one line).
+
+**Why:** a machine inside Infosys can't reach Docker Hub, so every place that pulls or builds an image has to use the same rule.
+
+**Verified:** 133 automated checks, all graphql Go tests and both installers pass after the merge. The user ran the JFrog, Docker Hub and compose bring-ups themselves.
+
+**Still to do:** the owner of the upstream chaos-charts and litmus-go commits has to push them; three agent images still need adding to the inventory; JFrog overwrite permission; build and publish the new images after the commit.

@@ -10045,3 +10045,102 @@ Deliberately not offered:
 **Durability:** the changes are in source, and the web image must be rebuilt (`./scripts/setup.sh --restart --local-build`).
 
 **Open (proposed to the user, not started):** making settings dynamic, so users can add their own keys and repeated values come from the chart automatically instead of being listed one by one.
+
+### §135 — Registry migration Phase 0: inventory + JFrog filled (2026-10-07, uncommitted)
+
+Plan: `docs/setup/registry-migration-plan.md`. Goal of the phase: every image ACE needs exists in `infyartifactory.jfrog.io/docker-local` under the naming rule `<IMAGE_REGISTRY>/<public name>` (host kept for non-Docker-Hub images, e.g. `…/quay.io/containers/kubernetes_mcp_server:v0.0.67`), which is how JFrog already stores them.
+
+| File | Change |
+|---|---|
+| `deploy/images.txt` (new) | Single inventory: 14 `build` rows (context + Dockerfile/recipe) + 91 `mirror` rows + 3 optional. Built from the files themselves: chaos-charts `image:` and `*_IMAGE` env values, `helm template` of sock-shop/bookinfo/otel-demo (otel subchart 0.40.9 resolved), Helm values, Dockerfile `FROM`s. `INVALID_IMAGE`/`INVALID_ARCH_IMAGE` deliberately excluded. |
+| `scripts/lib/registry.sh` (new) | Naming rule (`registry_ref`, `image_canonical`), `registry_load` (env → .env; rejects a bare `*.jfrog.io` host), `registry_login`, `inventory_rows`, `source_revision`/`remote_revision` (OCI revision label). |
+| `scripts/check-registry-images.sh` (new) | OK / OLD / MISSING per row via `docker buildx imagetools inspect` (no pull). `--markdown FILE` writes a table with Artifactory UI links → `docs/setup/registry-images.md`. |
+| `scripts/mirror-images.sh` (new) | pull `--platform linux/amd64` → tag → `docker push --platform` (needed with the containerd image store); skips existing; removes only images it pulled. |
+| `scripts/build-and-push.sh` | Reads the inventory (adds hub-bundle, cluster-init, subscriber; web via `compose:web` like setup.sh). Pushes `:<revision>` then the moving tag; stamps `org.opencontainers.image.revision`. `--committed-only` builds HEAD via `git archive` from the repo top level (from a subdir `git archive` returns an empty tree). |
+
+Results: before 49 OK / 10 OLD / 46 MISSING → after **95 OK / 10 OLD / 0 MISSING**. 41 third-party images copied, 0 failures. All 13 ACE images built; graphql/auth from committed AgentCert HEAD `58512cc` (two staged changes — `JWT_SECRET` salt, experiment-name fallback — intentionally excluded at the user's request).
+
+**Blocker found:** the JFrog account gets `No permission to overwrite manifest` on existing tags. The 10 OLD images (graphql, auth, web, certifier, cluster-init, subscriber `3.0.0`, install-app, install-agent, flash-agent, agent-sidecar) have the new build only under their revision tag; `:latest` is still the 2026-06 build. Needs Delete/Overwrite on `docker-local/agentcert/**`, or pinning revision tags.
+
+**Verified:** 15/15 naming-rule tests; open-source path (`IMAGE_REGISTRY=`) 91/91 public names resolve; 115/115 generated links return 200 from the Artifactory storage API.
+
+**Durability:** all in checked-in scripts; `.tmp/` logs only.
+
+### §136 — Registry migration Phase 1: `.env` single source of truth (2026-10-07, uncommitted)
+
+| File | Change |
+|---|---|
+| `.env.example` | Adds `IMAGE_REGISTRY=` (empty = public), `REGISTRY_USERNAME`, `REGISTRY_PASSWORD`, `IMAGE_PULL_SECRET_NAME=registry-pull`. Removes `JFROG_*`, `DOCKERHUB_*`, `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX`. Sources documented as `local | registry`. `LITELLM_PROXY_IMAGE` no longer carries `docker.io/`. |
+| `scripts/lib/resolve_image_env.py` (new) | Deploy-time resolution: `*_IMAGE` (public names) → `<IMAGE_REGISTRY>/<name>` only where the component's source is `registry` (local = kind-loaded public names, untouched). Derives `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX` (`<IMAGE_REGISTRY>/` or `docker.io`); Go's `rewriteLitmusImageRegistry` already strips the host and prepends it, so no Go change. Never double-prefixes. |
+| `scripts/setup.sh` | (1) Migration on every run: `jfrog`/`dockerhub` sources → `registry`; `IMAGE_REGISTRY` from `JFROG_HOST/JFROG_REGISTRY_PATH`; bare JFrog host gets its repo path; `REGISTRY_*` from `JFROG_*` (registry set) or `DOCKERHUB_*` (empty); legacy JFrog prefixes stripped from `INSTALL_*_IMAGE`. Old keys kept. (2) Wizards ask l/r + one `IMAGE_REGISTRY` question (`-` clears). (3) Push/login via `registry.sh` (`registry_ref` for push tags). (4) Resolver applied in `generate_helm_values_env` and `apply_ace_env_secret` (temp file 0600, removed via `trap … RETURN`). (5) **Pre-existing bug fixed:** express-mode image-source answers were reset to `""` before use. |
+| `scripts/prepare-images.sh` | Uses `registry.sh`; sources normalised; `ensure_registry_pull_secret` (name `IMAGE_PULL_SECRET_NAME`, server = registry host); local-mode runtime preload pulls `<IMAGE_REGISTRY>/<img>` and tags the public name (an Infosys VM never touches Docker Hub). |
+| `scripts/lib/registry.sh`, `scripts/build-and-push.sh` | Credential fallback by registry (`JFROG_*` when set, `DOCKERHUB_*` when empty); one login path. |
+| `docs/setup/configuration.md`, `README.md`, `.claude/skills/release-images/SKILL.md` | New keys. |
+
+**Verified:** resolver 8/8 scenario tests; bash↔Python naming parity 216/216; migration on legacy-jfrog / legacy-dockerhub / new `.env` samples, idempotent; `generate_helm_values_env` and `apply_ace_env_secret` (kubectl stubbed) emit prefixed values only for registry sources; real pull of `registry.k8s.io/pause:3.9` from JFrog + retag; Phase 0 scripts re-run on both paths (95/10/0 and 91/0/0); `bash -n` on all changed scripts.
+
+**Not run:** a full `setup.sh` deploy (no cluster this session). Compose path still reads `.env` directly (no derived Litmus prefix → images untouched; works with kind-loaded names) — Phase 6.
+
+**Durability:** checked-in source; an existing `.env` is migrated automatically on the next `setup.sh`.
+
+### §137 — Registry migration Phase 2: cluster pull credentials + refactor of Phases 0–2 (2026-10-07, uncommitted)
+
+| File | Change |
+|---|---|
+| `scripts/apply_cluster_prereqs.sh` (rewritten; was an untracked copy of main's) | Reads `.env` via `registry.sh`, never writes it, no JFrog default, no-op when `IMAGE_REGISTRY` is empty. Secret `IMAGE_PULL_SECRET_NAME` in kube-system (master), `ace`, chaos-infra ns (`ACE_INFRA_NAMESPACE`, default litmus) and existing experiment ns; attaches it to every ServiceAccount (keeps existing entries); installs the sync with a config-checksum annotation (rolls only on change); `--uninstall`, `--no-sync`. Dropped main's `ca-certs` ConfigMap — duplicate of setup.sh's `ace-ca-certs`. |
+| `deploy/registry-secret-sync.yaml` (new) | kube-system Deployment (`alpine/k8s:1.29.2`, already mirrored) + SA/ClusterRole/Binding + script ConfigMap. Watches namespaces and ServiceAccounts, 60s reconcile, skips kube-* and `ace.registry-sync=disabled`. Non-root, read-only rootfs, `HOME=/tmp`, TERM trap. |
+| `scripts/setup.sh` | `apply_registry_prereqs` in both deploy paths after `create_ca_configmap`; uninstalls the sync when `IMAGE_REGISTRY` becomes empty. Migration uses `value_is_unset` from `registry.sh`. |
+| `scripts/lib/registry.sh` | Added `registry_secret_apply`, `registry_sa_attach`, `registry_ns_opted_out`, `registry_has_credentials`, `value_is_unset`, `image_source_normalize`, `env_file_value` (renamed from `_registry_env_val`), `hub_bundle_build`; `IMAGE_PULL_SECRET_NAME` loaded centrally. |
+| `scripts/prepare-images.sh` | Secret code, source normalisation, credential check and hub-bundle recipe now come from `registry.sh` (no duplicate copies). |
+| `scripts/build-and-push.sh` | Uses `hub_bundle_build` and `registry_has_credentials`. |
+| `scripts/tests/test-registry-tooling.sh` (new) | 54 offline checks (syntax, inventory, naming, bash↔Python parity, resolver, setup.sh migration + deploy generators run as-is); `--online` adds 3 registry checks. |
+
+Bugs found while testing on a throwaway KinD cluster (`ace-p2test`, deleted afterwards): duplicate pod from apply+restart (→ checksum annotation); ~6–12 s/namespace from 5 kubectl calls under a 200m limit (→ batched reads, write-only-when-missing, 500m; first pass 42 s → 4 s); ServiceAccount watcher ignored the opt-out label; bash PID 1 ignored SIGTERM (30 s → 2 s stop).
+
+**Verified on KinD:** pull without secret → 401; empty registry → no-op; secrets + SA attach (existing `some-other-secret` kept); new namespace covered in 3.6–3.8 s and a JFrog-hosted pod Running; new SA attached in 0.7 s; idempotent re-run (no pod roll); opt-out honoured; prepare-images helper; setup.sh hook set → install, empty → uninstall. Test suite 57/57 with `--online`; refactored hub-bundle recipe reproduces content-sha `d538eff592e9`.
+
+**Not covered:** KinD nodes behind Zscaler need the corporate CA in the node's containerd trust store to reach JFrog over TLS — not a pull-secret concern (AKS nodes are unaffected).
+
+### §138 — Frozen third-party copies on Docker Hub for the open-source path (2026-10-07, uncommitted)
+
+User requirement: third-party images (Prometheus, Kubernetes MCP, Litmus, ...) must not change under ACE. All 91 mirror rows are copied (amd64) to public repos under `docker.io/agentcert/`, and `IMAGE_REGISTRY=` (open source) now pulls those copies instead of upstream. Approved by the user, including publishing them publicly.
+
+| File | Change |
+|---|---|
+| `scripts/lib/registry.sh` | `IMAGE_MIRROR_NAMESPACE` (default `agentcert`, `none` = upstream). `image_flat_ref` (drop host, `/`→`-`; Docker Hub cannot nest), `upstream_ref`. `registry_ref` with empty registry → flat copy. `registry_load`: when the caller overrides `IMAGE_REGISTRY` to empty on a .env naming a private registry, `REGISTRY_*` (private creds) are skipped in favour of `DOCKERHUB_*`. |
+| `scripts/lib/resolve_image_env.py` | Same flat rule (`flat_ref`, `registry_ref(ref, registry, ns)`). Litmus helper prefix stays `docker.io` with an empty registry — graphql's rewrite only does nested prefixes (Phase 4). |
+| `scripts/mirror-images.sh` | Source is always `upstream_ref`; target `docker.io/<ns>` when IMAGE_REGISTRY is empty. |
+| `scripts/build-and-push.sh` | `--reuse-local` (push the local image when its revision label matches — identical image to both registries); an existing revision tag with the same revision label counts as present when overwrite is refused. |
+| `.env.example`, `deploy/images.txt`, `docs/setup/configuration.md`, `docs/setup/registry-migration-plan.md`, `scripts/check-registry-images.sh` | Document the rule. |
+| `scripts/tests/test-registry-tooling.sh` | Naming cases updated; parity over registry set/empty × namespace agentcert/none; flat-name collision check (only go-runner scarf alias, same image). 61/61. |
+
+Pushes this session: all 14 ACE images to Docker Hub (`:latest` + revision; graphql/auth rebuilt from committed HEAD, 12 reused). JFrog: second account (`REGISTRY_USERNAME`) also lacks overwrite — 10 moving tags still 2026-06 builds; new builds under revision tags.
+
+### §139 — Registry migration Phases 3–5: Helm chart, graphql rewrite, chart installers (2026-10-07, uncommitted)
+
+| Area | Files | Change |
+|---|---|---|
+| Phase 3 Helm | `deploy/helm/ace/templates/_helpers.tpl`, all 8 workload templates, `values.yaml` | `ace.image` (naming rule in sprig) on all 22 image lines; `ace.imagePullSecrets` on all 14 pod specs; values `imageRegistry`, `imageMirrorNamespace`, `imagePullSecretName`, `aceImagesLocal`, `runtimeImagesLocal`, `chartsHub.bundleLocal`. |
+| Phase 3 setup | `scripts/setup.sh`, `deploy/image-baseline.tsv` | `helm_deploy` passes the values from .env; drift check keys by resolved ref; baseline regenerated for the frozen agentcert/ copies. The `k` (flat manifests) path warns that it ignores IMAGE_REGISTRY (Phase 6). |
+| Phase 4 Go | new `pkg/imageref` (+tests); new `ops/registry_images.go` (+tests); `ops/service.go`, `chaos_experiment_run/handler/handler.go`, `chaos_infrastructure/infra_utils.go` (+test), 14 infra manifests, `server.go`, `agent_registry/helm.go`, `helm/service.go`, `handlers/helm_validation_handler.go` | Workflow rewrite (templates, init/sidecars, script, raw artifacts incl. `*_IMAGE` settings, never `INVALID_IMAGE`/`INVALID_ARCH_IMAGE`) per component source; workflow `imagePullSecrets`; `WorkflowImage()` for hardcoded k8s/busybox steps; `#{IMAGE_PULL_SECRETS}` in every infra Deployment; installer env `ACE_IMAGE_*`; sidecar registry split (`splitChartImage`); graphql binary doubles as Helm post-renderer (`ACE_HELM_POST_RENDER=1`) for direct agent installs and uploaded charts. CRLF preserved in `helm.go`, `helm/service.go`, `helm_validation_handler.go`, the Argo manifests. |
+| Phase 5 | `app-charts/install-app/{imageref.go (generated), registry.go, main.go}`, `agent-charts/install-agent/{same}`, 6 agent charts | Post-renderer + pull-secret copy (from the pod's namespace) before every helm install/upgrade, including `helmUpgradeWithAgentID` (otherwise `--reuse-values` reverted the images). Agent charts: `{{ with registry }}` guard, `imagePullSecrets` value. stdlib-only; builds with Go 1.21. |
+| Tests | `scripts/tests/test-registry-tooling.sh`, `scripts/lib/sync-imageref.sh` | +Helm chart vs bash on every image, Helm/bash parity over 108 images × 4 configs, agent charts, installer copy sync; `--online`: Go suites + bash→Go fixture, app charts through the real post-renderer (images resolved, in inventory, pull secrets, valid YAML). 114/114. |
+
+**E2E (throwaway KinD `ace-p345`, deleted):** registry-secret-sync stopped; `install-app` with JFrog env installed sock-shop — secret copied by install-app itself, 15/15 pods Running, every image from JFrog, every pod with the pull secret, 0 pull errors. `install-agent` installed flash-agent in a new namespace — both images (sidecar via the split `registry/repository/tag`) pulled from JFrog. `ace` chart with JFrog values: 47/47 objects accepted by server dry-run; 14/14 workloads with `imagePullSecrets`. Full graphql `go test ./...`: 21 packages ok.
+
+**Not yet:** new graphql / install-app / install-agent / hub-bundle images are not built and pushed (source uncommitted). Infosys deploys still get JFrog's old `:latest` until rebuilt, committed and pushed (and JFrog overwrite granted or commit tags pinned). Compose and `deploy/k8s` paths are Phase 6.
+
+### §140 — Registry migration Phase 6, pre-commit review fixes, merge with upstream (2026-10-08, uncommitted)
+
+| Area | Files | Change |
+|---|---|---|
+| Phase 6 Dockerfiles | certifier, litmus-go `build/Dockerfile.itbench`, agent-sidecar, `agents/*/Dockerfile`, AgentCert auth/graphql/subscriber, `compose/cluster-init`, `deploy/hub-bundle`, new `compose/web/Dockerfile` | Every base image is `ARG <NAME>_IMAGE=<upstream>`; `docker_build_resolved` (`scripts/lib/registry.sh`) passes the resolved refs as `--build-arg`, so a JFrog-only host builds without Docker Hub. |
+| Phase 6 compose | `docker-compose.yml`, `compose/*.override.yml`, `compose/langfuse/docker-compose.yml`, `scripts/compose-up-guard.sh`, `scripts/start-local-services.sh` | `image: ${ACE_IMG_*:-<ref>}` resolved by `compose_image_env`; guard writes `.tmp/ace-compose.env` (umask 077) and graphql reads it via `AGENTCERT_ENV_FILE: /ace/${ACE_RESOLVED_ENV:-.env}`. |
+| Phase 6 kind / k8s | `scripts/setup.sh`, `compose/cluster-init/entrypoint.sh`, new `scripts/kubectl-apply-images.sh` | `KIND_NODE_IMAGE` / `kind_node_image` → `kind create --image`; flat `deploy/k8s` manifests applied through `resolve_image_env.py --rewrite-manifests` (Python twin of Go `RewriteText`). |
+| Frozen-copy allowlist | `scripts/lib/sync-imageref.sh` → `pkg/imageref/mirrored.go`, installer `mirrored.go`, `deploy/helm/ace/templates/_mirrored.tpl` | With `IMAGE_REGISTRY` empty only images in `deploy/images.txt` non-optional mirror rows become `agentcert/<flat>`; any other image (user charts, custom experiments) keeps its upstream name. Same rule in bash, Python, Helm, Go; `--check` mode in the test suite. |
+| Review fixes | `registry.sh`, `setup.sh`, `compose-up-guard.sh`, `build-and-push.sh` | dockerconfigjson built in python and piped to `kubectl apply` (no password in argv); `values-env.yaml` written 0600; `compose_image_env` only reads `image:` lines; `_REGISTRY_*` before `DH_*`; empty-array safety; revision tag pushed before the moving tag. |
+| Merge | AgentCert `562e059`, app-charts `53602ee`, agent-charts `3dc15be`, monorepo `82b0d1f` | `ops/service.go` conflict: kept upstream `chartconfig.IsPlatformOwned`, added `"sidecar.image.registry": true` to `pkg/chartconfig/platform.go`. Handoff conflicts: these sections renumbered §135–§140. certifier / litmus-go / agent-sidecar moved from detached HEAD to `stable_it_bench` (same commit). |
+
+**Verified:** `scripts/tests/test-registry-tooling.sh --online` 133/133; graphql `go test` 24 packages ok; install-app / install-agent build + test ok; `sync-imageref.sh --check` clean; gofmt clean. Tests 2–4 (Infosys JFrog, open-source Docker Hub, compose) run by the user with `shut_down.sh` + `setup.sh` in their checkout.
+
+**Open:** upstream monorepo `82b0d1f` pins chaos-charts `bbad9609` and litmus-go `c1b1157b`, which are not on the remote ("not our ref") — the owner must push them; locally they stay at `d876561` / `6879e4b6`, so do not commit those two pointers from this checkout. Not in the inventory yet: `agentcert/sre-agent`, `agentcert/ciso-agent`, `nginx:latest` (k8s-agent) — need mirroring for JFrog mode. JFrog `:latest` overwrite permission still missing; new graphql / installers / hub-bundle images get built only after commit (`build-and-push.sh --committed-only --reuse-local`).

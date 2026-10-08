@@ -424,9 +424,9 @@ pip install --user reportlab    # one-time, only needed for PDF output
 
 ## Admin Actions
 
-### Build & push all Docker images to Docker Hub
+### Build & push all Docker images
 
-Builds all component images and pushes them to `docker.io/agentcert/*`. Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in the root `.env`.
+Builds all component images (`build` rows in `deploy/images.txt`) and pushes them to `IMAGE_REGISTRY` — `docker.io/agentcert/*` when it is empty. Requires `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` in the root `.env`. Verify with `./scripts/check-registry-images.sh`.
 
 ```bash
 ./scripts/build-and-push.sh

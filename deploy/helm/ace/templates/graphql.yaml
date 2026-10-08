@@ -14,9 +14,10 @@ spec:
         app: graphql
     spec:
       serviceAccountName: graphql
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       initContainers:
         - name: load-local-hubs
-          image: {{ .Values.chartsHub.bundleImage }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.chartsHub.bundleImage "local" .Values.chartsHub.bundleLocal) }}
           imagePullPolicy: {{ .Values.chartsHub.bundleImagePullPolicy }}
           command: [sh, -ec]
           args:
@@ -30,7 +31,7 @@ spec:
             - name: repo
               mountPath: /repo
         - name: wait-for-mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -59,7 +60,7 @@ spec:
                   optional: true
       containers:
         - name: graphql
-          image: {{ .Values.images.graphql }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.graphql "local" .Values.aceImagesLocal) }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - containerPort: 8081

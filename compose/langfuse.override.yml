@@ -33,11 +33,21 @@
 # hypothetical: it happened here (both minio and langfuse-web genuinely
 # attempted a dual bind and failed once a hardcoded port collided).
 # =============================================================================
+# Images: ${ACE_IMG_*:-<public ref>} is resolved for IMAGE_REGISTRY / the frozen
+# agentcert/ copies by scripts/start-local-services.sh (scripts/lib/registry.sh).
 services:
+  langfuse-worker:
+    image: ${ACE_IMG_LANGFUSE_WORKER:-langfuse/langfuse-worker:3}
+  redis:
+    image: ${ACE_IMG_REDIS:-redis:7}
+  postgres:
+    image: ${ACE_IMG_POSTGRES:-postgres:17}
   langfuse-web:
+    image: ${ACE_IMG_LANGFUSE_WEB:-langfuse/langfuse:3}
     ports: !override
       - "${LANGFUSE_PORT:-3000}:3000"
   minio:
+    image: ${ACE_IMG_MINIO:-cgr.dev/chainguard/minio:latest}
     ports: !override
       - "${MINIO_API_PORT:-9090}:9000"
       - "127.0.0.1:${MINIO_CONSOLE_PORT:-9091}:9001"
@@ -48,7 +58,7 @@ services:
   # certifier (HANDOFF §108). Pin to 26.8 (matches any volume already written locally — no
   # wipe) and restore the pre-26.8 parse via the drop-in below (needs CH >= 26.8).
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server:26.8
+    image: ${ACE_IMG_CLICKHOUSE:-clickhouse/clickhouse-server:26.8}
     configs:
       - source: ace_clickhouse_settings
         target: /etc/clickhouse-server/users.d/ace-datetime-compat.xml

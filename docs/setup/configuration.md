@@ -125,21 +125,30 @@ The certifier calls Azure OpenAI directly, not via LiteLLM. Gemini/OpenRouter ke
 ## Image Sources & Reproducibility
 
 `setup.sh` writes these into `.env`; `scripts/prepare-images.sh` acts on them (and can be re-run
-standalone). The defaults make a run reproducible from the checkout alone:
+standalone). The defaults make a run reproducible from the checkout alone.
+
+Where images come from is decided by **one** setting, `IMAGE_REGISTRY` (see
+[registry-migration-plan.md](registry-migration-plan.md)):
 
 | Variable | Default | What it controls |
 |---|---|---|
+| `IMAGE_REGISTRY` | *(empty)* | empty = Docker Hub, with third-party images taken from frozen copies under `IMAGE_MIRROR_NAMESPACE` (e.g. `litmuschaos/k8s:latest` → `agentcert/litmuschaos-k8s:latest`) so upstream changes cannot break ACE; set (e.g. `infyartifactory.jfrog.io/docker-local` inside Infosys) = every image is pulled as `<IMAGE_REGISTRY>/<public name>`. `*_IMAGE` values always hold public names |
+| `IMAGE_MIRROR_NAMESPACE` | `agentcert` | Docker Hub namespace of those frozen copies (made by `scripts/mirror-images.sh` with `IMAGE_REGISTRY` empty); `none` pulls upstream directly |
+| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | *(empty)* | credentials for `IMAGE_REGISTRY` (a JFrog access token goes in the password); with it empty, optional Docker Hub credentials for pushes and rate limits |
+| `IMAGE_PULL_SECRET_NAME` | `registry-pull` | Kubernetes image-pull Secret holding those credentials (only when `IMAGE_REGISTRY` is set) |
 | `PLATFORM_IMAGE_SOURCE` | `local` | auth, graphql, web, certifier, subscriber … — `local` builds them from this checkout on `--restart` |
 | `HUB_BUNDLE_IMAGE_SOURCE` | `local` | the immutable hub bundle (app/agent/fault catalogs + charts) GraphQL serves; `registry` + `HUB_BUNDLE_IMAGE` for clusters that cannot side-load |
 | `INSTALL_APP_IMAGE_SOURCE` / `INSTALL_AGENT_IMAGE_SOURCE` | `local` | the installer images, which carry their own copy of the charts — `local` keeps them identical to the hub bundle (pull policy `Never`) |
 | `SRE_AGENTS_IMAGE_SOURCE` | `local` | flash-agent, sre-agent-comprehensive, sre-agent-crewai and agent-sidecar |
-| `ITBENCH_EXPERIMENT_IMAGE_SOURCE` | `local` | the ITBench fault runner (never published; `local` is the only working option) |
+| `ITBENCH_EXPERIMENT_IMAGE_SOURCE` | `local` | the ITBench fault runner (published only to the Infosys registry; with `IMAGE_REGISTRY` empty `local` is the only working option) |
 | `LITMUS_IMAGES_SOURCE` | `local` | all third-party workflow images (rendered bundled apps, Litmus helpers, fault tools, metrics-server), pre-pulled and side-loaded so runs do not contact registries |
 | `ACE_AUTO_REGISTER_INFRA` | `true` | register + connect the `ace-local` chaos infrastructure after deploy (`ACE_INFRA_NAME`, `ACE_INFRA_NAMESPACE`) |
 | `ACE_ALLOW_UNVERIFIED_COMBINATIONS` | `false` | `true` downgrades catalog/compatibility validation to warnings — development only, not certification-grade |
 
-`dockerhub`/`jfrog` sources pull published `:latest` images that can lag this checkout; use them
-only for clusters that cannot side-load (anything other than kind or k3s). If any required local
+Each `*_IMAGE_SOURCE` is `local` or `registry` (older `.env` files saying `dockerhub` or `jfrog`
+are migrated to `registry` by `setup.sh`). `registry` pulls published `:latest` images from
+`IMAGE_REGISTRY` that can lag this checkout; use it only for clusters that cannot side-load
+(anything other than kind or k3s). If any required local
 image fails to build, `prepare-images.sh` exits non-zero and setup stops instead of deploying a
 stack that would fail later with `ImagePullBackOff`.
 
@@ -278,7 +287,7 @@ If your host firewall (UFW) is active, in-cluster pods also need the port opened
 
 An experiment never pulls an image at run time when `LITMUS_IMAGES_SOURCE=local`: setup resolves every image from the three bundled application charts plus Litmus, fault-tool, and metrics images, then loads them into the Kind nodes before it reports success.
 
-For a connected client, set real `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` values in `.env`. They are used only by the setup-time preload; anonymous Docker Hub pulls are intentionally rejected before a partial install can hit a rate limit.
+For a connected client, set real `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` values in `.env`. With `IMAGE_REGISTRY` empty they are Docker Hub credentials used only by the setup-time preload; anonymous Docker Hub pulls are intentionally rejected before a partial install can hit a rate limit. With `IMAGE_REGISTRY` set, the preload pulls every image from that registry instead.
 
 For a disconnected client, prepare a bundle once on a connected build host:
 

@@ -103,6 +103,16 @@ done
 command -v docker >/dev/null 2>&1 || { log_error "docker not found"; exit 1; }
 docker compose version >/dev/null 2>&1 || { log_error "'docker compose' plugin not available"; exit 1; }
 
+# Images come from IMAGE_REGISTRY / the frozen agentcert/ Docker Hub copies
+# (scripts/lib/registry.sh): resolve the compose override images and log in.
+# shellcheck source=lib/registry.sh
+source "${REPO_ROOT}/scripts/lib/registry.sh"
+registry_load "${ENV_FILE}" || exit 1
+compose_image_env "${ENV_FILE}" "${REPO_ROOT}/compose/langfuse.override.yml" "${REPO_ROOT}/compose/litellm.override.yml"
+if [[ -n "${IMAGE_REGISTRY}" ]]; then
+    registry_login >/dev/null || log_warn "login to $(registry_host) failed — pulls may get 401"
+fi
+
 port_in_use() { ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE "[:.]${1}$"; }
 container_running() { docker ps --format '{{.Names}}' | grep -qx "$1"; }
 container_exists()  { docker ps -a --format '{{.Names}}' | grep -qx "$1"; }
@@ -164,7 +174,7 @@ ACE_INSTANCE_NAME="${ACE_INSTANCE_NAME:-$(id -un \
     | sed -e 's/-*$//')}"
 ACE_INSTANCE_NAME="${ACE_INSTANCE_NAME:-instance}"
 
-OLLAMA_IMAGE="ollama/ollama:latest"
+OLLAMA_IMAGE="$(registry_ref ollama/ollama:latest)"
 OLLAMA_NAME="ollama-${ACE_INSTANCE_NAME}"
 OLLAMA_MODELS_VOL="ollama-models-${ACE_INSTANCE_NAME}"
 # Host port for this checkout's Ollama container. Must not collide with the
@@ -174,7 +184,7 @@ OLLAMA_PORT="$(grep -m1 '^OLLAMA_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2-
 OLLAMA_PORT="${OLLAMA_PORT:-11435}"
 OLLAMA_MODEL="$(grep -m1 '^OLLAMA_MODEL=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2-)"
 
-MONGO_IMAGE="mongo:5"
+MONGO_IMAGE="$(registry_ref mongo:5)"
 MONGO_NAME="agentcert-mongo-${ACE_INSTANCE_NAME}"
 MONGO_DATA_VOL="mongodb_data_${ACE_INSTANCE_NAME}"
 MONGO_KEYFILE_VOL="mongo-keyfile-vol-${ACE_INSTANCE_NAME}"
@@ -468,10 +478,12 @@ CERTIFIER_APP_CONTAINER="certifier_app-${ACE_INSTANCE_NAME}"
 _resolve_certifier_image() {
     local env_image
     env_image="$(grep -m1 '^CERTIFIER_IMAGE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2-)"
+    # Published images come from IMAGE_REGISTRY / the frozen copies; the
+    # local-build tag keeps its name.
     if [[ "${PULL_CERTIFIER}" == true ]]; then
-        echo "${env_image:-${CERTIFIER_PULL_IMAGE_DEFAULT}}"
+        registry_ref "${env_image:-${CERTIFIER_PULL_IMAGE_DEFAULT}}"
     elif [[ -n "${env_image}" ]]; then
-        echo "${env_image}"
+        registry_ref "${env_image}"
     else
         echo "certifier:latest"
     fi

@@ -41,9 +41,10 @@ spec:
       labels:
         app: mongodb
     spec:
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       initContainers:
         - name: keyfile-gen
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:
@@ -58,7 +59,7 @@ spec:
               mountPath: /keydata
       containers:
         - name: mongodb
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           args: [--replSet, rs0, --keyFile, /keydata/keyfile, --bind_ip_all]
           ports:
@@ -123,9 +124,10 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      {{- include "ace.imagePullSecrets" $ | nindent 6 }}
       containers:
         - name: rs-init
-          image: {{ .Values.images.mongodb }}
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.mongodb "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
           command: [bash, -c]
           args:

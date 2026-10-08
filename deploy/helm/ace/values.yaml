@@ -77,6 +77,25 @@ metricsServer:
   enabled: true
   namespace: ""
 
+# ── Image registry (set by setup.sh from .env) ───────────────────────────────
+# Images above are upstream public names; templates/_helpers.tpl "ace.image"
+# decides where each is pulled from (docs/setup/registry-migration-plan.md):
+#   imageRegistry set   -> <imageRegistry>/<public name>   (e.g. JFrog)
+#   imageRegistry empty -> frozen Docker Hub copy <imageMirrorNamespace>/<flat
+#                          name>, e.g. agentcert/mongo:5 ("none" = upstream names)
+imageRegistry: ""
+imageMirrorNamespace: agentcert
+# Pull Secret added to every pod when imageRegistry is set
+# (created by scripts/apply_cluster_prereqs.sh).
+imagePullSecretName: ""
+# Images setup.sh built or side-loaded into the cluster keep their public names:
+#   aceImagesLocal      graphql / auth / web / certifier (PLATFORM_IMAGE_SOURCE=local)
+#   runtimeImagesLocal  metrics-server, preloaded with the workflow runtime
+#                       images (LITMUS_IMAGES_SOURCE=local)
+#   chartsHub.bundleLocal (below) the hub bundle (HUB_BUNDLE_IMAGE_SOURCE=local)
+aceImagesLocal: false
+runtimeImagesLocal: false
+
 # IfNotPresent for KinD dev (images are kind-loaded locally); use Always for
 # cloud/registry deployments where agentcert/* images are pulled from Docker Hub.
 imagePullPolicy: IfNotPresent
@@ -92,6 +111,8 @@ chartsHub:
   # setup.sh overrides this to Never after side-loading in local mode. Registry
   # deployments may keep IfNotPresent and override bundleImage.
   bundleImagePullPolicy: IfNotPresent
+  # true when setup.sh built and side-loaded bundleImage (keeps its name).
+  bundleLocal: false
 
 # ── Persistent storage sizes ─────────────────────────────────────────────────
 storage:

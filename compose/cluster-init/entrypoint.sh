@@ -260,7 +260,7 @@ ensure_kind() {
     mkdir -p "$(dirname "${KUBECONFIG}")"   # so kind can write the kubeconfig
     if [[ -f "${KIND_CONFIG}" ]]; then
         log "Using kind config ${KIND_CONFIG}"
-        if ! kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}"; then
+        if ! kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${KIND_CONFIG}" ${KIND_NODE_IMAGE:+--image "${KIND_NODE_IMAGE}"}; then
             err "kind create cluster failed for '${KIND_CLUSTER_NAME}' (config: ${KIND_CONFIG})."
             err "Common causes: a hostPort in ${KIND_CONFIG} already bound by another checkout on this host,"
             err "or /var/run/docker.sock (bind-mounted into this container) not reaching a working daemon."
@@ -269,7 +269,7 @@ ensure_kind() {
     else
         warn "No kind config at ${KIND_CONFIG} — creating with defaults (no ACE port mappings, and NOT instance-scoped)."
         warn "Run deploy/kind/render-kind-config.sh --personal-workspace on the host first, then re-run, to get ACE's port mappings without colliding with another checkout on this host."
-        if ! kind create cluster --name "${KIND_CLUSTER_NAME}"; then
+        if ! kind create cluster --name "${KIND_CLUSTER_NAME}" ${KIND_NODE_IMAGE:+--image "${KIND_NODE_IMAGE}"}; then
             err "kind create cluster failed for '${KIND_CLUSTER_NAME}' (no config -- created with defaults)."
             exit 1
         fi

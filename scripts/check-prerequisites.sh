@@ -125,8 +125,14 @@ elif command -v uv >/dev/null 2>&1 && uv python find 3.12 >/dev/null 2>&1; then
     PYTHON312_BIN="$(uv python find 3.12)"
     ok "python3.12 (uv-managed) ${PYTHON312_BIN}"
 else
-    warn "python3.12 not found (needed only for certifier local dev outside Docker -- CLAUDE.md §6)."
-    read -rp "  Bootstrap Python 3.12 via uv now? No sudo required. [Y/n]: " _py_ans
+    # Setup and every deploy path run Python 3.12 inside containers, so only
+    # offer the host install when explicitly asked for (certifier local dev).
+    _py_ans=n
+    if [[ "${ACE_PREREQ_BOOTSTRAP_PYTHON:-0}" == "1" ]]; then
+        read -rp "  Bootstrap Python 3.12 via uv now? No sudo required. [Y/n]: " _py_ans
+    else
+        say "${DIM}  (python3.12 not found -- only needed for certifier work outside Docker; ACE_PREREQ_BOOTSTRAP_PYTHON=1 ./scripts/check-prerequisites.sh installs it)${NC}"
+    fi
     if [[ ! "${_py_ans,,}" =~ ^n ]]; then
         if ! command -v uv >/dev/null 2>&1; then
             curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -141,8 +147,6 @@ else
         else
             warn "uv install ran but python3.12 still not resolvable on PATH -- open a new shell and re-run."
         fi
-    else
-        warn "Skipped. Re-run this check (or scripts/setup.sh) later to bootstrap it when you need certifier local dev."
     fi
     unset _py_ans
 fi

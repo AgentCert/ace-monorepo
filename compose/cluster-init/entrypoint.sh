@@ -37,6 +37,12 @@ HOST_PUBLIC_IP="${HOST_PUBLIC_IP:-}"
 export KUBECONFIG="${KUBECONFIG:-/host-kube/config}"
 # Optional kind config (host port mappings etc.), mounted from the repo.
 KIND_CONFIG="${KIND_CONFIG:-/repo/local-personal-workspace/kind-agentcert.yaml}"
+# local-personal-workspace/ only exists after a manual
+# `render-kind-config.sh --personal-workspace`; scripts/setup.sh always renders
+# the same instance-scoped config to .tmp/. Use that one when it is present.
+if [[ ! -f "${KIND_CONFIG}" && -f /repo/.tmp/kind-agentcert.rendered.yaml ]]; then
+    KIND_CONFIG=/repo/.tmp/kind-agentcert.rendered.yaml
+fi
 
 log()  { echo -e "\033[36m[cluster-init]\033[0m $*"; }
 ok()   { echo -e "\033[32m[cluster-init]\033[0m $*"; }

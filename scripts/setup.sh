@@ -237,6 +237,62 @@ PY
     fi
 }
 
+# True when two paths are the same directory (symlink aliases included, e.g.
+# /home/<user> vs /Innovation/home/<user>). Same check as shut_down.sh.
+same_dir() {
+    local a b
+    a="$(stat -c '%d:%i' "$1" 2>/dev/null || true)"
+    b="$(stat -c '%d:%i' "$2" 2>/dev/null || true)"
+    [[ -n "${a}" && "${a}" == "${b}" ]]
+}
+
+# A .env copied from someone else's checkout (the usual way to share
+# credentials) also carries that checkout's instance-scoped values: its
+# ACE_INSTANCE_NAME, kind cluster name, host ports, kubeconfig dir, docker
+# socket and staging dirs. Kept as-is, setup then targets the other user's
+# cluster (the ownership guard refuses to recreate or delete it), reuses
+# ports that are already bound, or fails on directories it cannot write.
+# ACE_ENV_CHECKOUT records which checkout the .env belongs to; when it names
+# another one (or, for a .env from before this key existed, when
+# AGENT_CHARTS_ROOT points into another checkout), clear those values so the
+# backfills below re-derive them for this user. Credentials and every other
+# setting are kept.
+_env_owner="$(cur ACE_ENV_CHECKOUT)"
+_env_foreign=0
+if [[ -n "${_env_owner}" ]]; then
+    same_dir "${_env_owner}" "${REPO_ROOT}" || _env_foreign=1
+else
+    _env_charts="$(cur AGENT_CHARTS_ROOT)"
+    # (/srv/projects/... was the placeholder in older .env.example files.)
+    if [[ -n "${_env_charts}" && "${_env_charts}" != /srv/projects/ace-monorepo/agent-charts ]] \
+        && ! same_dir "${_env_charts}" "${REPO_ROOT}/agent-charts"; then
+        _env_foreign=1
+        _env_owner="${_env_charts%/agent-charts}"
+    fi
+fi
+if [[ "${_env_foreign}" -eq 1 ]]; then
+    warn ".env was copied from another checkout (${_env_owner}). Resetting its instance-scoped values for this checkout:"
+    for _k in ACE_INSTANCE_NAME KIND_CLUSTER_NAME OLLAMA_PORT HOST_KUBE_DIR ACE_KIND_LOAD_TMPDIR \
+              CERT_REPORTS_HOST_DIR KIND_CERT_EXPORT_DIR AGENT_CHARTS_ROOT APP_CHARTS_ROOT \
+              $(grep -oE '^KIND_HOSTPORT_[A-Z_]+' "${ENV_FILE}"); do
+        [[ -n "$(cur "${_k}")" ]] || continue
+        warn "  ${_k}=$(cur "${_k}")  ->  re-derived"
+        set_env "${_k}" ""
+    done
+    # OLLAMA_BASE_URL follows OLLAMA_PORT only while it holds a placeholder.
+    [[ "$(cur OLLAMA_BASE_URL)" == http://host.docker.internal:* ]] \
+        && set_env OLLAMA_BASE_URL "http://host.docker.internal:11435"
+    # Another user's rootless socket is not usable here; the shared default is.
+    _sock="$(cur DOCKER_HOST_SOCK)"
+    if [[ -n "${_sock}" && ! -w "${_sock}" ]]; then
+        set_env DOCKER_HOST_SOCK ""
+        warn "  DOCKER_HOST_SOCK (${_sock} is not writable by $(id -un))"
+    fi
+    unset _k _sock
+fi
+set_env ACE_ENV_CHECKOUT "${REPO_ROOT}"
+unset _env_owner _env_foreign _env_charts
+
 # Kind cluster names (and every Docker/K8s resource name derived from
 # ACE_INSTANCE_NAME) must be RFC-1123 safe: lowercase alphanumeric + hyphen
 # only, short enough that "agentcert-<name>-control-plane" fits the ~64-char
@@ -833,14 +889,9 @@ unset _legacy_jfrog_src _legacy_jfrog_repo _image_registry _legacy_user_key _leg
 # host-local staging directory so first-time setup asks once, saves the choice,
 # and all later --restart / prepare-images runs reuse it.
 default_kind_load_tmpdir() {
-    local innovation_user_dir="/Innovation/home/$(id -un)"
-    if [[ -d "${innovation_user_dir}" && -w "${innovation_user_dir}" ]]; then
-        printf '%s\n' "${innovation_user_dir}/.tmp/kind-load"
-    elif [[ -d /Innovation && -w /Innovation ]]; then
-        printf '%s\n' "/Innovation/ace-$(id -un)/kind-load-tmp"
-    else
-        printf '%s\n' "${REPO_ROOT}/.tmp/kind-load"
-    fi
+    # Inside the checkout: always writable by its owner, and on the same disk
+    # the user chose for the repo (REPO_ROOT is the resolved physical path).
+    printf '%s\n' "${REPO_ROOT}/.tmp/kind-load"
 }
 
 configure_kind_load_tmpdir() {
@@ -865,10 +916,15 @@ configure_kind_load_tmpdir() {
         echo "ERROR: Set ACE_KIND_LOAD_TMPDIR in .env, then re-run setup." >&2
         exit 1
     fi
-    mkdir -p "${selected}" || {
-        echo "ERROR: could not create ACE_KIND_LOAD_TMPDIR='${selected}'." >&2
-        exit 1
-    }
+    if ! mkdir -p "${selected}" 2>/dev/null || [[ ! -w "${selected}" ]]; then
+        # Typically a value from someone else's .env (their home directory).
+        warn "ACE_KIND_LOAD_TMPDIR='${selected}' is not writable by $(id -un); using $(default_kind_load_tmpdir)."
+        selected="$(default_kind_load_tmpdir)"
+        mkdir -p "${selected}" || {
+            echo "ERROR: could not create ACE_KIND_LOAD_TMPDIR='${selected}'." >&2
+            exit 1
+        }
+    fi
     set_env ACE_KIND_LOAD_TMPDIR "${selected}"
     export ACE_KIND_LOAD_TMPDIR="${selected}"
     ok "Set ACE_KIND_LOAD_TMPDIR=${selected} in .env (KinD image-load tarballs will not use /tmp)"
@@ -2464,7 +2520,7 @@ assert_kind_cluster_ownership() {
     fi
     local owner
     owner="$(docker volume inspect "${marker}" --format '{{index .Labels "ace.kind.owner"}}' 2>/dev/null)"
-    if [[ "${owner}" != "${REPO_ROOT}" ]]; then
+    if [[ "${owner}" != "${REPO_ROOT}" ]] && ! same_dir "${owner}" "${REPO_ROOT}"; then
         warn "kind cluster '${cluster_name}' is owned by a different checkout (working_dir: ${owner:-unknown}, ours: ${REPO_ROOT})."
         warn "Refusing to touch it. Set a unique KIND_CLUSTER_NAME in .env for this checkout."
         return 1

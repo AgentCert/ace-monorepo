@@ -1424,7 +1424,7 @@ _PUSH_TARGET_LABEL="$(cur IMAGE_REGISTRY)"; _PUSH_TARGET_LABEL="${_PUSH_TARGET_L
 _IMAGE_REGISTRY_ASKED=0; _IMAGE_REGISTRY=""; _REGISTRY_USER=""; _REGISTRY_PASS=""
 ask_image_registry() {
     echo -e "  ${BOLD}Image registry${NC}  ${DIM}every image is pulled from here. Empty = Docker Hub (ACE's frozen agentcert/ copies, no login).${NC}"
-    echo -e "  ${DIM}Inside the Infosys network: infyartifactory.jfrog.io/docker-local   (type - to clear)${NC}"
+    echo -e "  ${DIM}Inside the Infosys network: infyartifactory.jfrog.io/docker-local   (images under docker-local/agentcert/; type - to clear)${NC}"
     _IMAGE_REGISTRY="$(ask IMAGE_REGISTRY 'IMAGE_REGISTRY')"
     _IMAGE_REGISTRY="$(printf '%s' "${_IMAGE_REGISTRY}" | tr -d '[:space:]')"
     [[ "${_IMAGE_REGISTRY}" == "-" ]] && _IMAGE_REGISTRY=""
@@ -3840,11 +3840,13 @@ k8s_deploy() {
         _infra_ready=0
     fi
 
-    # 9d) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
-    seed_flash_agent_comprehensive
-
-    # 9e) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
-    seed_flash_agent_5scenario
+    # 9d/9e) Example flash-agent experiments (comprehensive-30, 5scenario).
+    # Opt-in: on a fresh install they showed up as two experiments nobody
+    # created. ACE_SEED_EXPERIMENTS=true in .env registers them (idempotent).
+    if [[ "$(cur ACE_SEED_EXPERIMENTS)" == true ]]; then
+        seed_flash_agent_comprehensive
+        seed_flash_agent_5scenario
+    fi
     if [[ ${_infra_ready} -eq 0 ]]; then
         stop_control_plane_api
         warn "Setup is incomplete: chaos infrastructure did not reach Connected state. Resolve the subscriber/infra warnings above, then rerun ./scripts/setup.sh --restart."
@@ -4045,6 +4047,7 @@ helm_deploy() {
     helm_cmd+=(
         --set-string "imageRegistry=$(registry_normalize "$(cur IMAGE_REGISTRY)")"
         --set-string "imageMirrorNamespace=$(cur IMAGE_MIRROR_NAMESPACE)"
+        --set-string "aceImageTag=$(cur ACE_IMAGE_TAG | tr -d '[:space:]')"
         --set-string "imagePullSecretName=$(cur IMAGE_PULL_SECRET_NAME)"
         --set "aceImagesLocal=${_ace_local}"
         --set "runtimeImagesLocal=${_runtime_local}"
@@ -4241,11 +4244,11 @@ OLLAMA_SVC_EOF
         _infra_ready=0
     fi
 
-    # 5e) Seed flash-agent-comprehensive-30 experiment (idempotent; no-op if infra not yet registered)
-    seed_flash_agent_comprehensive
-
-    # 5f) Seed flash-agent-5scenario experiment (idempotent; self-contained, no ConfigMap needed)
-    seed_flash_agent_5scenario
+    # 5e/5f) Example flash-agent experiments: opt-in (ACE_SEED_EXPERIMENTS=true).
+    if [[ "$(cur ACE_SEED_EXPERIMENTS)" == true ]]; then
+        seed_flash_agent_comprehensive
+        seed_flash_agent_5scenario
+    fi
     if [[ ${_infra_ready} -eq 0 ]]; then
         stop_control_plane_api
         warn "Setup is incomplete: chaos infrastructure did not reach Connected state. Resolve the subscriber/infra warnings above, then rerun ./scripts/setup.sh --restart."

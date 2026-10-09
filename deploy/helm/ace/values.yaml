@@ -80,11 +80,16 @@ metricsServer:
 # ── Image registry (set by setup.sh from .env) ───────────────────────────────
 # Images above are upstream public names; templates/_helpers.tpl "ace.image"
 # decides where each is pulled from (docs/setup/registry-migration-plan.md):
-#   imageRegistry set   -> <imageRegistry>/<public name>   (e.g. JFrog)
+#   imageRegistry set   -> <imageRegistry>/<imageMirrorNamespace>/<public name>
+#                          (e.g. JFrog docker-local/agentcert/...; ACE's own
+#                          agentcert/x not doubled; "none" = no folder)
 #   imageRegistry empty -> frozen Docker Hub copy <imageMirrorNamespace>/<flat
 #                          name>, e.g. agentcert/mongo:5 ("none" = upstream names)
 imageRegistry: ""
 imageMirrorNamespace: agentcert
+# Tag for every image ACE builds itself (ACE_IMAGE_TAG, e.g. RELEASE-3);
+# empty keeps each image's own tag (:latest).
+aceImageTag: ""
 # Pull Secret added to every pod when imageRegistry is set
 # (created by scripts/apply_cluster_prereqs.sh).
 imagePullSecretName: ""

@@ -7,9 +7,13 @@
 #
 # Naming rule (scripts/lib/registry.sh): an image is always written here by its
 # normal public name. When IMAGE_REGISTRY is set, the registry copy lives at
-# <IMAGE_REGISTRY>/<public name>, e.g.
-#   mongo:5                       -> infyartifactory.jfrog.io/docker-local/mongo:5
-#   quay.io/containers/x:v1       -> infyartifactory.jfrog.io/docker-local/quay.io/containers/x:v1
+# <IMAGE_REGISTRY>/<IMAGE_MIRROR_NAMESPACE>/<public name>, e.g.
+#   mongo:5                       -> infyartifactory.jfrog.io/docker-local/agentcert/mongo:5
+#   quay.io/containers/x:v1       -> infyartifactory.jfrog.io/docker-local/agentcert/quay.io/containers/x:v1
+#   agentcert/certifier:latest    -> infyartifactory.jfrog.io/docker-local/agentcert/certifier:latest
+#   (IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local; images sit under the
+#    IMAGE_MIRROR_NAMESPACE folder, agentcert/, which ACE images do not repeat)
+# ACE_IMAGE_TAG (e.g. RELEASE-3) replaces the tag of every "build" row image.
 # When IMAGE_REGISTRY is empty, images come from frozen Docker Hub copies under
 # IMAGE_MIRROR_NAMESPACE (default agentcert), with flat names because Docker Hub
 # repos cannot nest:

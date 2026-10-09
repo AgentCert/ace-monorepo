@@ -90,9 +90,15 @@ IMAGE_MIRROR_NAMESPACE=none
 eq "namespace none: upstream name"   "$(registry_ref quay.io/containers/kubernetes_mcp_server:v0.0.67)" "quay.io/containers/kubernetes_mcp_server:v0.0.67"
 IMAGE_MIRROR_NAMESPACE=agentcert
 IMAGE_REGISTRY="${R}"
-eq "set: mongo:5"                    "$(registry_ref mongo:5)" "${R}/mongo:5"
-eq "set: quay keeps host in path"    "$(registry_ref quay.io/containers/x:v1)" "${R}/quay.io/containers/x:v1"
-eq "set: cgr untagged"               "$(registry_ref cgr.dev/chainguard/minio)" "${R}/cgr.dev/chainguard/minio:latest"
+eq "set: mongo:5 under agentcert/"     "$(registry_ref mongo:5)" "${R}/agentcert/mongo:5"
+eq "set: quay keeps host in path"    "$(registry_ref quay.io/containers/x:v1)" "${R}/agentcert/quay.io/containers/x:v1"
+eq "set: cgr untagged"               "$(registry_ref cgr.dev/chainguard/minio)" "${R}/agentcert/cgr.dev/chainguard/minio:latest"
+eq "set: ACE image not doubled"       "$(registry_ref agentcert/certifier:latest)" "${R}/agentcert/certifier:latest"
+eq "set: idempotent"                  "$(registry_ref "${R}/agentcert/mongo:5")" "${R}/agentcert/mongo:5"
+IMAGE_MIRROR_NAMESPACE=none
+eq "set, namespace none: flat layout" "$(registry_ref mongo:5)" "${R}/mongo:5"
+eq "set, namespace none: ACE image"   "$(registry_ref agentcert/certifier:latest)" "${R}/agentcert/certifier:latest"
+IMAGE_MIRROR_NAMESPACE=agentcert
 eq "host"                            "$(registry_host)" "infyartifactory.jfrog.io"
 eq "normalize UI url"                "$(registry_normalize https://infyartifactory.jfrog.io/ui/native/docker-local/)" "${R}"
 check "bare JFrog host rejected"     bash -c "source scripts/lib/registry.sh; IMAGE_REGISTRY=infyartifactory.jfrog.io; ! registry_load /dev/null"
@@ -100,22 +106,47 @@ eq "source normalize jfrog"          "$(image_source_normalize jfrog)" "registry
 eq "source normalize DockerHub"      "$(image_source_normalize DockerHub)" "registry"
 eq "source normalize local"          "$(image_source_normalize local)" "local"
 check "placeholder counts as unset"  value_is_unset dckr_pat_REPLACE_ME
+# A registry already ending in the namespace folder resolves to the same place.
+IMAGE_REGISTRY="${R}/agentcert"
+eq "agentcert path: ACE image not doubled" "$(registry_ref agentcert/certifier:latest)" "${R}/agentcert/certifier:latest"
+eq "agentcert path: third-party under it"  "$(registry_ref mongo:5)" "${R}/agentcert/mongo:5"
+eq "agentcert path: quay keeps host"       "$(registry_ref quay.io/containers/x:v1)" "${R}/agentcert/quay.io/containers/x:v1"
+eq "agentcert path: idempotent"            "$(registry_ref "${R}/agentcert/certifier:latest")" "${R}/agentcert/certifier:latest"
+IMAGE_REGISTRY="${R}"
+eq "docker-local: ACE image at the same place" "$(registry_ref agentcert/certifier:latest)" "${R}/agentcert/certifier:latest"
+# ACE_IMAGE_TAG: release tag for ACE-built images only.
+ACE_IMAGE_TAG=RELEASE-7
+IMAGE_REGISTRY="${R}/agentcert"
+eq "release tag: ACE image"                "$(registry_ref agentcert/agentcert-graphql:latest)" "${R}/agentcert/agentcert-graphql:RELEASE-7"
+eq "release tag: pinned ACE tag replaced"  "$(registry_ref agentcert/litmusportal-subscriber:3.0.0)" "${R}/agentcert/litmusportal-subscriber:RELEASE-7"
+eq "release tag: untagged ACE image"       "$(registry_ref agentcert/certifier)" "${R}/agentcert/certifier:RELEASE-7"
+eq "release tag: third-party untouched"    "$(registry_ref mongo:5)" "${R}/agentcert/mongo:5"
+eq "release tag: digest untouched"         "$(registry_ref agentcert/certifier@sha256:abc)" "${R}/agentcert/certifier@sha256:abc"
+IMAGE_REGISTRY=""
+eq "release tag: Docker Hub ACE image"     "$(registry_ref agentcert/certifier:latest)" "agentcert/certifier:RELEASE-7"
+eq "release tag: frozen copy untouched"    "$(registry_ref python:3.11-slim)" "agentcert/python:3.11-slim"
+eq "release tag: Docker Hub idempotent"    "$(registry_ref agentcert/certifier:RELEASE-7)" "agentcert/certifier:RELEASE-7"
+check "release tag loaded from .env" bash -c "source scripts/lib/registry.sh; printf 'IMAGE_REGISTRY=${R}/agentcert\nACE_IMAGE_TAG=RELEASE-9\n' > '${WORK}/tag.env'; unset IMAGE_REGISTRY ACE_IMAGE_TAG; registry_load '${WORK}/tag.env'; [[ \$(registry_ref agentcert/certifier:latest) == '${R}/agentcert/certifier:RELEASE-9' ]]"
+unset ACE_IMAGE_TAG
+IMAGE_REGISTRY="${R}"
 
 section "bash/Python naming parity (every inventory image, registry set and empty)"
 mapfile -t imgs < <(INCLUDE_OPTIONAL=1 inventory_rows deploy/images.txt all | cut -d'|' -f3)
-for reg in "" "${R}"; do
+for reg in "" "${R}" "${R}/agentcert"; do
   for ns in agentcert none; do
-    IMAGE_REGISTRY="${reg}"; IMAGE_MIRROR_NAMESPACE="${ns}"
+   for tag in "" RELEASE-7; do
+    IMAGE_REGISTRY="${reg}"; IMAGE_MIRROR_NAMESPACE="${ns}"; ACE_IMAGE_TAG="${tag}"
     bash_out="$(for i in "${imgs[@]}"; do registry_ref "$i"; echo; done)"
-    py_out="$(python3 - "${reg}" "${ns}" "${imgs[@]}" <<'PY'
+    py_out="$(python3 - "${reg}" "${ns}" "${tag}" "${imgs[@]}" <<'PY'
 import sys; sys.path.insert(0, "scripts/lib"); import resolve_image_env as r
-for i in sys.argv[3:]: print(r.registry_ref(i, sys.argv[1], sys.argv[2]))
+for i in sys.argv[4:]: print(r.registry_ref(i, sys.argv[1], sys.argv[2], sys.argv[3]))
 PY
 )"
-    eq "parity (${#imgs[@]} images, IMAGE_REGISTRY='${reg}', namespace=${ns})" "${bash_out}" "${py_out}"
+    eq "parity (${#imgs[@]} images, IMAGE_REGISTRY='${reg}', namespace=${ns}, tag='${tag}')" "${bash_out}" "${py_out}"
+   done
   done
 done
-IMAGE_MIRROR_NAMESPACE=agentcert
+IMAGE_MIRROR_NAMESPACE=agentcert; unset ACE_IMAGE_TAG
 # Distinct upstream images must not collapse onto one Docker Hub copy.
 IMAGE_REGISTRY=""
 dupes="$(for i in "${imgs[@]}"; do printf '%s %s\n' "$(registry_ref "$i")" "$(upstream_ref "$i")"; done \
@@ -153,7 +184,7 @@ case("registry sources: prefixed", {**base, "IMAGE_REGISTRY": R, "INSTALL_APP_IM
      {"INSTALL_APPLICATION_IMAGE": f"{R}/agentcert/agentcert-install-app:latest",
       "SUBSCRIBER_IMAGE": f"{R}/agentcert/litmusportal-subscriber:3.0.0",
       "FLASH_AGENT_IMAGE": f"{R}/agentcert/agentcert-flash-agent:latest",
-      "LITMUS_HELPER_IMAGES_REGISTRY_PREFIX": f"{R}/"})
+      "LITMUS_HELPER_IMAGES_REGISTRY_PREFIX": f"{R}/agentcert/"})
 case("legacy jfrog/dockerhub = registry", {**base, "IMAGE_REGISTRY": R, "INSTALL_APP_IMAGE_SOURCE": "jfrog",
      "LITMUS_IMAGES_SOURCE": "dockerhub"}, {"INSTALL_APPLICATION_IMAGE": f"{R}/agentcert/agentcert-install-app:latest",
      "SUBSCRIBER_IMAGE": f"{R}/agentcert/litmusportal-subscriber:3.0.0"})
@@ -216,7 +247,7 @@ check "generators run" bash "${WORK}/run-deploy.sh"
 vals="${WORK}/root/deploy/helm/ace/values-env.yaml"
 check "values-env: registry-sourced image prefixed" grep -q "INSTALL_APPLICATION_IMAGE: '${R}/agentcert/agentcert-install-app:latest'" "${vals}"
 check "values-env: local-sourced image unchanged"   grep -q "INSTALL_AGENT_IMAGE: 'agentcert/agentcert-install-agent:latest'" "${vals}"
-check "values-env: litmus prefix derived"           grep -q "LITMUS_HELPER_IMAGES_REGISTRY_PREFIX: '${R}/'" "${vals}"
+check "values-env: litmus prefix derived"           grep -q "LITMUS_HELPER_IMAGES_REGISTRY_PREFIX: '${R}/agentcert/'" "${vals}"
 eq "Secret: registry-sourced image prefixed" "$(env_file_value INSTALL_APPLICATION_IMAGE "${WORK}/secret.env")" "${R}/agentcert/agentcert-install-app:latest"
 eq "Secret: one entry per key" "$(grep -c '^INSTALL_APPLICATION_IMAGE=' "${WORK}/secret.env")" "1"
 check ".env not modified by deploy generators" cmp -s "${WORK}/deploy.env" "${WORK}/deploy.env.orig"
@@ -256,12 +287,14 @@ cp deploy/helm/ace/templates/_helpers.tpl deploy/helm/ace/templates/_mirrored.tp
 printf '%s\n' '{{- range .Values.refs }}' '# {{ include "ace.image" (dict "root" $ "image" . "local" false) }}' '{{- end }}' \
     > "${WORK}/parity/templates/out.yaml"
 refs_json="$(printf '%s\n' "${imgs[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
-for reg in "" "${R}"; do
+for reg in "" "${R}" "${R}/agentcert"; do
   for ns in agentcert none; do
+   for tag in "" RELEASE-7; do
     helm_out="$(helm template p "${WORK}/parity" --set-json "refs=${refs_json}" --set-string imageRegistry="${reg}" \
-                --set-string imageMirrorNamespace="${ns}" 2>&1 | grep -v '^---\|^# Source\|^$' | sed 's/^# //')"
-    bash_out="$(for i in "${imgs[@]}"; do IMAGE_REGISTRY="${reg}" IMAGE_MIRROR_NAMESPACE="${ns}" registry_ref "$i"; echo; done)"
-    eq "Helm == bash (${#imgs[@]} images, registry='${reg}', namespace=${ns})" "${helm_out}" "${bash_out}"
+                --set-string imageMirrorNamespace="${ns}" --set-string aceImageTag="${tag}" 2>&1 | grep -v '^---\|^# Source\|^$' | sed 's/^# //')"
+    bash_out="$(for i in "${imgs[@]}"; do IMAGE_REGISTRY="${reg}" IMAGE_MIRROR_NAMESPACE="${ns}" ACE_IMAGE_TAG="${tag}" registry_ref "$i"; echo; done)"
+    eq "Helm == bash (${#imgs[@]} images, registry='${reg}', namespace=${ns}, tag='${tag}')" "${helm_out}" "${bash_out}"
+   done
   done
 done
 
@@ -310,7 +343,7 @@ for reg in "" "${R}"; do
 done
 eq "kind node image: open source keeps kind's default" "$(IMAGE_REGISTRY= KIND_NODE_IMAGE= kind_node_image /dev/null)" ""
 check "kind node image: private registry pulls kindest/node from it" \
-    bash -c "source scripts/lib/registry.sh; IMAGE_REGISTRY='${R}' KIND_NODE_IMAGE= kind_node_image /dev/null | grep -q '^${R}/kindest/node:v'"
+    bash -c "source scripts/lib/registry.sh; IMAGE_REGISTRY='${R}' KIND_NODE_IMAGE= kind_node_image /dev/null | grep -q '^${R}/agentcert/kindest/node:v'"
 
 section "Phase 6: deploy/k8s manifests (resolve_image_env.py --rewrite-manifests)"
 printf 'IMAGE_REGISTRY=%s\nIMAGE_PULL_SECRET_NAME=registry-pull\n' "${R}" > "${WORK}/k.env"
@@ -341,11 +374,12 @@ if [[ "${ONLINE}" -eq 1 ]]; then
     section "online: Go test suites (golang:1.24) + bash->Go naming parity"
     GOCACHE_DIR="${ACE_GO_CACHE:-${REPO_ROOT}/.tmp/go-cache}"; mkdir -p "${GOCACHE_DIR}"
     : > "${WORK}/parity.tsv"
-    for reg in "" "${R}"; do for ns in agentcert none; do
+    for reg in "" "${R}" "${R}/agentcert"; do for ns in agentcert none; do for tag in "" RELEASE-7; do
         for i in "${imgs[@]}"; do
-            printf '%s\t%s\t%s\t%s\n' "${reg}" "${ns}" "${i}" "$(IMAGE_REGISTRY="${reg}" IMAGE_MIRROR_NAMESPACE="${ns}" registry_ref "$i")"
+            printf '%s\t%s\t%s\t%s\t%s\n' "${reg}" "${ns}" "${tag}" "${i}" \
+                "$(IMAGE_REGISTRY="${reg}" IMAGE_MIRROR_NAMESPACE="${ns}" ACE_IMAGE_TAG="${tag}" registry_ref "$i")"
         done >> "${WORK}/parity.tsv"
-    done; done
+    done; done; done
     cp "${WORK}/parity.tsv" "${GOCACHE_DIR}/parity.tsv"
     gorun() { docker run --rm -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod -e IMAGEREF_PARITY_FIXTURE=/cache/parity.tsv \
               -v "${GOCACHE_DIR}:/cache" -v "${REPO_ROOT}:/ws" -w "/ws/$1" golang:1.24 sh -c "$2"; }

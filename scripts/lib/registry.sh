@@ -78,6 +78,11 @@ registry_load() {
         IMAGE_MIRROR_NAMESPACE="$(env_file_value IMAGE_MIRROR_NAMESPACE "${env_file}")"
     fi
     IMAGE_MIRROR_NAMESPACE="${IMAGE_MIRROR_NAMESPACE:-agentcert}"
+    # Tag for every ACE-built image (e.g. RELEASE-3); empty keeps each own tag.
+    if [[ -z "${ACE_IMAGE_TAG+x}" ]]; then
+        ACE_IMAGE_TAG="$(env_file_value ACE_IMAGE_TAG "${env_file}")"
+    fi
+    ACE_IMAGE_TAG="$(printf '%s' "${ACE_IMAGE_TAG}" | tr -d '[:space:]')"
 
     # REGISTRY_* in .env belong to the IMAGE_REGISTRY written in .env. When the
     # caller overrides IMAGE_REGISTRY to empty (`IMAGE_REGISTRY= ./script`) on a
@@ -169,17 +174,70 @@ image_is_mirrored() {
     [[ -n "${_REGISTRY_MIRRORED[$1]:-}" ]]
 }
 
-# Where an image lives under the current IMAGE_REGISTRY setting. With
+# Images ACE builds itself: names (without tag) of the deploy/images.txt
+# "build" rows (loaded once). ACE_IMAGE_TAG replaces their tag.
+declare -gA _REGISTRY_ACE=()
+_REGISTRY_ACE_LOADED=0
+image_is_ace() {
+    if [[ "${_REGISTRY_ACE_LOADED}" -eq 0 ]]; then
+        local inv kind group image rest c
+        inv="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deploy/images.txt"
+        while IFS='|' read -r kind group image rest; do
+            [[ "${kind}" == build ]] || continue
+            c="$(image_canonical "${image}")"
+            _REGISTRY_ACE["${c%:*}"]=1
+        done < <(grep -v '^[[:space:]]*#' "${inv}" 2>/dev/null)
+        _REGISTRY_ACE_LOADED=1
+    fi
+    [[ "$1" != *@* && -n "${_REGISTRY_ACE[${1%:*}]:-}" ]]
+}
+
+# Canonical reference with ACE_IMAGE_TAG applied to ACE-built images.
+image_retag() {
+    if [[ -n "${ACE_IMAGE_TAG:-}" ]] && image_is_ace "$1"; then
+        printf '%s:%s' "${1%:*}" "${ACE_IMAGE_TAG}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# <registry>/<canonical name>, without repeating the registry's last path
+# segment: .../docker-local/agentcert + agentcert/certifier:x
+# -> .../docker-local/agentcert/certifier:x
+registry_join() {
+    local reg="$1" ref="$2" seg
+    if [[ "${reg}" == */* ]]; then
+        seg="${reg##*/}"
+        [[ "${ref}" == "${seg}/"* ]] && ref="${ref#"${seg}"/}"
+    fi
+    printf '%s/%s' "${reg}" "${ref}"
+}
+
+# Registry path images live under: <IMAGE_REGISTRY>/<IMAGE_MIRROR_NAMESPACE>,
+# or IMAGE_REGISTRY itself when the namespace is "none" or already its last
+# path segment.
+registry_base() {
+    local ns="${IMAGE_MIRROR_NAMESPACE:-agentcert}"
+    if [[ -z "${IMAGE_REGISTRY}" || "${ns}" == none || "/${IMAGE_REGISTRY}" == */"${ns}" ]]; then
+        printf '%s' "${IMAGE_REGISTRY}"
+    else
+        printf '%s/%s' "${IMAGE_REGISTRY}" "${ns}"
+    fi
+}
+
+# Where an image lives under the current IMAGE_REGISTRY setting: set ->
+# <registry_base>/<public name> (ACE's agentcert/x not doubled). With
 # IMAGE_REGISTRY empty only images that have a frozen copy are renamed; others
-# keep their upstream name. Already-resolved references are returned unchanged.
+# keep their upstream name. ACE-built images get ACE_IMAGE_TAG when it is set.
+# Already-resolved references are returned unchanged.
 registry_ref() {
     local ref
-    ref="$(image_canonical "$1")"
+    ref="$(image_retag "$(image_canonical "$1")")"
     if [[ -n "${IMAGE_REGISTRY}" ]]; then
         if [[ "$1" == "${IMAGE_REGISTRY}/"* ]]; then
             printf '%s' "$1"
         else
-            printf '%s/%s' "${IMAGE_REGISTRY}" "${ref}"
+            registry_join "$(registry_base)" "${ref}"
         fi
     elif [[ "${IMAGE_MIRROR_NAMESPACE:-agentcert}" != none ]] && image_is_mirrored "${ref}"; then
         image_flat_ref "${ref}" "${IMAGE_MIRROR_NAMESPACE:-agentcert}"

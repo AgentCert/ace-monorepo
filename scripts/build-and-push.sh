@@ -22,6 +22,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/build-and-push.sh [--env-file PATH] [--local] [--kind-load]
 #                               [--only REGEX] [--allow-build-cache]
+#                               [--tag RELEASE-N]
 #
 # Options:
 #   --env-file PATH       Path to env file (default: <repo-root>/.env)
@@ -31,6 +32,12 @@ set -euo pipefail
 #                         from .env; implies --local)
 #   --only REGEX          Only images whose name matches REGEX
 #                         (e.g. --only 'graphql|auth')
+#   --tag RELEASE-N       Push every ACE image as :RELEASE-N instead of its
+#                         own tag (:latest), and on success write
+#                         ACE_IMAGE_TAG=RELEASE-N to the env file, so setup.sh,
+#                         the Helm chart, graphql and the installers pull that
+#                         release. Use a new number per release: a release tag
+#                         is never overwritten. Default: ACE_IMAGE_TAG from .env.
 #   --allow-build-cache   Reuse Docker's build cache. Off by default: BuildKit
 #                         has been seen replaying stale COPY/go-build layers
 #                         after the source changed (same reason setup.sh builds
@@ -44,7 +51,7 @@ set -euo pipefail
 #                         just tag + push it. Pushes the identical image to a
 #                         second registry without rebuilding.
 #
-# The revision tag is pushed before the moving tag. If the registry refuses to
+# The revision tag is pushed before the release/moving tag. If the registry refuses to
 # overwrite an existing tag (JFrog without Delete/Overwrite permission), the
 # new build is still available under its revision tag and the summary says so.
 # =============================================================================
@@ -62,6 +69,7 @@ ONLY=""
 NO_CACHE_FLAG="--no-cache"
 COMMITTED_ONLY=false
 REUSE_LOCAL=false
+RELEASE_TAG=""
 
 # Colors
 RED='\033[0;31m'
@@ -108,6 +116,13 @@ while [[ $# -gt 0 ]]; do
         --reuse-local)
             REUSE_LOCAL=true
             shift
+            ;;
+        --tag)
+            RELEASE_TAG="${2:-}"
+            [[ "${RELEASE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
+                || { log_error "--tag needs a valid Docker tag, e.g. RELEASE-3 (got '${RELEASE_TAG}')"; exit 1; }
+            export ACE_IMAGE_TAG="${RELEASE_TAG}"
+            shift 2
             ;;
         --help|-h)
             sed -n '4,45p' "$0"
@@ -434,7 +449,11 @@ for p in ${PUSHED[@]+"${PUSHED[@]}"}; do
     echo -e "    ${GREEN}✓${NC} $p"
 done
 if [[ ${#NOT_OVERWRITTEN[@]} -gt 0 ]]; then
-    echo -e "${YELLOW}  Existing tags NOT overwritten (account lacks overwrite permission):${NC}"
+    if [[ -n "${ACE_IMAGE_TAG:-}" ]]; then
+        echo -e "${YELLOW}  :${ACE_IMAGE_TAG} already exists with a different build — use a new release number (--tag RELEASE-<n+1>):${NC}"
+    else
+        echo -e "${YELLOW}  Existing tags NOT overwritten (account lacks overwrite permission; use --tag RELEASE-N):${NC}"
+    fi
     for p in ${NOT_OVERWRITTEN[@]+"${NOT_OVERWRITTEN[@]}"}; do
         echo -e "    ${YELLOW}!${NC} $p"
     done
@@ -449,5 +468,24 @@ else
     done
 fi
 echo -e "${CYAN}======================================${NC}"
+
+# Point deployments at the release just pushed.
+if [[ -n "${RELEASE_TAG}" && -n "${ONLY}" ]]; then
+    log_warn "--only: not every ACE image has :${RELEASE_TAG}, so ACE_IMAGE_TAG in ${ENV_FILE} was left unchanged."
+elif [[ -n "${RELEASE_TAG}" && "${LOCAL_ONLY}" == false && ${#FAILED[@]} -eq 0 ]]; then
+    python3 - "${ENV_FILE}" "${RELEASE_TAG}" <<'PY'
+import re, sys
+path, tag = sys.argv[1:3]
+lines = open(path).read().splitlines()
+for i, l in enumerate(lines):
+    if re.match(r"^ACE_IMAGE_TAG=", l):
+        lines[i] = f"ACE_IMAGE_TAG={tag}"
+        break
+else:
+    lines.append(f"ACE_IMAGE_TAG={tag}")
+open(path, "w").write("\n".join(lines) + "\n")
+PY
+    log_success "ACE_IMAGE_TAG=${RELEASE_TAG} written to ${ENV_FILE} — the next setup.sh deploys this release."
+fi
 
 [[ ${#FAILED[@]} -eq 0 ]]

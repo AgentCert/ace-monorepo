@@ -133,12 +133,58 @@ def is_mirrored(canonical_ref):
     return canonical_ref in _MIRRORED
 
 
-def registry_ref(ref, registry, mirror_namespace="agentcert"):
+_ACE = None
+
+
+def is_ace_image(canonical_ref):
+    """Built by ACE itself: a "build" row of deploy/images.txt (any tag)."""
+    global _ACE
+    if _ACE is None:
+        import os
+        inv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "deploy", "images.txt")
+        _ACE = set()
+        try:
+            for line in open(inv):
+                f = line.strip().split("|")
+                if len(f) >= 3 and f[0].strip() == "build":
+                    _ACE.add(canonical(f[2]).rsplit(":", 1)[0])
+        except OSError:
+            pass
+    return "@" not in canonical_ref and canonical_ref.rsplit(":", 1)[0] in _ACE
+
+
+def retag(canonical_ref, ace_tag):
+    """ACE_IMAGE_TAG (e.g. RELEASE-3) for ACE-built images."""
+    if ace_tag and is_ace_image(canonical_ref):
+        return canonical_ref.rsplit(":", 1)[0] + ":" + ace_tag
+    return canonical_ref
+
+
+def registry_join(registry, ref):
+    """<registry>/<ref> without repeating the registry's last path segment
+    (.../docker-local/agentcert + agentcert/x -> .../docker-local/agentcert/x)."""
+    if "/" in registry:
+        seg = registry.rsplit("/", 1)[1]
+        if ref.startswith(seg + "/"):
+            ref = ref[len(seg) + 1:]
+    return f"{registry}/{ref}"
+
+
+def registry_base(registry, mirror_namespace="agentcert"):
+    """<registry>/<namespace>, or registry itself when the namespace is "none"
+    or already its last path segment."""
+    ns = mirror_namespace or "agentcert"
+    if not registry or ns == "none" or ("/" + registry).endswith("/" + ns):
+        return registry
+    return f"{registry}/{ns}"
+
+
+def registry_ref(ref, registry, mirror_namespace="agentcert", ace_tag=""):
     if registry:
         if ref.startswith(registry + "/"):
             return ref  # already resolved — never double-prefix
-        return f"{registry}/{canonical(ref)}"
-    c = canonical(ref)
+        return registry_join(registry_base(registry, mirror_namespace), retag(canonical(ref), ace_tag))
+    c = retag(canonical(ref), ace_tag)
     if mirror_namespace and mirror_namespace != "none" and is_mirrored(c):
         return flat_ref(c, mirror_namespace)
     return c
@@ -147,6 +193,7 @@ def registry_ref(ref, registry, mirror_namespace="agentcert"):
 def resolve(env):
     registry = normalize_registry(env.get("IMAGE_REGISTRY", ""))
     mirror_ns = env.get("IMAGE_MIRROR_NAMESPACE", "") or "agentcert"
+    ace_tag = env.get("ACE_IMAGE_TAG", "").strip()
     out, why = {}, []
     for key, src_key in IMAGE_SOURCES.items():
         public = env.get(key, "")
@@ -154,7 +201,7 @@ def resolve(env):
             continue
         source = normalize_source(env.get(src_key) or SOURCE_DEFAULTS.get(src_key, "registry"))
         if source == "registry":
-            resolved = registry_ref(public, registry, mirror_ns)
+            resolved = registry_ref(public, registry, mirror_ns, ace_tag)
             if resolved != public:
                 out[key] = resolved
                 why.append(f"{key}: {public} -> {resolved} ({src_key}=registry)")
@@ -167,7 +214,7 @@ def resolve(env):
     # graphql's helper-image rewrite only knows "<prefix>/<repo>/<name>" (nested),
     # so with IMAGE_REGISTRY empty helper images stay on their upstream
     # docker.io names until that rewrite learns the flat agentcert/ form.
-    prefix = f"{registry}/" if (litmus_src == "registry" and registry) else "docker.io"
+    prefix = f"{registry_base(registry, mirror_ns)}/" if (litmus_src == "registry" and registry) else "docker.io"
     out["LITMUS_HELPER_IMAGES_REGISTRY_PREFIX"] = prefix
     why.append(f"LITMUS_HELPER_IMAGES_REGISTRY_PREFIX={prefix} (LITMUS_IMAGES_SOURCE={litmus_src})")
     return out, why
@@ -181,19 +228,19 @@ _CONTAINERS = re.compile(r"^(\s*)containers:\s*$")
 _BROKEN_ON_PURPOSE = {"INVALID_IMAGE", "INVALID_ARCH_IMAGE"}
 
 
-def resolve_ref(ref, registry, mirror_namespace):
+def resolve_ref(ref, registry, mirror_namespace, ace_tag=""):
     """registry_ref that leaves empty and templated references alone."""
     if not ref.strip() or "{{" in ref or "$(" in ref:
         return ref
-    return registry_ref(ref.strip(), registry, mirror_namespace)
+    return registry_ref(ref.strip(), registry, mirror_namespace, ace_tag)
 
 
-def rewrite_text(text, registry, mirror_namespace="agentcert", skip=None):
+def rewrite_text(text, registry, mirror_namespace="agentcert", skip=None, ace_tag=""):
     """Resolve every image: line and *_IMAGE env value (not INVALID_*IMAGE)."""
-    if not registry and mirror_namespace == "none":
+    if not registry and mirror_namespace == "none" and not ace_tag:
         return text
     def res(ref):
-        return ref if skip and skip(ref) else resolve_ref(ref, registry, mirror_namespace)
+        return ref if skip and skip(ref) else resolve_ref(ref, registry, mirror_namespace, ace_tag)
     text = _IMAGE_LINE.sub(lambda m: m.group(1) + m.group(2) + res(m.group(3)) + m.group(4), text)
     return _IMAGE_ENV.sub(lambda m: m.group(0) if m.group(2) in _BROKEN_ON_PURPOSE else
                           m.group(1) + m.group(2) + m.group(3) + m.group(4) + res(m.group(5)) + m.group(6), text)
@@ -238,7 +285,7 @@ def rewrite_manifests(env, text, keep_ace_images=False, keep=()):
     def skip(ref):
         c = canonical(ref)
         return c in keep or (keep_ace_images and c.startswith("agentcert/"))
-    out = rewrite_text(text, registry, mirror_ns, skip)
+    out = rewrite_text(text, registry, mirror_ns, skip, env.get("ACE_IMAGE_TAG", "").strip())
     secret = (env.get("IMAGE_PULL_SECRET_NAME", "") or "registry-pull") if registry else ""
     return add_pull_secret_text(out, secret)
 

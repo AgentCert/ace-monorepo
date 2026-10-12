@@ -98,7 +98,7 @@ SRE_AGENTS_SRC="$(image_source_normalize "${SRE_AGENTS_SRC:-local}")"
 # on agentcert/itbench-experiment); it exists only in the Infosys registry. local
 # is therefore the default, same as SRE_AGENTS_SRC's rationale.
 ITBENCH_EXPERIMENT_SRC="$(image_source_normalize "${ITBENCH_EXPERIMENT_SRC:-local}")"
-HUB_BUNDLE_SRC="${HUB_BUNDLE_SRC:-local}"
+HUB_BUNDLE_SRC="$(image_source_normalize "${HUB_BUNDLE_SRC:-local}")"
 HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
 INSTALL_APP_IMAGE="${INSTALL_APP_IMAGE:-agentcert/agentcert-install-app:latest}"
 INSTALL_AGENT_IMAGE="${INSTALL_AGENT_IMAGE:-agentcert/agentcert-install-agent:latest}"
@@ -849,11 +849,20 @@ case "${HUB_BUNDLE_SRC}" in
         fi
         ;;
     registry)
-        if [[ "${HUB_BUNDLE_IMAGE}" == *":local" ]]; then
-            warn "HUB_BUNDLE_IMAGE_SOURCE=registry requires a pullable HUB_BUNDLE_IMAGE, not ${HUB_BUNDLE_IMAGE}"
+        # What the cluster will pull: ACE_IMAGE_TAG (e.g. RELEASE-1) replaces
+        # the ":local" of the default HUB_BUNDLE_IMAGE (scripts/lib/registry.sh).
+        _hub_ref="$(registry_ref "${HUB_BUNDLE_IMAGE}")"
+        if [[ "${_hub_ref}" == *":local" ]]; then
+            warn "HUB_BUNDLE_IMAGE_SOURCE=registry would pull ${_hub_ref}, which is never published."
+            warn "Set ACE_IMAGE_TAG (e.g. RELEASE-1) or HUB_BUNDLE_IMAGE=agentcert/ace-hub-bundle:latest in .env."
             exit 1
         fi
-        info "hub-bundle: registry image ${HUB_BUNDLE_IMAGE}"
+        registry_login >/dev/null 2>&1 || true
+        if ! image_exists "${_hub_ref}"; then
+            warn "hub-bundle: ${_hub_ref} not found in the registry (publish it with scripts/build-and-push.sh)"
+            exit 1
+        fi
+        info "hub-bundle: registry image ${_hub_ref}"
         ;;
     *)
         warn "Unsupported HUB_BUNDLE_IMAGE_SOURCE='${HUB_BUNDLE_SRC}' (expected local or registry)"

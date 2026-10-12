@@ -407,6 +407,10 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
             if push_ref "${image}" "${dst}"; then
                 log_success "Pushed: ${dst} and :${revision}"
                 PUSHED+=("${dst} (+ :${revision})")
+            elif [[ "${PUSH_OVERWRITE_DENIED}" == true && "$(remote_revision "${dst}")" == "${revision}" ]]; then
+                # Re-run of the same release (e.g. after another image failed).
+                log_warn "${dst} already holds this build (revision ${revision}) — keeping it"
+                PUSHED+=("${dst} (already present)")
             elif [[ "${PUSH_OVERWRITE_DENIED}" == true ]]; then
                 log_warn "Pushed ${dst_rev}, but ${dst} already exists and this account may not overwrite it"
                 NOT_OVERWRITTEN+=("${dst} (new build is at :${revision})")

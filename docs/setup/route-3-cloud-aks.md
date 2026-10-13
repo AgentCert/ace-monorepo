@@ -8,192 +8,154 @@ nav_order: 4
 
 <div class="callout callout-success">
 <span class="callout-title">Use this route when…</span>
-Your Kubernetes cluster lives in the cloud and your VM is already logged in to it —
-for example you ran <code>az login</code> and <code>az aks get-credentials</code>,
-so <code>kubectl</code> on the VM already talks to AKS. <code>scripts/setup.sh</code>
-deploys the full ACE stack (control plane + MongoDB + Langfuse + LiteLLM + Certifier)
-<strong>into</strong> your cloud cluster, and chaos experiments run in the same cluster.
+Your Kubernetes cluster lives in the cloud and the VM you run setup on can reach it with
+<code>kubectl</code>. <code>scripts/setup.sh</code> deploys the whole ACE stack (control plane,
+MongoDB, Langfuse, LiteLLM, Certifier) <strong>into</strong> that cluster with Helm, and the chaos
+experiments run in the same cluster.
 </div>
 
-<div class="callout callout-info">
-<span class="callout-title">Key difference from Route 2</span>
-Unlike kind, cloud cluster NodePort services are <strong>not</strong> reachable on
-<code>localhost</code> from the VM. The two browser UIs (AgentCert + Langfuse) are
-exposed via <code>LoadBalancer</code>; internal APIs are reached via
-<code>kubectl port-forward</code> on demand.
-</div>
+What is different from KinD, and handled by setup when you answer `CLUSTER_MODE=cloud`:
+
+| | KinD (Routes 1–2) | Cloud (this route) |
+|---|---|---|
+| Images | built on this machine and loaded into the node | **pulled from a registry** (`IMAGE_REGISTRY`, Docker Hub when empty) |
+| UI and Langfuse | `localhost` NodePorts | **internal load balancers** (a private IP in the cluster's network) |
+| Volumes | local-path directories | cloud disks: Postgres data in a subdirectory, MinIO `fsGroup`, `Recreate` rollouts |
+| Deploy method | Helm or kubectl | **Helm only** |
 
 ---
 
-## 1. Log In and Select the Cluster (on the VM)
-
-### AKS (Azure) — recommended
+## 1. Log in and select the cluster
 
 ```bash
+# AKS
 az login
 az aks get-credentials --resource-group <rg> --name <cluster> --admin
-kubectl config current-context     # e.g. <cluster>-admin
-kubectl get nodes                  # AKS nodes should be Ready
+# EKS:  aws eks update-kubeconfig --name <cluster> --region <region>
+# GKE:  gcloud container clusters get-credentials <cluster> --zone <zone>
+
+kubectl config current-context
+kubectl get nodes            # every node Ready
 ```
 
-<div class="callout callout-tip">
-<span class="callout-title">Use --admin</span>
-It writes a <strong>certificate-based</strong> kubeconfig with no exec plugin, so
-<code>scripts/setup.sh</code> can use it directly without needing <code>kubelogin</code>
-or <code>az</code> inside the cluster.
-</div>
-
-### EKS (AWS) / GKE (Google)
-
-```bash
-# EKS
-aws eks update-kubeconfig --name <cluster> --region <region>
-# GKE
-gcloud container clusters get-credentials <cluster> --zone <zone>
-```
-
-Both produce exec-auth kubeconfigs — see [exec-auth caveats](#exec-auth-kubeconfigs) below.
+`--admin` gives a certificate kubeconfig with no `kubelogin` dependency. Setup needs
+cluster-admin: it installs cluster-scoped Litmus/Argo resources.
 
 ---
 
-## 2. Run the Setup Wizard
+## 2. Make sure the images are in the registry
+
+A cloud node cannot load images built on your VM, so every image comes from the registry.
+Use one of these:
+
+- **A published release** (simplest). Ask for the current tag, e.g. `RELEASE-2`, and give it to
+  the wizard as `ACE_IMAGE_TAG`. Third-party images (mongo, litmuschaos/*, the demo apps, …)
+  must also be mirrored there: `./scripts/mirror-images.sh` once per registry.
+- **This checkout.** Answer `p` at the wizard's *Images* question: setup runs
+  `scripts/build-and-push.sh`, which builds and pushes all 14 ACE images (including the hub
+  bundle and the ITBench runner). You need push rights to the registry.
+
+Check at any time: `./scripts/check-registry-images.sh` (setup also runs this check before it
+deploys and lists anything missing).
+
+---
+
+## 3. Optional `.env` settings
+
+Set these in `.env` before running setup (all are documented in `.env.example`, section
+*Cloud clusters*):
+
+| Setting | When |
+|---|---|
+| `IMAGE_REGISTRY`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` | Private registry (e.g. `infyartifactory.jfrog.io/docker-local`). The wizard asks for these too. |
+| `ACE_WEB_LB_IP`, `ACE_LANGFUSE_LB_IP` | Pin the load-balancer IPs to free addresses in the cluster's subnet, so the URLs never change. |
+| `ACE_EXPOSE_TYPE` | `LoadBalancer` (default), `NodePort`, or `ClusterIP` (no load balancer; use `kubectl port-forward`). |
+| `ACE_EXPOSE_INTERNAL=false` | Only if your cluster allows public load balancers and you want one. |
+| `ACE_LB_SOURCE_RANGES` | Restrict which client CIDRs may reach the load balancers. |
+| `ACE_EXTRA_ALLOWED_ORIGINS` | Extra hosts you open the UI from (a DNS name in front of the LB, a jump host). Private ranges — 10/8, 172.x, 192.168/16, 100.64/10 — are always allowed. |
+| `ACE_EXPOSE_CERTIFIER=true` | Also publish the certifier API on an internal LB. |
+
+---
+
+## 4. Run setup
 
 ```bash
 ./scripts/setup.sh
 ```
 
-When the wizard asks for `CLUSTER_MODE`, enter **`local`** — your kubeconfig already
-points at the cloud cluster, so no kind cluster creation is needed. The wizard:
+1. **Where will ACE run?** — setup reads your kube context; for an AKS/EKS/GKE cluster it
+   offers `cloud`. Press Enter.
+2. **Images** — `n` (use the published images, default) or `p` (publish this checkout first),
+   then the `ACE_IMAGE_TAG`.
+3. Experiment image sources are set to `registry` for you; give `IMAGE_REGISTRY` and
+   credentials, then the LLM keys as usual (Azure OpenAI or another hosted model — Ollama
+   runs on the VM and cannot be reached from the cluster).
+4. **Deploy** — Helm.
 
-1. Patches `.env` with Kubernetes service DNS names so all in-cluster cross-service
-   calls use `service.namespace.svc.cluster.local` instead of host IPs
-2. Creates the `ace-env` Secret in the `ace` namespace
-3. Applies all manifests in `deploy/k8s/` to your cloud cluster
-4. Waits for core services to become ready
+What setup then does on a cloud cluster:
 
-At the deploy prompt the wizard asks how to apply: press **`k`** for `kubectl apply` (default) or **`h`** for `helm upgrade --install`. The Helm path is convenient for cloud clusters where you want `helm history` and `helm rollback` for rollbacks without re-running the wizard. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for Helm day-to-day commands.
+- sets every `*_IMAGE_SOURCE` in `.env` to `registry` and checks the registry has every image;
+- creates the registry pull secret in `ace` and `litmus` and starts `registry-secret-sync`
+  (copies it into namespaces experiments create later);
+- deploys with `helm upgrade --install … -f values-env.yaml -f values-platform.yaml`
+  (`values-platform.yaml` holds everything setup derived: registry, exposure, storage);
+- waits for the load balancers, then points `ALLOWED_ORIGINS`, `NEXTAUTH_URL` (Langfuse login)
+  and `CHAOS_CENTER_PUBLIC_ENDPOINT` at their addresses;
+- registers the `ace-local` chaos infrastructure and waits until it is connected;
+- prints the UI and Langfuse URLs.
 
----
+`./scripts/setup.sh --restart` re-applies the same configuration without questions.
 
-## 3. Expose the Browser UIs (LoadBalancer)
-
-Patch the two browser-facing services to `LoadBalancer` type. AKS provisions an
-Azure Load Balancer with a public IP for each:
-
-```bash
-kubectl patch svc web          -n ace -p '{"spec":{"type":"LoadBalancer"}}'
-kubectl patch svc langfuse-web -n ace -p '{"spec":{"type":"LoadBalancer"}}'
-```
-
-Wait for the external IPs to be assigned (~1–2 min):
-
-```bash
-kubectl get svc -n ace web langfuse-web -w
-# NAME           TYPE           EXTERNAL-IP
-# web            LoadBalancer   <pending> → 20.x.x.x
-# langfuse-web   LoadBalancer   <pending> → 20.x.x.x
-```
-
-Once populated, the browser UIs are at:
-
-| Service | URL | Default login |
+| Service | URL | Login |
 |---|---|---|
-| AgentCert UI | `http://<web-external-ip>:32001` | `admin` / `litmus` |
-| Langfuse | `http://<langfuse-external-ip>:32400` | `admin@agentcert.local` / `agentcert-admin` |
+| AgentCert UI | `http://<web LB IP>:2001` | `admin` / `litmus` |
+| Langfuse | `http://<langfuse-web LB IP>:3000` | `admin@agentcert.local` / `agentcert-admin` |
+| Certifier, LiteLLM, MongoDB | `kubectl port-forward -n ace svc/certifier 18000:8000` (litellm 14000, mongodb 27017) | |
 
-<div class="callout callout-info">
-<span class="callout-title">Langfuse login — update NEXTAUTH_URL</span>
-Langfuse's Next.js auth validates the browser origin against <code>NEXTAUTH_URL</code>.
-The default is <code>http://localhost:4000</code>, which breaks login when accessed
-from a public IP. After getting the Langfuse external IP, update <code>.env</code>
-and redeploy:
-<pre><code>NEXTAUTH_URL=http://&lt;langfuse-external-ip&gt;:32400</code></pre>
-<pre><code>./scripts/setup.sh   # answer Y — recreates ace-env Secret and restarts langfuse-web</code></pre>
-</div>
+---
 
-<div class="callout callout-warning">
-<span class="callout-title">⚠ These IPs are public</span>
-Restrict access via an Azure NSG on the AKS node pool:
-<pre><code>az network nsg rule create \
-  --resource-group &lt;node-rg&gt; --nsg-name &lt;aks-nsg&gt; \
-  --name AllowACEUI --priority 200 \
-  --source-address-prefixes &lt;your-ip&gt;/32 \
-  --destination-port-ranges 32001 32400 \
-  --access Allow --protocol Tcp</code></pre>
-</div>
+## 5. Cluster policies (Azure Policy / Gatekeeper)
 
-### Internal services — port-forward on demand
+- **No public load balancers** — handled: the load balancers are internal by default
+  (`service.beta.kubernetes.io/azure-load-balancer-internal`, the EKS and GKE equivalents
+  likewise). The bookinfo demo app uses a NodePort for the same reason.
+- **Privileged pods / host paths** — many Litmus faults (pod network, CPU/memory/IO hog,
+  disk-fill, container-kill, DNS/HTTP chaos) run a privileged helper pod with the node's
+  container-runtime socket. If your policy denies privileged pods, ask for the chaos namespace
+  (`litmus`) and the experiment namespaces (`sock-shop`, …) to be excluded from that policy.
+  `pod-delete`, node drain/taint and the ITBench faults do not need it.
+- **Resource limits required** — ACE's own pods do not set limits yet; if your policy enforces
+  them (rather than auditing), the pods are denied. `kubectl get constraints` lists what is
+  enforced.
 
-The remaining services are APIs or infra — access them from the VM only when needed:
+---
+
+## 6. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `admission webhook "validation.gatekeeper.sh" denied … Load Balancers should not have public IPs` | `ACE_EXPOSE_INTERNAL=false`, or the provider was not recognised: set `CLUSTER_PROVIDER=aks` in `.env`. |
+| Load balancer stays `<pending>` | `kubectl describe svc -n ace web` — a pinned `ACE_*_LB_IP` that is in use or outside the subnet, or a quota. |
+| `ImagePullBackOff` | The image is not in the registry (`./scripts/check-registry-images.sh`), or the pull secret is missing in that namespace: `./scripts/apply_cluster_prereqs.sh`. |
+| UI says *Invalid origin* / subscriber logs `websocket: bad handshake` | You open the UI from a host that is not allowed: add it to `ACE_EXTRA_ALLOWED_ORIGINS`, then `./scripts/setup.sh --restart`. |
+| Langfuse login loops back to the login page | `NEXTAUTH_URL` is not the URL in your browser — re-run `./scripts/setup.sh --restart` (it re-reads the LB address). |
+| `CLUSTER_MODE=cloud, but kubectl cannot reach a cluster` | Log in again (`az aks get-credentials …`). |
+
+---
+
+## 7. Start again from scratch
+
+This deletes ACE's data in the cluster (MongoDB, Langfuse, reports). Check the context first.
 
 ```bash
-kubectl port-forward -n ace svc/certifier 18000:8000  # Swagger at http://localhost:18000/docs
-kubectl port-forward -n ace svc/litellm   14000:14000
-kubectl port-forward -n ace svc/mongodb   27017:27017
+kubectl config current-context                  # must be the cluster you mean to wipe
+helm uninstall ace -n ace
+kubectl delete namespace ace litmus sock-shop book-info otel-demo --ignore-not-found --wait=false
+./scripts/apply_cluster_prereqs.sh --uninstall  # removes registry-secret-sync from kube-system
+kubectl get namespaces                          # wait until those are gone
+./scripts/setup.sh
 ```
 
----
-
-## 4. Verify
-
-```bash
-kubectl get pods -n ace
-WEB_IP=$(kubectl get svc -n ace web -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-curl -s -o /dev/null -w "UI  %{http_code}\n" "http://${WEB_IP}:32001/"
-```
-
----
-
-## 5. Chaos Infrastructure
-
-Setup registers the `ace-local` chaos infrastructure and applies its manifest to the cloud
-cluster automatically, then waits until it is connected:
-
-```bash
-kubectl -n litmus get pods -w     # subscriber, chaos-operator, workflow-controller, event-tracker
-```
-
-Since both ACE control plane and Litmus run inside the same cluster, the subscriber
-reaches graphql at `http://graphql.ace.svc.cluster.local:8081` with no firewall
-rules needed.
-
-<div class="callout callout-warning">
-<span class="callout-title">Images on cloud clusters</span>
-Locally built images cannot be side-loaded into AKS/EKS/GKE. Answer <code>d</code> (Docker Hub)
-or <code>j</code> (JFrog) to the image-source prompts, or push the images to a registry the
-cluster can pull from — otherwise <code>scripts/prepare-images.sh</code> stops with
-"no local side-load path". The same applies to the hub bundle: build it
-(<code>docker build -f deploy/hub-bundle/Dockerfile .</code> from the repo root), push it, and set
-<code>HUB_BUNDLE_IMAGE_SOURCE=registry</code> and <code>HUB_BUNDLE_IMAGE=&lt;your-registry&gt;/ace-hub-bundle:&lt;tag&gt;</code>
-in <code>.env</code>. Published <code>:latest</code> images may lag this checkout.
-</div>
-
-Continue with **[running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }})**.
-
----
-
-## exec-auth Kubeconfigs
-
-If your kubeconfig authenticates via an exec plugin (`kubelogin`, `aws`,
-`gke-gcloud-auth-plugin`), `scripts/setup.sh` runs `kubectl` directly on the VM
-host so the plugin works as long as you're logged in.
-
-**For AKS**, prefer `az aks get-credentials --admin` — it writes a certificate-based
-kubeconfig with no exec dependency.
-
----
-
-## Notes & Gotchas
-
-- **RBAC** — if you hit `clusterroles ... is forbidden` during a sock-shop install:
-  ```bash
-  kubectl create clusterrolebinding argo-chaos-admin \
-    --clusterrole=cluster-admin --serviceaccount=litmus:argo-chaos
-  ```
-- **PVC storage** — the `ace` namespace PVCs use the cluster's default StorageClass. Verify it supports `ReadWriteOnce`:
-  ```bash
-  kubectl get storageclass
-  kubectl get pvc -n ace     # all should be Bound after deploy
-  ```
-- **Cost & blast radius** — chaos experiments inject real faults. Scope experiments to a disposable namespace.
-- **Re-running setup** — idempotent. Re-run `./scripts/setup.sh` after any `.env` change; it updates the `ace-env` Secret and re-applies all manifests.
+`helm uninstall` keeps PVCs; deleting the `ace` namespace removes them (and their disks).
+A namespace stuck in `Terminating` (chaos resources holding finalizers):
+`bash scripts/cleanup-litmus-ns.sh <namespace>`.

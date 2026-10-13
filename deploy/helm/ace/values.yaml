@@ -8,14 +8,35 @@
 
 secretName: ace-env
 
-# ── Per-service overrides ─────────────────────────────────────────────────────
-# The web service is the only external entry point — nginx inside it proxies /api/
-# and /auth/ to graphql and auth by K8s service DNS. setup.sh sets web.serviceType
-# to LoadBalancer for cloud (AKS/EKS/GKE) deployments.
-web:
-  serviceType: NodePort
-
-# graphql is internal-only (reached via the web nginx proxy); always NodePort.
+# ── Service exposure ──────────────────────────────────────────────────────────
+# How the browser-facing Services are published. web is the UI entry point
+# (nginx inside it proxies /api/ and /auth/ to graphql and auth by K8s service
+# DNS); langfuse-web serves the Langfuse UI and its login. Every other Service
+# (graphql, auth, mongodb, ...) is internal and stays NodePort.
+# setup.sh fills this from .env (ACE_EXPOSE_*, ACE_*_LB_IP) for CLUSTER_MODE=cloud.
+expose:
+  #   NodePort      fixed node ports; KinD maps them to localhost (default)
+  #   LoadBalancer  one cloud load balancer per Service
+  #   ClusterIP     not published; use kubectl port-forward
+  type: NodePort
+  # LoadBalancer only. provider (aks | eks | gke) selects the annotation that
+  # makes the load balancer internal (a private VNet/VPC IP) when internal is
+  # true. Corporate clusters commonly deny public load balancers outright.
+  provider: ""
+  internal: true
+  # Extra Service annotations, applied over the provider's.
+  annotations: {}
+  # Client CIDRs allowed to reach the load balancers (empty = no restriction).
+  loadBalancerSourceRanges: []
+  # Optional fixed IPs, e.g. a free address in the AKS subnet for an internal LB.
+  web:
+    loadBalancerIP: ""
+  langfuse:
+    loadBalancerIP: ""
+  # graphql calls the certifier in-cluster; publish it only for direct API access.
+  certifier:
+    enabled: false
+    loadBalancerIP: ""
 
 # ── Certifier: host-bridged report export (local KinD only) ──────────────────
 # Mounts a hostPath volume into the certifier pod so finished HTML/PDF reports
@@ -119,8 +140,15 @@ chartsHub:
   # true when setup.sh built and side-loaded bundleImage (keeps its name).
   bundleLocal: false
 
-# ── Persistent storage sizes ─────────────────────────────────────────────────
+# ── Persistent storage ───────────────────────────────────────────────────────
 storage:
+  # true when PVCs are cloud block disks (Azure Disk, EBS, GCE PD): root-owned,
+  # formatted with lost+found at the root, attachable to one node at a time.
+  # Puts Postgres data in a subdirectory, gives MinIO an fsGroup, and uses the
+  # Recreate strategy for PVC-backed Deployments. setup.sh sets it for
+  # CLUSTER_MODE=cloud. Keep false on an existing install whose data already
+  # sits at the volume root (KinD's local-path volumes).
+  cloudDisks: false
   mongodb:                5Gi
   certifierWorkspace:     2Gi
   litellm:                1Gi

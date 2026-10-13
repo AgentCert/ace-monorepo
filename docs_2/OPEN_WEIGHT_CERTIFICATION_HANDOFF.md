@@ -10144,3 +10144,48 @@ Pushes this session: all 14 ACE images to Docker Hub (`:latest` + revision; grap
 **Verified:** `scripts/tests/test-registry-tooling.sh --online` 133/133; graphql `go test` 24 packages ok; install-app / install-agent build + test ok; `sync-imageref.sh --check` clean; gofmt clean. Tests 2–4 (Infosys JFrog, open-source Docker Hub, compose) run by the user with `shut_down.sh` + `setup.sh` in their checkout.
 
 **Open:** upstream monorepo `82b0d1f` pins chaos-charts `bbad9609` and litmus-go `c1b1157b`, which are not on the remote ("not our ref") — the owner must push them; locally they stay at `d876561` / `6879e4b6`, so do not commit those two pointers from this checkout. Not in the inventory yet: `agentcert/sre-agent`, `agentcert/ciso-agent`, `nginx:latest` (k8s-agent) — need mirroring for JFrog mode. JFrog `:latest` overwrite permission still missing; new graphql / installers / hub-bundle images get built only after commit (`build-and-push.sh --committed-only --reuse-local`).
+
+### §141 — One setup for KinD and cloud clusters (AKS/EKS/GKE): cluster profile, internal load balancers, registry-only images (2026-10-13, uncommitted)
+
+**Trigger:** a user deploying onto a corporate AKS cluster (Gatekeeper / Azure Policy) hit, in order:
+1. `helm upgrade` denied: `azurepolicy-k8sazurev1loadbalancernopublic … azure-load-balancer-internal annotation is required for web`. `CLUSTER_MODE=cloud` set `web.serviceType=LoadBalancer`, and the chart had no annotation setting.
+2. Postgres would not init on Azure Disk (`lost+found` at the volume root). The kubectl manifests set PGDATA; the Helm chart did not.
+3. MinIO could not write its root-owned disk.
+4. `ALLOWED_ORIGINS` missed the cluster network, a 100.64/10 CGNAT VNet (nodes 100.78.201.x).
+5. The first experiment's Argo `wait` sidecar was `ImagePullBackOff`: the pull secret was missing in `litmus` after a hand-run `helm upgrade` skipped `apply_cluster_prereqs.sh`.
+
+The user hand-patched the chart. Rendering their diff against HEAD with setup's flags showed:
+- about half of the edits had no effect: hardcoded pull secrets, dbEnv inlined, certHostExport removed;
+- several were regressions: ClickHouse unpinned and the §108 ConfigMap removed, the wait-for-db init container removed, a malformed `values.yaml`.
+
+**Root cause:** `CLUSTER_MODE` records who provides the cluster, not what it is. Side-loading, exposure, storage and the callback network were each guessed separately, and the wizard asked `CLUSTER_MODE` last, after the image questions whose answers depend on it.
+
+| Area | Files | Change |
+|---|---|---|
+| Cluster profile | new `scripts/lib/cluster_profile.sh` | `cluster_provider_classify` (node providerID / labels → kind, k3s, minikube, aks, eks, gke, generic), `detect_cluster_provider`, `cluster_provider_is_cloud`, `cluster_provider_can_sideload` (kind and k3s only, matching prepare-images.sh). `CLUSTER_PROVIDER` in `.env` overrides the detection. |
+| Origins | new `scripts/lib/allowed_origins.py` | One builder used by the wizard, `k8s_env_patch` (every deploy) and `post_cloud_setup`. Base list and old private ranges unchanged, plus 100.64/10; then the callback host, `ACE_EXTRA_ALLOWED_ORIGINS` and `ACE_PUBLIC_HOSTS`. RE2-safe. |
+| Chart: exposure | `templates/_helpers.tpl` (`ace.expose.type`, `ace.expose.annotations`, `ace.expose.spec`), `web.yaml`, `langfuse.yaml`, `certifier.yaml`, `values.yaml` | `expose.{type,provider,internal,annotations,loadBalancerSourceRanges,web/langfuse/certifier.loadBalancerIP,certifier.enabled}` replaces `web.serviceType`. Internal-LB annotation per provider: AKS `azure-load-balancer-internal`, EKS `aws-load-balancer-scheme` + `-internal`, GKE `networking.gke.io/load-balancer-type`. User annotations win; the loop avoids sprig `merge`, which drops a user `false` (mergo zero value). Values are always quoted. `nodePort` only for NodePort. |
+| Chart: cloud disks | `langfuse.yaml`, `certifier.yaml`, `litellm.yaml`, `values.yaml` | `storage.cloudDisks`: Postgres `PGDATA` subdir, MinIO `fsGroup: 65532` + `OnRootMismatch`, `strategy: Recreate` on the 6 RWO-PVC Deployments (RollingUpdate deadlocks on Multi-Attach across nodes). Default false (KinD local-path data stays at the volume root). |
+| NOTES | `templates/NOTES.txt` | Per-exposure URLs; upgrade command includes both values files. |
+| setup.sh: wizard | `scripts/setup.sh` | `ask_cluster_mode` asked first, after "setup style". It probes the kube context and defaults to `cloud` for AKS/EKS/GKE when the saved value is `auto`. The later CLUSTER_MODE asks were removed (express + guided). Cloud gets `ask_cloud_build_choice` (`n` published / `p` publish, plus `ACE_IMAGE_TAG`), and experiment sources are auto-set to `registry`. |
+| setup.sh: profile | `apply_cluster_profile`, `enforce_registry_images` (both modes, before builds) | A `local` context that is AKS/EKS/GKE → `CLUSTER_MODE=cloud`. Cloud + unreachable kubectl → exit with a login hint. For cloud or a non-side-loadable cluster: all six `*_IMAGE_SOURCE` → registry, `Never` pull policies → Always, `HUB_BUNDLE_IMAGE :local` → `:latest`, persisted `PLATFORM_IMAGE_SOURCE=local` → skip, `--local-build` → exit, push → `CLOUD_PUBLISH` (runs `build-and-push.sh`, all 14 images incl. hub bundle + itbench). Warns when `OLLAMA_MODEL` is set on cloud. |
+| setup.sh: helm | `generate_helm_values_platform`, `helm_deploy` | Every derived value goes into `deploy/helm/ace/values-platform.yaml` (gitignored) instead of `--set`. The printed upgrade command now reproduces the deploy. Cloud adds `imagePullPolicy: Always`, `storage.cloudDisks`, `expose.*` from `ACE_EXPOSE_TYPE` / `ACE_EXPOSE_INTERNAL` / `ACE_*_LB_IP` / `ACE_EXPOSE_CERTIFIER` / `ACE_LB_SOURCE_RANGES`. |
+| setup.sh: cloud deploy | `preflight_registry_images`, `post_cloud_setup` (rewritten), `lb_address`, `refresh_allowed_origins`, `k8s_env_patch`, summary | Before helm, `check-registry-images.sh` runs on `deploy/images.txt` minus group `local` and cluster-init. It fails on MISSING, notes OLD, and skips if buildx is absent or the checker cannot run; `ACE_SKIP_REGISTRY_CHECK=1` skips it. After deploy: wait for the web and langfuse-web LB addresses (NodePort: node IP; ClusterIP: localhost) and set `ACE_PUBLIC_HOSTS`, `ALLOWED_ORIGINS`, `CHAOS_CENTER_PUBLIC_ENDPOINT` (also `kubectl set env` on graphql, a plain env entry) and `NEXTAUTH_URL`. Only on change: re-apply ace-env, restart graphql, auth and langfuse-web. `k8s_env_patch` stops resetting `NEXTAUTH_URL` on cloud. The summary prints real URLs and port-forward commands. |
+| setup.sh: pull secret | `helm_deploy`, `k8s_deploy` | `apply_registry_prereqs` re-runs right after the chaos-infra manifest creates its ServiceAccounts. |
+| setup.sh: kubectl path | dispatch, `k8s_deploy` | Cloud is Helm-only (`k` → `h` with a message). The dead cloud `kubectl patch svc web … \|\| true` and the `post_cloud_setup` call were removed from `k8s_deploy`. |
+| app-charts | `charts/bookinfo/values.yaml` | productpage Service LoadBalancer → NodePort (same nodePort 30002): an annotation-less LB is public and denied. **Submodule change: needs a commit in app-charts and new install-app / hub-bundle images to take effect.** |
+| Docs | `.env.example` (*Cloud clusters* block, CLUSTER_MODE note), `docs/setup/route-3-cloud-aks.md` (rewritten), `CLAUDE.md` (Key Helm values) | |
+| Tests | new `scripts/tests/test-cloud-profile.sh` | 65 checks: provider table, origins (accept/reject, superset of the old regex, RE2), chart exposure for kind/aks/eks/gke/internal=false/overrides/IPs/ranges/ClusterIP, cloudDisks, values-platform renders exactly what the old `--set` flags did (KinD), cloud values file, profile rewrite of `.env`, `post_cloud_setup` with stubbed kubectl (values, one restart, no restart on re-run, untouched when no LB). |
+
+**Verified (offline):**
+- KinD byte-identical: HEAD chart (`git archive`) and new chart, 4 scenarios (defaults, KinD local build, KinD + JFrog, existing local cluster), 4/4 identical.
+- `test-cloud-profile.sh`: 65/65.
+- `test-registry-tooling.sh`: 136/137. The one failure is pre-existing and unrelated: litmus-go `build/Dockerfile.itbench` FROM lines do not use `*_IMAGE` args; the litmus-go submodule is clean at its pointer.
+- `bash -n` clean.
+
+**Not verified:** no live run on AKS, EKS or GKE, and no live KinD run of the changed `setup.sh`. The user will do a clean from-scratch AKS run.
+
+**Open:**
+- Clusters whose policy *denies* (not audits) privileged pods or missing resource limits: the Litmus privileged faults, and the absent `resources` on platform and workflow pods (needs `kubectl get constraints` from the cluster).
+- An ACR attach-mode without registry credentials.
+- Duplicate app NodePorts 31090/31687 across sock-shop, bookinfo and otel-demo.

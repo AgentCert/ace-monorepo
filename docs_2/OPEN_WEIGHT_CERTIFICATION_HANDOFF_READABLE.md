@@ -3378,3 +3378,27 @@ Now, when you add an agent or app to an experiment, the drawer shows a **Setting
 **Verified:** 133 automated checks, all graphql Go tests and both installers pass after the merge. The user ran the JFrog, Docker Hub and compose bring-ups themselves.
 
 **Still to do:** the owner of the upstream chaos-charts and litmus-go commits has to push them; three agent images still need adding to the inventory; JFrog overwrite permission; build and publish the new images after the commit.
+
+## §141 — The same setup now works on KinD and on cloud clusters like AKS (2026-10-13, uncommitted)
+
+**What:** `setup.sh` now asks where ACE will run before anything else. When the answer is a cloud cluster (AKS, EKS or GKE), it follows the rules that kind of cluster needs:
+- Every image is pulled from the registry, and setup checks the registry has all of them before it deploys.
+- The UI and Langfuse get internal load balancers, which corporate Azure policies allow.
+- The databases are set up for cloud disks.
+- Deploys always use Helm.
+
+After deploy, setup reads the load-balancer addresses and points the login and origin settings at them.
+
+**Why:** a team deploying to a corporate AKS cluster hit one error after another:
+- their policy rejected a public load balancer;
+- Postgres and MinIO could not start on Azure Disk;
+- the UI rejected the network's 100.x addresses;
+- an experiment could not pull its images.
+
+They had patched the chart by hand to get past these. Rendering those patches showed about half did nothing and some reintroduced old bugs. The underlying problem: setup only knew *who* provides the cluster, not *what* it is.
+
+**Verified:** KinD output from the chart is byte-for-byte unchanged in four scenarios. 65 new automated checks pass, and the existing registry test suite still passes, apart from one unrelated, older failure. No live run on a cloud cluster yet; the user will do a clean AKS install.
+
+**Still to do:**
+- Clusters that strictly forbid privileged pods or require CPU/memory limits need more work.
+- The bookinfo chart change needs a commit in the app-charts submodule and new images.

@@ -17,6 +17,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: postgres
@@ -53,6 +60,12 @@ spec:
               value: UTC
             - name: PGTZ
               value: UTC
+            {{- if .Values.storage.cloudDisks }}
+            # A freshly formatted cloud disk has lost+found at its root, and
+            # initdb refuses a non-empty directory: keep the data one level down.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            {{- end }}
           readinessProbe:
             exec:
               command: [pg_isready, -U, postgres]
@@ -99,6 +112,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: redis
@@ -207,6 +227,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: clickhouse
@@ -305,6 +332,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: minio
@@ -314,6 +348,14 @@ spec:
         app: minio
     spec:
       {{- include "ace.imagePullSecrets" $ | nindent 6 }}
+      {{- if .Values.storage.cloudDisks }}
+      # The MinIO image runs as a non-root user and a cloud disk's root is
+      # owned by root. fsGroup makes kubelet hand the volume to this group and
+      # adds the group to the container, so any image user can write to it.
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      {{- end }}
       containers:
         - name: minio
           image: {{ include "ace.image" (dict "root" $ "image" .Values.images.minio "local" false) }}
@@ -520,11 +562,17 @@ kind: Service
 metadata:
   name: langfuse-web
   namespace: {{ include "ace.namespace" . }}
+  {{- with include "ace.expose.annotations" (dict "root" $ "service" "langfuse") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   selector:
     app: langfuse-web
-  type: NodePort
+  {{- include "ace.expose.spec" (dict "root" $ "service" "langfuse") | nindent 2 }}
   ports:
     - port: 3000
       targetPort: 3000
+      {{- if eq (include "ace.expose.type" (dict "root" $ "service" "langfuse")) "NodePort" }}
       nodePort: 32400
+      {{- end }}

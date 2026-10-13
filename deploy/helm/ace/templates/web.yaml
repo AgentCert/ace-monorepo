@@ -119,13 +119,17 @@ kind: Service
 metadata:
   name: web
   namespace: {{ include "ace.namespace" . }}
+  {{- with include "ace.expose.annotations" (dict "root" $ "service" "web") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   selector:
     app: web
-  type: {{ .Values.web.serviceType | default "NodePort" }}
+  {{- include "ace.expose.spec" (dict "root" $ "service" "web") | nindent 2 }}
   ports:
     - port: 2001
       targetPort: 2001
-      {{- if ne (.Values.web.serviceType | default "NodePort") "LoadBalancer" }}
+      {{- if eq (include "ace.expose.type" (dict "root" $ "service" "web")) "NodePort" }}
       nodePort: 32001
       {{- end }}

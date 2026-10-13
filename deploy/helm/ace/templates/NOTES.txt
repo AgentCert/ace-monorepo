@@ -1,5 +1,7 @@
 ACE stack deployed successfully!
 
+{{- if eq (.Values.expose.type | default "NodePort") "NodePort" }}
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Service         URL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -12,20 +14,34 @@ ACE stack deployed successfully!
   MongoDB         mongodb://localhost:{{ .Values.env.KIND_HOSTPORT_MONGO | default "27017" }}
   MinIO           http://localhost:{{ .Values.env.KIND_HOSTPORT_MINIO | default "9090" }}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(KinD maps the NodePorts to these localhost ports.)
+{{- else if eq .Values.expose.type "LoadBalancer" }}
+
+UI and Langfuse are on {{ if .Values.expose.internal }}internal {{ end }}load balancers:
+  kubectl get svc -n {{ include "ace.namespace" . }} web langfuse-web
+  UI (web)        http://<web EXTERNAL-IP>:2001
+  Langfuse        http://<langfuse-web EXTERNAL-IP>:3000
+Internal APIs:    kubectl port-forward -n {{ include "ace.namespace" . }} svc/certifier 18000:8000   (also litellm 14000, mongodb 27017)
+{{- else }}
+
+Services are ClusterIP; reach them with kubectl port-forward:
+  kubectl port-forward -n {{ include "ace.namespace" . }} svc/web 2001:2001           → http://localhost:2001
+  kubectl port-forward -n {{ include "ace.namespace" . }} svc/langfuse-web 4000:3000  → http://localhost:4000
+{{- end }}
 
 Check pod status:
-  kubectl get pods -n ace
+  kubectl get pods -n {{ include "ace.namespace" . }}
 
 View logs:
-  kubectl logs -n ace -l app=graphql --tail=50 -f
+  kubectl logs -n {{ include "ace.namespace" . }} -l app=graphql --tail=50 -f
 
-Upgrade the release:
-  helm upgrade ace deploy/helm/ace \
-    --set-file litellm.config=agentcert-stack/litellm-setup/litellm_config.yaml \
+Upgrade the release (setup.sh writes both values files; re-run it after editing .env):
+  helm upgrade --install ace deploy/helm/ace -n {{ include "ace.namespace" . }} \
+    -f deploy/helm/ace/values-env.yaml -f deploy/helm/ace/values-platform.yaml \
     --timeout 10m
 
 Rollback to previous version:
-  helm rollback ace -n ace
+  helm rollback ace -n {{ include "ace.namespace" . }}
 
 Uninstall (keeps PVCs by default):
-  helm uninstall ace -n ace
+  helm uninstall ace -n {{ include "ace.namespace" . }}

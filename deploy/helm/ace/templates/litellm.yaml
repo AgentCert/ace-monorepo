@@ -25,6 +25,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: litellm

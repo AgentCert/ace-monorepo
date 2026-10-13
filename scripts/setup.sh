@@ -56,6 +56,10 @@ ENV_FILE="${REPO_ROOT}/.env"
 # scripts use). Only defines functions; nothing runs on source.
 # shellcheck source=lib/registry.sh
 source "${SCRIPT_DIR}/lib/registry.sh"
+# What kind of cluster the kube context points at (KinD, AKS, ...). Only
+# defines functions; nothing runs on source.
+# shellcheck source=lib/cluster_profile.sh
+source "${SCRIPT_DIR}/lib/cluster_profile.sh"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 # Force UTF-8 as Python's default text encoding (PEP 540) for every embedded
@@ -1437,6 +1441,69 @@ ask_image_registry() {
     fi
 }
 
+# Ask where ACE runs. Asked first, because the image questions that follow
+# depend on it: a cloud cluster cannot load images built on this machine. The
+# current kube context is probed, so a reachable AKS/EKS/GKE cluster is offered
+# as "cloud" instead of the KinD default. Sets CLUSTER_MODE.
+ask_cluster_mode() {
+    local saved ctx provider="unreachable" def reply
+    saved="$(cur CLUSTER_MODE)"
+    ctx="$(kubectl config current-context 2>/dev/null || true)"
+    [[ -n "${ctx}" ]] && provider="$(detect_cluster_provider)"
+    def="${saved:-auto}"
+    if cluster_provider_is_cloud "${provider}" && [[ "${def}" == auto ]]; then
+        def="cloud"
+    fi
+    echo -e "${BOLD}Where will ACE run?${NC}"
+    echo -e "   ${BOLD}auto${NC}   KinD cluster on this machine, created or reused by setup"
+    echo -e "   ${BOLD}fresh${NC}  a new KinD cluster on this machine"
+    echo -e "   ${BOLD}local${NC}  an existing local cluster from your kubeconfig (k3s, minikube)"
+    echo -e "   ${BOLD}cloud${NC}  an existing AKS / EKS / GKE cluster from your kubeconfig"
+    [[ -n "${ctx}" ]] && echo -e "   ${DIM}kubectl context: ${ctx} → $(cluster_provider_label "${provider}")${NC}"
+    while true; do
+        read -rp "$(echo -e "  CLUSTER_MODE ${DIM}[${def}]${NC}: ")" reply
+        reply="${reply:-${def}}"
+        case "${reply}" in
+            auto|fresh|kind|local|cloud) break ;;
+            *) warn "  '${reply}' is not one of auto, fresh, local, cloud." ;;
+        esac
+    done
+    CLUSTER_MODE="${reply}"
+    echo
+}
+
+# Build question for a cloud cluster. It pulls every image from the registry,
+# so the choice is between images already published there and publishing this
+# checkout first (all ACE images, see "Cloud: publish" below). Also asks which
+# release tag to use. Sets the same DO_BUILD / DH_* variables as the KinD menu.
+ask_cloud_build_choice() {
+    local reply tag
+    echo -e "${BOLD}▸ Images${NC}  ${DIM}a cloud cluster pulls every image from ${_PUSH_TARGET_LABEL}; images built on this machine cannot be loaded into it${NC}"
+    echo -e "   ${BOLD}n${NC}  use the images already published there ${DIM}(default)${NC}"
+    echo -e "   ${BOLD}p${NC}  build this checkout and push all ACE images there first"
+    read -rp "  Choice [p/N]: " reply
+    DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
+    SELECTED_BUILD_IMAGES=()
+    case "${reply,,}" in
+        ""|n) ;;
+        p)  DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
+            DH_TOKEN="$(ask REGISTRY_PASSWORD "Registry password / token (${_PUSH_TARGET_LABEL})")"
+            DH_USER="$(printf '%s' "${DH_USER}" | tr -d '[:space:]')"
+            DH_TOKEN="$(printf '%s' "${DH_TOKEN}" | tr -d '[:space:]')"
+            if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
+                DO_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+            else
+                warn "  Credentials missing — using the published images."
+            fi ;;
+        *)  warn "  '${reply}': a cloud cluster cannot use local builds — using the published images." ;;
+    esac
+    echo -e "   ${DIM}Release tag of ACE's own images, e.g. RELEASE-2 (Enter keeps the value shown; - = :latest).${NC}"
+    tag="$(ask ACE_IMAGE_TAG 'ACE_IMAGE_TAG')"
+    tag="$(printf '%s' "${tag}" | tr -d '[:space:]')"
+    [[ "${tag}" == "-" ]] && tag=""
+    set_env ACE_IMAGE_TAG "${tag}"
+}
+
 if [[ "$SETUP_MODE" == "setup" ]]; then
 
 echo
@@ -1459,6 +1526,8 @@ read -rp "$(echo -e "  Choice ${DIM}[e/G]${NC}: ")" _style_ans
 unset _style_ans
 echo
 
+ask_cluster_mode
+
 if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo -e "${CYAN}═══════════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}  Express setup — all questions upfront${NC}"
@@ -1467,10 +1536,15 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo
 
     # Build
-    echo -e "${BOLD}▸ Build images?${NC}  p=push to ${_PUSH_TARGET_LABEL}  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
     DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
     declare -a SELECTED_BUILD_IMAGES=()
-    read -rp "  Choice [p/l/A/n]: " _eb
+    if [[ "${CLUSTER_MODE}" == cloud ]]; then
+        ask_cloud_build_choice
+        _eb="cloud"
+    else
+        echo -e "${BOLD}▸ Build images?${NC}  p=push to ${_PUSH_TARGET_LABEL}  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
+        read -rp "  Choice [p/l/A/n]: " _eb
+    fi
     case "${_eb,,}" in
         "") DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}"); _ALL_LOCAL=1 ;;
         p)  DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
@@ -1495,7 +1569,10 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     echo
 
     # Image sources — "a" above already answers these; only ask when it wasn't chosen.
-    if [[ ${_ALL_LOCAL} -eq 1 ]]; then
+    if [[ "${CLUSTER_MODE}" == cloud ]]; then
+        echo -e "${BOLD}▸ Experiment image sources${NC}  ${DIM}registry — a cloud cluster pulls them from the image registry${NC}"
+        _INSTALL_APP_SRC="registry"; _INSTALL_AGENT_SRC="registry"; _LITMUS_SRC="registry"
+    elif [[ ${_ALL_LOCAL} -eq 1 ]]; then
         echo -e "${BOLD}▸ Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
         _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
     else
@@ -1590,9 +1667,7 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
     fi
     echo
 
-    # Cluster + CA cert
-    echo -e "${BOLD}▸ Cluster mode${NC}  ${DIM}auto=reuse/create kind  local=existing  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
-    CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE')"; CLUSTER_MODE="${CLUSTER_MODE:-auto}"
+    # Corporate CA cert (the cluster was chosen at the start: ask_cluster_mode)
     CUSTOM_CA_CERT_PATH="$(ask CUSTOM_CA_CERT_PATH 'Corporate CA cert path (Enter to skip)')"
     CUSTOM_CA_CERT_PATH="$(echo "${CUSTOM_CA_CERT_PATH}" | tr -d '[:space:]')"
     [[ -n "${CUSTOM_CA_CERT_PATH}" && ! -f "${CUSTOM_CA_CERT_PATH}" ]] \
@@ -1618,6 +1693,8 @@ if [[ "${BUILD_MODE}" == "local" ]]; then
     # --local-build flag: skip prompt, build all images locally
     SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
     DO_LOCAL_BUILD=1
+elif [[ "${CLUSTER_MODE}" == cloud ]]; then
+    ask_cloud_build_choice
 else
     echo -e "${BOLD}Build Docker images?${NC}"
     echo -e "   ${BOLD}p${NC}  Build and push to ${_PUSH_TARGET_LABEL}"
@@ -1682,7 +1759,11 @@ if [[ $EXPRESS_MODE -eq 0 ]]; then
     _INSTALL_APP_SRC=""; _INSTALL_AGENT_SRC=""; _LITMUS_SRC=""
 fi
 if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
-    if [[ "${_ALL_LOCAL:-0}" -eq 1 ]]; then
+    if [[ "${CLUSTER_MODE}" == cloud ]]; then
+        echo -e "${BOLD}Experiment image sources${NC}  ${DIM}registry — a cloud cluster pulls them from the image registry${NC}"
+        _INSTALL_APP_SRC="registry"; _INSTALL_AGENT_SRC="registry"; _LITMUS_SRC="registry"
+        echo
+    elif [[ "${_ALL_LOCAL:-0}" -eq 1 ]]; then
         echo -e "${BOLD}Experiment image sources${NC}  ${DIM}auto-set to local — \"a\" (build ALL locally) was selected above${NC}"
         _INSTALL_APP_SRC="local"; _INSTALL_AGENT_SRC="local"; _LITMUS_SRC="local"
         echo
@@ -1825,15 +1906,8 @@ else
 fi
 echo
 
-# --- OPTIONAL: cluster + infra modes ---------------------------------------
-echo -e "${BOLD}4) How should Kubernetes be sourced?${NC} ${DIM}(Enter = auto)${NC}"
-echo -e "   ${DIM}auto=reuse/create kind  local=existing cluster  cloud=AKS/EKS/GKE  fresh=new kind${NC}"
-CLUSTER_MODE="$(ask CLUSTER_MODE 'CLUSTER_MODE (auto/local/cloud/fresh)')"
-CLUSTER_MODE="${CLUSTER_MODE:-auto}"
-echo
-
 # --- Corporate proxy CA certificate ----------------------------------------
-echo -e "${BOLD}5) Corporate proxy CA certificate${NC} ${DIM}(needed for git clone inside containers on proxy networks)${NC}"
+echo -e "${BOLD}4) Corporate proxy CA certificate${NC} ${DIM}(needed for git clone inside containers on proxy networks)${NC}"
 echo -e "   ${DIM}Leave blank to use the host system bundle (/etc/ssl/certs/ca-certificates.crt).${NC}"
 CUSTOM_CA_CERT_PATH="$(ask CUSTOM_CA_CERT_PATH 'Path to root CA cert file (.pem/.crt, Enter to skip)')"
 CUSTOM_CA_CERT_PATH="$(echo "${CUSTOM_CA_CERT_PATH}" | tr -d '[:space:]')"
@@ -1877,7 +1951,7 @@ export _AZ_KEY="$AZ_KEY" _AZ_ENDPOINT="$AZ_ENDPOINT" _AZ_DEPLOY="$AZ_DEPLOY" \
        _CLUSTER_MODE="$CLUSTER_MODE" _CALLBACK_HOST="$CALLBACK_HOST" \
        _FLASH_MODEL="$FLASH_MODEL" _DH_USER="$DH_USER" _DH_TOKEN="$DH_TOKEN" \
        _BENCHMARK_AGENT="${BENCHMARK_AGENT:-}" \
-       _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}" \
+       _CUSTOM_CA_CERT_PATH="${CUSTOM_CA_CERT_PATH:-}" _ACE_LIB_DIR="${SCRIPT_DIR}/lib" \
        _INSTALL_APP_SRC="${_INSTALL_APP_SRC:-}" _INSTALL_AGENT_SRC="${_INSTALL_AGENT_SRC:-}" \
        _LITMUS_SRC="${_LITMUS_SRC:-}" \
        _IMAGE_REGISTRY_ASKED="${_IMAGE_REGISTRY_ASKED:-0}" _IMAGE_REGISTRY="${_IMAGE_REGISTRY:-}" \
@@ -2069,15 +2143,19 @@ if cb:
     sets["LITELLM_HOST"]            = f"http://{cb}:14000"
     sets["LANGFUSE_HOST"]           = f"http://{cb}:4000"
 
-# WebSocket origin allow-list (graphql checks the subscriber's Host against this).
-# Must include the host IP in-cluster pods connect from — kind gateway (172.*),
-# pod CIDR (10.*), LAN (192.168.*). Otherwise the subscriber gets "websocket: bad handshake".
-host_alt = ("|" + re.escape(cb)) if cb else ""
-sets["ALLOWED_ORIGINS"] = (
-    r"^(http://|https://|)((localhost|host\.docker\.internal|host\.minikube\.internal|[a-z0-9.-]+\.svc\.cluster\.local)"
-    r"|172\.[0-9]+\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|192\.168\.[0-9]+\.[0-9]+"
-    + host_alt + r")(:[0-9]+|)$"
-)
+# Origin allow-list for auth and graphql (graphql also checks the subscriber's
+# Host against it; a miss is "websocket: bad handshake" / "Invalid origin"):
+# the private ranges pods and browsers connect from, the pod->host gateway,
+# ACE_EXTRA_ALLOWED_ORIGINS, and the load-balancer addresses the last cloud
+# deploy found (ACE_PUBLIC_HOSTS). Built by scripts/lib/allowed_origins.py,
+# which setup.sh's deploy steps also use, so every writer agrees.
+sys.path.insert(0, os.environ["_ACE_LIB_DIR"])
+import allowed_origins
+def env_value(key):
+    m = re.search(rf'^{key}=(.*)$', cur_lines, re.MULTILINE)
+    return m.group(1).strip() if m else ""
+sets["ALLOWED_ORIGINS"] = allowed_origins.build(
+    [cb, env_value("ACE_EXTRA_ALLOWED_ORIGINS"), env_value("ACE_PUBLIC_HOSTS")])
 
 lines = open(path).read().splitlines()
 seen = set()
@@ -2346,6 +2424,49 @@ apply_registry_prereqs() {
     fi
 }
 
+# preflight_registry_images — for a cluster that pulls everything from the
+# registry: check before deploying that every image it will pull is there, so a
+# missing mirror or release shows up now as a list, not later as
+# ImagePullBackOff on a pod or mid-experiment. Uses scripts/check-registry-images.sh
+# on deploy/images.txt minus what this path never pulls (group "local": Ollama
+# and the KinD node image; cluster-init, which only the Compose route runs).
+# ACE_SKIP_REGISTRY_CHECK=1 skips it.
+preflight_registry_images() {
+    local list report missing old reg rc=0
+    reg="$(cur IMAGE_REGISTRY)"; reg="${reg:-Docker Hub}"
+    if [[ "${ACE_SKIP_REGISTRY_CHECK:-$(cur ACE_SKIP_REGISTRY_CHECK)}" == 1 ]]; then
+        warn "ACE_SKIP_REGISTRY_CHECK=1 — not checking that the registry has every image."
+        return 0
+    fi
+    if ! docker buildx version >/dev/null 2>&1; then
+        warn "docker buildx is not available — skipping the registry image check."
+        return 0
+    fi
+    mkdir -p "${REPO_ROOT}/.tmp"
+    list="${REPO_ROOT}/.tmp/images-cloud.txt"
+    grep -vE '^[a-z]+\|local\||\|agentcert/cluster-init:' "${REPO_ROOT}/deploy/images.txt" > "${list}"
+    echo -e "${DIM}Checking that ${reg} has every image the cluster will pull (about a minute)…${NC}"
+    report="$("${SCRIPT_DIR}/check-registry-images.sh" --env-file "${ENV_FILE}" --images "${list}" 2>&1)" || rc=$?
+    if ! grep -q '^Summary:' <<<"${report}"; then
+        # The checker itself failed (exit 2: bad inventory or registry settings).
+        warn "The registry image check could not run (exit ${rc}); deploying without it:"
+        tail -3 <<<"${report}" | sed 's/^/    /'
+        return 0
+    fi
+    missing="$(grep '^MISSING' <<<"${report}" || true)"
+    old="$(grep -c '^OLD' <<<"${report}" || true)"
+    if [[ -n "${missing}" ]]; then
+        warn "These images are not in the registry; pods using them would fail with ImagePullBackOff:"
+        sed 's/^MISSING */    /' <<<"${missing}"
+        warn "Publish them first: ./scripts/mirror-images.sh (third-party) and ./scripts/build-and-push.sh (ACE images),"
+        warn "or point ACE_IMAGE_TAG at a published release. ACE_SKIP_REGISTRY_CHECK=1 deploys anyway."
+        return 1
+    fi
+    ok "Registry has every image the cluster will pull."
+    [[ "${old}" -gt 0 ]] && echo -e "${DIM}  ${old} ACE image(s) were built from another revision than this checkout (expected when deploying a published release).${NC}"
+    return 0
+}
+
 # apply_manifest_resolved FILE — kubectl apply a plain manifest (deploy/k8s)
 # with every image resolved for IMAGE_REGISTRY / the frozen agentcert/ copies
 # and the pull secret added (scripts/lib/resolve_image_env.py, the same rule
@@ -2362,51 +2483,170 @@ apply_manifest_resolved() {
         | kubectl apply -f -
 }
 
-# post_cloud_setup — after a cloud deployment, poll for the web service LoadBalancer
-# IP/hostname. The web pod's nginx is the only external entry point: browsers hit
-# <web-lb>:2001, nginx proxies /api/ → graphql:8081 and /auth/ → auth:3000 via
-# K8s service DNS. Graphql never needs to be externally reachable.
-#
-# What this function does:
-#   1. Polls the web service LB until it gets an IP/hostname.
-#   2. Adds it to ALLOWED_ORIGINS so graphql accepts the browser Origin header
-#      that nginx forwards through (Origin: http://<web-lb>:2001).
-#   3. Re-applies the ace-env Secret and restarts graphql to pick up the new regex.
-post_cloud_setup() {
-    local ns="${1:-ace}"
-    echo
-    echo -e "${DIM}Cloud mode: polling web LoadBalancer for external IP/hostname (up to 5 min)…${NC}"
-    local lb_ip="" attempts=0
-    while [[ -z "${lb_ip}" && ${attempts} -lt 60 ]]; do
-        lb_ip="$(kubectl get svc web -n "${ns}" \
-            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
-        if [[ -z "${lb_ip}" ]]; then
-            lb_ip="$(kubectl get svc web -n "${ns}" \
-                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-        fi
-        if [[ -z "${lb_ip}" ]]; then sleep 5; attempts=$(( attempts + 1 )); fi
+# apply_cluster_profile — turn "what cluster is this" into the deploy decisions
+# that depend on it (scripts/lib/cluster_profile.sh). Runs in --setup and
+# --restart alike, before any build, so a .env written for KinD corrects itself
+# when pointed at a cloud cluster instead of failing later with
+# ErrImageNeverPull. Sets CLUSTER_PROVIDER (and CLUSTER_MODE=cloud when a
+# "local" kube context is really AKS/EKS/GKE).
+apply_cluster_profile() {
+    CLUSTER_PROVIDER="$(cur CLUSTER_PROVIDER)"
+    case "${CLUSTER_MODE}" in
+        auto|fresh|kind) CLUSTER_PROVIDER="${CLUSTER_PROVIDER:-kind}" ;;
+        *)               CLUSTER_PROVIDER="${CLUSTER_PROVIDER:-$(detect_cluster_provider)}" ;;
+    esac
+    if [[ "${CLUSTER_MODE}" == local ]] && cluster_provider_is_cloud "${CLUSTER_PROVIDER}"; then
+        warn "CLUSTER_MODE=local, but the kube context is $(cluster_provider_label "${CLUSTER_PROVIDER}") — using CLUSTER_MODE=cloud."
+        CLUSTER_MODE=cloud
+        CALLBACK_HOST=""
+        set_env CLUSTER_MODE cloud
+    fi
+    if [[ "${CLUSTER_MODE}" == cloud && "${CLUSTER_PROVIDER}" == unreachable ]]; then
+        echo "ERROR: CLUSTER_MODE=cloud, but kubectl cannot reach a cluster (context: $(kubectl config current-context 2>/dev/null || echo none))." >&2
+        echo "ERROR: log in first, e.g.: az login && az aks get-credentials --resource-group <rg> --name <cluster>" >&2
+        exit 1
+    fi
+    ok "Cluster: CLUSTER_MODE=${CLUSTER_MODE}, $(cluster_provider_label "${CLUSTER_PROVIDER}")"
+    if [[ "${CLUSTER_MODE}" == cloud ]] \
+       || { [[ "${CLUSTER_PROVIDER}" != unreachable ]] && ! cluster_provider_can_sideload "${CLUSTER_PROVIDER}"; }; then
+        enforce_registry_images
+    fi
+    if [[ "${CLUSTER_MODE}" == cloud && -n "$(cur OLLAMA_MODEL)" ]]; then
+        warn "OLLAMA_MODEL is set, but Ollama runs on this machine: pods in the cloud cluster cannot reach it. Use a hosted model (Azure OpenAI, Gemini, ...) as FLASH_AGENT_MODEL."
+    fi
+}
+
+# enforce_registry_images — the cluster cannot load images built on this
+# machine, so every image must come from IMAGE_REGISTRY (or Docker Hub when it
+# is empty). Rewrites the *_IMAGE_SOURCE keys in .env, so --restart and
+# prepare-images.sh agree with what is deployed, and turns "build and push"
+# into publishing every ACE image (CLOUD_PUBLISH, see "Cloud: publish").
+enforce_registry_images() {
+    local label key registry changed=()
+    label="$(cluster_provider_label "${CLUSTER_PROVIDER}")"
+    if [[ "${BUILD_MODE}" == local ]]; then
+        echo "ERROR: --local-build cannot be used with ${label}: images built on this machine cannot be loaded into it." >&2
+        echo "ERROR: publish them instead (./scripts/build-and-push.sh) or re-run without --local-build." >&2
+        exit 1
+    fi
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]]; then
+        warn "PLATFORM_IMAGE_SOURCE=local does not apply to ${label} — using the registry images (p in the wizard publishes this checkout)."
+        DO_LOCAL_BUILD=0
+        SELECTED_BUILD_IMAGES=()
+        set_env PLATFORM_IMAGE_SOURCE skip
+    fi
+    if [[ "${DO_BUILD:-0}" -eq 1 ]]; then
+        CLOUD_PUBLISH=1
+        DO_BUILD=0
+    fi
+    for key in INSTALL_APP_IMAGE_SOURCE INSTALL_AGENT_IMAGE_SOURCE LITMUS_IMAGES_SOURCE \
+               SRE_AGENTS_IMAGE_SOURCE ITBENCH_EXPERIMENT_IMAGE_SOURCE HUB_BUNDLE_IMAGE_SOURCE; do
+        [[ "$(image_source_normalize "$(cur "${key}")")" == registry ]] && continue
+        set_env "${key}" registry
+        changed+=("${key}")
     done
-    if [[ -z "${lb_ip}" ]]; then
-        warn "Web LoadBalancer IP/hostname not yet assigned. Add it to ALLOWED_ORIGINS in .env, then re-run:"
-        warn "  ALLOWED_ORIGINS=<existing-value>|^(http://|https://|)<lb-ip>(:[0-9]+)?\$"
-        warn "  Then: ./scripts/setup.sh --restart"
+    # "Never" only makes sense for an image side-loaded into the node.
+    for key in INSTALL_APPLICATION_IMAGE_PULL_POLICY INSTALL_AGENT_IMAGE_PULL_POLICY \
+               LITMUS_HELPER_IMAGES_PULL_POLICY AGENT_SIDECAR_IMAGE_PULL_POLICY; do
+        [[ "$(cur "${key}")" == Never ]] && set_env "${key}" Always
+    done
+    # The default hub-bundle tag (:local) names a side-loaded build; the
+    # published image is :latest, or ACE_IMAGE_TAG when set.
+    [[ "$(cur HUB_BUNDLE_IMAGE)" == *:local || -z "$(cur HUB_BUNDLE_IMAGE)" ]] \
+        && set_env HUB_BUNDLE_IMAGE agentcert/ace-hub-bundle:latest
+    registry="$(cur IMAGE_REGISTRY)"
+    if [[ ${#changed[@]} -gt 0 ]]; then
+        ok "${label} pulls every image from ${registry:-Docker Hub} — set ${changed[*]} to registry in .env."
+    fi
+}
+
+# lb_address SERVICE NS — the IP or hostname a LoadBalancer Service was given,
+# waiting up to 5 min. On timeout prints the Service's latest events (a policy
+# denial or a full subnet shows up there) and fails.
+lb_address() {
+    local svc="$1" ns="$2" addr="" i
+    for ((i = 0; i < 60; i++)); do
+        addr="$(kubectl get svc "${svc}" -n "${ns}" \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+        if [[ -n "${addr}" ]]; then
+            echo "${addr}"
+            return 0
+        fi
+        sleep 5
+    done
+    warn "Service ${svc} got no load-balancer address in 5 min. Latest events:" >&2
+    kubectl get events -n "${ns}" --field-selector "involvedObject.name=${svc}" \
+        --sort-by=.lastTimestamp 2>/dev/null | tail -5 >&2 || true
+    return 1
+}
+
+# refresh_allowed_origins — rebuild ALLOWED_ORIGINS in .env from the pod->host
+# gateway, ACE_EXTRA_ALLOWED_ORIGINS and ACE_PUBLIC_HOSTS
+# (scripts/lib/allowed_origins.py, the same builder the wizard uses).
+refresh_allowed_origins() {
+    set_env ALLOWED_ORIGINS "$("${SETUP_PYTHON}" "${SCRIPT_DIR}/lib/allowed_origins.py" \
+        "${CALLBACK_HOST:-}" "$(cur ACE_EXTRA_ALLOWED_ORIGINS)" "$(cur ACE_PUBLIC_HOSTS)")"
+}
+
+# post_cloud_setup — after a cloud deploy, find the addresses the browser-facing
+# Services got (ACE_EXPOSE_TYPE) and point the settings that must name them at
+# those addresses:
+#   ACE_PUBLIC_HOSTS -> ALLOWED_ORIGINS  auth and graphql accept the browser's Origin
+#   CHAOS_CENTER_PUBLIC_ENDPOINT        links graphql hands to the UI
+#   NEXTAUTH_URL                        Langfuse login checks the browser's origin
+# Re-applies the ace-env Secret and restarts the pods that read them, only when
+# something changed. Sets ACE_WEB_URL / ACE_LANGFUSE_URL / ACE_CERTIFIER_URL for
+# the summary.
+post_cloud_setup() {
+    local ns="${1:-ace}" expose node web="" langfuse="" certifier="" before after hosts=()
+    expose="$(cur ACE_EXPOSE_TYPE)"; expose="${expose:-LoadBalancer}"
+    ACE_WEB_URL=""; ACE_LANGFUSE_URL=""; ACE_CERTIFIER_URL=""
+    case "${expose}" in
+        LoadBalancer)
+            echo -e "${DIM}Waiting for the load balancers to get an address…${NC}"
+            web="$(lb_address web "${ns}")" || true
+            langfuse="$(lb_address langfuse-web "${ns}")" || true
+            [[ -n "${web}" ]] && ACE_WEB_URL="http://${web}:2001"
+            [[ -n "${langfuse}" ]] && ACE_LANGFUSE_URL="http://${langfuse}:3000"
+            if [[ "$(cur ACE_EXPOSE_CERTIFIER)" == true ]]; then
+                certifier="$(lb_address certifier "${ns}")" || true
+                [[ -n "${certifier}" ]] && ACE_CERTIFIER_URL="http://${certifier}:8000/docs"
+            fi
+            hosts=("${web}" "${langfuse}")
+            ;;
+        NodePort)
+            node="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
+            if [[ -n "${node}" ]]; then
+                ACE_WEB_URL="http://${node}:32001"; ACE_LANGFUSE_URL="http://${node}:32400"
+                hosts=("${node}")
+            fi
+            ;;
+        ClusterIP)
+            # Reached through kubectl port-forward on this machine.
+            ACE_WEB_URL="http://localhost:2001"; ACE_LANGFUSE_URL="http://localhost:4000"
+            ;;
+    esac
+    if [[ -z "${ACE_WEB_URL}" || -z "${ACE_LANGFUSE_URL}" ]]; then
+        warn "Could not determine the UI addresses; ALLOWED_ORIGINS and NEXTAUTH_URL keep their previous values."
+        warn "Fix the Service (kubectl describe svc -n ${ns} web langfuse-web), then: ./scripts/setup.sh --restart"
         return 0
     fi
-    ok "web LoadBalancer: ${lb_ip}"
-    # Extend ALLOWED_ORIGINS so graphql accepts WebSocket upgrade requests that nginx
-    # forwards with the browser's original Origin: http://<web-lb>:2001 header.
-    local cur_origins
-    cur_origins="$(grep -m1 '^ALLOWED_ORIGINS=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true)"
-    local escaped_lb
-    escaped_lb="$("${SETUP_PYTHON}" -c "import re,sys; print(re.escape(sys.argv[1]))" "${lb_ip}")"
-    if [[ -n "${cur_origins}" ]] && ! echo "${cur_origins}" | grep -qF "${lb_ip}"; then
-        set_env ALLOWED_ORIGINS "${cur_origins}|^(http://|https://|)${escaped_lb}(:[0-9]+)?\$"
+    before="$(cur ALLOWED_ORIGINS)|$(cur CHAOS_CENTER_PUBLIC_ENDPOINT)|$(cur NEXTAUTH_URL)"
+    set_env ACE_PUBLIC_HOSTS "$(IFS=,; echo "${hosts[*]}")"
+    refresh_allowed_origins
+    set_env CHAOS_CENTER_PUBLIC_ENDPOINT "${ACE_WEB_URL}"
+    set_env NEXTAUTH_URL "${ACE_LANGFUSE_URL}"
+    after="$(cur ALLOWED_ORIGINS)|$(cur CHAOS_CENTER_PUBLIC_ENDPOINT)|$(cur NEXTAUTH_URL)"
+    if [[ "${before}" != "${after}" ]]; then
+        apply_ace_env_secret "${ns}"
+        # CHAOS_CENTER_PUBLIC_ENDPOINT is a plain env entry of the graphql
+        # Deployment (templates/graphql.yaml), not read from the Secret.
+        kubectl set env deployment/graphql -n "${ns}" \
+            "CHAOS_CENTER_PUBLIC_ENDPOINT=${ACE_WEB_URL}" >/dev/null 2>&1 || true
+        kubectl rollout restart deployment/graphql deployment/auth deployment/langfuse-web \
+            -n "${ns}" >/dev/null 2>&1 || true
+        ok "Pointed ALLOWED_ORIGINS, CHAOS_CENTER_PUBLIC_ENDPOINT and NEXTAUTH_URL at ${ACE_WEB_URL} / ${ACE_LANGFUSE_URL}; restarted graphql, auth and langfuse-web."
     fi
-    apply_ace_env_secret "${ns}"
-    # Restart graphql so it reloads ALLOWED_ORIGINS from the updated secret
-    kubectl rollout restart deployment/graphql -n "${ns}" >/dev/null 2>&1 || true
-    ok "Updated ALLOWED_ORIGINS and restarted graphql."
-    echo -e "  ${BOLD}AgentCert UI${NC}  http://${lb_ip}:2001"
 }
 
 # Patch .env so in-cluster pods use K8s service DNS names instead of host IPs.
@@ -2464,8 +2704,18 @@ k8s_env_patch() {
     # Redis (Langfuse): must match --requirepass arg on the redis server
     set_env REDIS_AUTH "myredissecret"
 
-    # Langfuse web (Next.js Auth)
-    set_env NEXTAUTH_URL    "http://localhost:4000"
+    # Langfuse web (Next.js Auth). NEXTAUTH_URL must be the address the browser
+    # opens. On a cloud cluster post_cloud_setup sets it from the langfuse-web
+    # load balancer; keep that value across re-runs instead of resetting it
+    # (a pinned ACE_LANGFUSE_LB_IP is known before the deploy).
+    if [[ "${CLUSTER_MODE}" != cloud ]]; then
+        set_env NEXTAUTH_URL "http://localhost:4000"
+    elif [[ -n "$(cur ACE_LANGFUSE_LB_IP)" && "$(cur ACE_EXPOSE_TYPE)" != NodePort && "$(cur ACE_EXPOSE_TYPE)" != ClusterIP ]]; then
+        set_env NEXTAUTH_URL "http://$(cur ACE_LANGFUSE_LB_IP):3000"
+    elif [[ -z "$(cur NEXTAUTH_URL)" ]]; then
+        set_env NEXTAUTH_URL "http://localhost:4000"
+    fi
+    refresh_allowed_origins
     set_env NEXTAUTH_SECRET "mysecret"
     set_env SALT            "mysalt"
     set_env ENCRYPTION_KEY  "0000000000000000000000000000000000000000000000000000000000000000"
@@ -3799,13 +4049,8 @@ k8s_deploy() {
             apply_manifest_resolved "${K8S_DIR}/metrics-server.yaml"
         fi
     fi
-    # For cloud clusters, switch the web service to LoadBalancer so browsers can reach it.
-    # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
-    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
-        kubectl patch svc web -n "${NS}" \
-            -p '{"spec":{"type":"LoadBalancer","ports":[{"port":2001,"targetPort":2001,"protocol":"TCP"}]}}' \
-            2>/dev/null && ok "web service patched to LoadBalancer." || true
-    fi
+    # (Cloud clusters never reach here: they deploy with Helm, see the deploy
+    # dispatch at the end of this script.)
     ok "Manifests applied."
 
     # 8b) --local-build against an already-running cluster: force a restart so
@@ -3824,15 +4069,13 @@ k8s_deploy() {
     wait_for_core_services "${NS}" || return 1
     wait_for_metrics_api || return 1
 
-    # 9b) Cloud: poll LB IP, update .env with real external endpoint, restart pods
-    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
-        post_cloud_setup "${NS}"
-    fi
-
     # 9b2) Register + connect the chaos infrastructure (idempotent) so the
     # stack is ready to run experiments without manual UI steps.
     local _infra_ready=1
     ensure_chaos_infrastructure || _infra_ready=0
+    # Pull secret for the ServiceAccounts the infrastructure manifest just
+    # created (same reason as in helm_deploy).
+    apply_registry_prereqs "${NS}" >/dev/null || warn "Could not refresh the registry pull secret for the chaos infrastructure namespace."
 
     # 9c) Sync LitmusChaos subscriber-secret from MongoDB (no-op if not yet registered)
     sync_subscriber_secret
@@ -3939,6 +4182,106 @@ PY
     ok "Generated values-env.yaml (env + litellm config)."
 }
 
+# generate_helm_values_platform FILE — the chart values setup.sh derives from
+# .env and the cluster: where images come from, which were side-loaded, the
+# hub bundle, metrics-server, and for CLUSTER_MODE=cloud the load balancers
+# and cloud-disk storage (deploy/helm/ace/values.yaml documents each key).
+# Holds no secrets; regenerated on every deploy.
+generate_helm_values_platform() {
+    local out="$1" hub_source ace_local=false runtime_local=false bundle_local=false
+    local metrics=true host_export=true pull_policy="" expose_type
+    hub_source="$(image_source_normalize "$(cur HUB_BUNDLE_IMAGE_SOURCE)")"
+    hub_source="${hub_source:-local}"
+    [[ "$(cur PLATFORM_IMAGE_SOURCE)" == local || "${DO_LOCAL_BUILD:-0}" -eq 1 ]] && ace_local=true
+    [[ "$(image_source_normalize "$(cur LITMUS_IMAGES_SOURCE)")" == local ]] && runtime_local=true
+    [[ "${hub_source}" == local ]] && bundle_local=true
+    if metrics_api_served_elsewhere; then
+        ok "Cluster already provides metrics-server — installing ACE with metricsServer.enabled=false."
+        metrics=false
+    fi
+    # The certifier's cert-report-export hostPath only makes sense on a KinD
+    # cluster this repo created (its extraMounts bridge the node path to a host
+    # directory); an existing cluster has no such bridge.
+    [[ "${CLUSTER_MODE}" == cloud || "${CLUSTER_MODE}" == local ]] && host_export=false
+    # KinD: IfNotPresent, so side-loaded images are not replaced by a registry
+    # pull. Cloud: Always, so moving tags such as :latest are re-pulled.
+    # Existing local clusters keep the chart default.
+    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 || ( "${CLUSTER_MODE}" != cloud && "${CLUSTER_MODE}" != local ) ]]; then
+        pull_policy=IfNotPresent
+    elif [[ "${CLUSTER_MODE}" == cloud ]]; then
+        pull_policy=Always
+    fi
+    if [[ "${CLUSTER_MODE}" == cloud ]]; then
+        expose_type="$(cur ACE_EXPOSE_TYPE)"; expose_type="${expose_type:-LoadBalancer}"
+        case "${expose_type}" in
+            LoadBalancer|NodePort|ClusterIP) ;;
+            *) warn "ACE_EXPOSE_TYPE='${expose_type}' is not LoadBalancer, NodePort or ClusterIP."; return 1 ;;
+        esac
+        if [[ "${expose_type}" == LoadBalancer && "$(cur ACE_EXPOSE_INTERNAL)" != false ]] \
+           && ! cluster_provider_is_cloud "${CLUSTER_PROVIDER:-}"; then
+            warn "No internal load-balancer annotation is known for $(cluster_provider_label "${CLUSTER_PROVIDER:-}"); the load balancers may get public IPs. Set CLUSTER_PROVIDER (aks, eks, gke) in .env if it was misdetected."
+        fi
+    fi
+    V_REGISTRY="$(registry_normalize "$(cur IMAGE_REGISTRY)")" \
+    V_MIRROR_NS="$(cur IMAGE_MIRROR_NAMESPACE)" \
+    V_ACE_TAG="$(cur ACE_IMAGE_TAG | tr -d '[:space:]')" \
+    V_PULL_SECRET="$(cur IMAGE_PULL_SECRET_NAME)" \
+    V_ACE_LOCAL="${ace_local}" V_RUNTIME_LOCAL="${runtime_local}" V_BUNDLE_LOCAL="${bundle_local}" \
+    V_BUNDLE_IMAGE="$(cur HUB_BUNDLE_IMAGE)" V_METRICS="${metrics}" V_HOST_EXPORT="${host_export}" \
+    V_PULL_POLICY="${pull_policy}" V_CLOUD="$([[ "${CLUSTER_MODE}" == cloud ]] && echo true || echo false)" \
+    V_EXPOSE_TYPE="${expose_type:-}" V_PROVIDER="${CLUSTER_PROVIDER:-}" \
+    V_INTERNAL="$(cur ACE_EXPOSE_INTERNAL)" V_SOURCE_RANGES="$(cur ACE_LB_SOURCE_RANGES)" \
+    V_WEB_IP="$(cur ACE_WEB_LB_IP)" V_LANGFUSE_IP="$(cur ACE_LANGFUSE_LB_IP)" \
+    V_CERTIFIER="$(cur ACE_EXPOSE_CERTIFIER)" V_CERTIFIER_IP="$(cur ACE_CERTIFIER_LB_IP)" \
+    "${SETUP_PYTHON}" - "${out}" <<'PY'
+import json, os, sys
+E = os.environ
+def s(v):   # a YAML double-quoted string
+    return json.dumps(v)
+def b(v):
+    return "true" if v == "true" else "false"
+lines = [
+    "# Generated by scripts/setup.sh on every deploy. Do not edit: change .env and re-run.",
+    f"imageRegistry: {s(E['V_REGISTRY'])}",
+    f"imageMirrorNamespace: {s(E['V_MIRROR_NS'])}",
+    f"aceImageTag: {s(E['V_ACE_TAG'])}",
+    f"imagePullSecretName: {s(E['V_PULL_SECRET'])}",
+    f"aceImagesLocal: {b(E['V_ACE_LOCAL'])}",
+    f"runtimeImagesLocal: {b(E['V_RUNTIME_LOCAL'])}",
+    "chartsHub:",
+    f"  bundleImage: {s(E['V_BUNDLE_IMAGE'] or 'agentcert/ace-hub-bundle:local')}",
+    f"  bundleLocal: {b(E['V_BUNDLE_LOCAL'])}",
+]
+if E["V_BUNDLE_LOCAL"] == "true":
+    lines.append("  bundleImagePullPolicy: Never")   # side-loaded: never fall back to a pull
+lines += ["metricsServer:", f"  enabled: {b(E['V_METRICS'])}",
+          "certHostExport:", f"  enabled: {b(E['V_HOST_EXPORT'])}"]
+if E["V_PULL_POLICY"]:
+    lines.append(f"imagePullPolicy: {E['V_PULL_POLICY']}")
+if E["V_CLOUD"] == "true":
+    ranges = [r.strip() for r in E["V_SOURCE_RANGES"].split(",") if r.strip()]
+    lines += [
+        "storage:",
+        "  cloudDisks: true",
+        "expose:",
+        f"  type: {E['V_EXPOSE_TYPE']}",
+        f"  provider: {s(E['V_PROVIDER'])}",
+        f"  internal: {'false' if E['V_INTERNAL'] == 'false' else 'true'}",
+        f"  loadBalancerSourceRanges: {json.dumps(ranges)}",
+        "  web:",
+        f"    loadBalancerIP: {s(E['V_WEB_IP'])}",
+        "  langfuse:",
+        f"    loadBalancerIP: {s(E['V_LANGFUSE_IP'])}",
+        "  certifier:",
+        f"    enabled: {b(E['V_CERTIFIER'])}",
+        f"    loadBalancerIP: {s(E['V_CERTIFIER_IP'])}",
+    ]
+with open(sys.argv[1], "w") as fh:
+    fh.write("\n".join(lines) + "\n")
+PY
+    ok "Generated values-platform.yaml (images, exposure, storage)."
+}
+
 # Deploy via Helm — helm owns everything: namespace, secret, all workloads.
 helm_deploy() {
     local CHART_DIR="${REPO_ROOT}/deploy/helm/ace"
@@ -4005,6 +4348,10 @@ helm_deploy() {
 
     # 4c) Registry pull credentials before helm installs pods (only when IMAGE_REGISTRY is set)
     apply_registry_prereqs "${NS}" || return 1
+    # 4d) A cloud cluster pulls every image: make sure they all exist first.
+    if [[ "${CLUSTER_MODE}" == cloud ]]; then
+        preflight_registry_images || return 1
+    fi
 
     # 5) Run helm — it owns namespace, secret, and all workloads
     if ! command -v helm >/dev/null 2>&1; then
@@ -4012,62 +4359,21 @@ helm_deploy() {
         warn "  curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh"
         return 1
     fi
+    # Every value setup.sh derives (registry, local-image flags, hub bundle,
+    # exposure, storage) goes into one generated file rather than --set flags,
+    # so the upgrade command printed at the end reproduces this deploy exactly.
+    # (A hand-run upgrade without the old flags reverted the cloud load
+    # balancer and re-enabled a second metrics-server.)
+    local VALUES_PLATFORM="${CHART_DIR}/values-platform.yaml"
+    generate_helm_values_platform "${VALUES_PLATFORM}" || return 1
     local helm_cmd=(
         helm upgrade --install ace "${CHART_DIR}"
         --namespace "${NS}"
         --create-namespace
         -f "${VALUES_ENV}"
+        -f "${VALUES_PLATFORM}"
         --timeout 10m
     )
-    # Cloud clusters need the web service on a LoadBalancer so browsers can reach the UI.
-    # graphql stays NodePort — it is internal-only, reached via the web pod's nginx proxy.
-    if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
-        helm_cmd+=(--set web.serviceType=LoadBalancer)
-    fi
-    local _hub_bundle_image _hub_bundle_source
-    _hub_bundle_image="$(cur HUB_BUNDLE_IMAGE)"
-    _hub_bundle_image="${_hub_bundle_image:-agentcert/ace-hub-bundle:local}"
-    _hub_bundle_source="$(cur HUB_BUNDLE_IMAGE_SOURCE)"
-    _hub_bundle_source="${_hub_bundle_source:-local}"
-    helm_cmd+=(--set-string "chartsHub.bundleImage=${_hub_bundle_image}")
-    if metrics_api_served_elsewhere; then
-        ok "Cluster already provides metrics-server — installing ACE with metricsServer.enabled=false."
-        helm_cmd+=(--set metricsServer.enabled=false)
-    fi
-    if [[ "${_hub_bundle_source}" == "local" ]]; then
-        helm_cmd+=(--set chartsHub.bundleImagePullPolicy=Never)
-    fi
-
-    # Image registry (.env -> chart values; templates/_helpers.tpl "ace.image").
-    # Images this script built or side-loaded keep their public names.
-    local _ace_local=false _runtime_local=false _bundle_local=false
-    [[ "$(cur PLATFORM_IMAGE_SOURCE)" == local || "${DO_LOCAL_BUILD:-0}" -eq 1 ]] && _ace_local=true
-    [[ "$(image_source_normalize "$(cur LITMUS_IMAGES_SOURCE)")" == local ]] && _runtime_local=true
-    [[ "${_hub_bundle_source}" == local ]] && _bundle_local=true
-    helm_cmd+=(
-        --set-string "imageRegistry=$(registry_normalize "$(cur IMAGE_REGISTRY)")"
-        --set-string "imageMirrorNamespace=$(cur IMAGE_MIRROR_NAMESPACE)"
-        --set-string "aceImageTag=$(cur ACE_IMAGE_TAG | tr -d '[:space:]')"
-        --set-string "imagePullSecretName=$(cur IMAGE_PULL_SECRET_NAME)"
-        --set "aceImagesLocal=${_ace_local}"
-        --set "runtimeImagesLocal=${_runtime_local}"
-        --set "chartsHub.bundleLocal=${_bundle_local}"
-    )
-
-    # The certifier's cert-report-export hostPath volume only makes sense against a
-    # KinD cluster this repo's own render-kind-config.sh created (its extraMounts
-    # bridge the node path to a real host directory) — an existing/external
-    # kubeconfig (cloud or a pre-existing local cluster) has no such bridge, so
-    # disable it there rather than mounting an unbridged, node-ephemeral path.
-    if [[ "${CLUSTER_MODE}" == "cloud" || "${CLUSTER_MODE}" == "local" ]]; then
-        helm_cmd+=(--set certHostExport.enabled=false)
-    fi
-    # On KinD (auto/fresh), always use IfNotPresent so locally built images take effect
-    # without being overwritten by a Docker Hub pull.  Always is only appropriate for
-    # remote registries (cloud clusters) where images are never kind-loaded.
-    if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 || ( "${CLUSTER_MODE}" != "cloud" && "${CLUSTER_MODE}" != "local" ) ]]; then
-        helm_cmd+=(--set imagePullPolicy=IfNotPresent)
-    fi
 
     echo -e "${DIM}Running: ${helm_cmd[*]}${NC}"
     echo
@@ -4239,6 +4545,11 @@ OLLAMA_SVC_EOF
     # pinned to a stale instanceID with every submitted experiment workflow orphaned.
     local _infra_ready=1
     ensure_chaos_infrastructure || _infra_ready=0
+    # The infrastructure manifest just created its ServiceAccounts (argo-chaos,
+    # ...): give them the registry pull secret now rather than relying on
+    # registry-secret-sync winning the race against the first workflow pod
+    # (a miss is ImagePullBackOff on the Argo "wait" sidecar).
+    apply_registry_prereqs "${NS}" >/dev/null || warn "Could not refresh the registry pull secret for the chaos infrastructure namespace."
     sync_subscriber_secret
     if [[ ${_infra_ready} -eq 1 ]] && ! wait_for_chaos_infrastructure; then
         _infra_ready=0
@@ -4277,21 +4588,33 @@ OLLAMA_SVC_EOF
     fi
     echo -e "  ${BOLD}Release${NC}       ace  (namespace: ${NS})"
     if [[ "${CLUSTER_MODE}" == "cloud" ]]; then
-        echo -e "  ${BOLD}AgentCert UI${NC}  (check LB IP above)          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+        local _pf="kubectl port-forward -n ${NS}"
+        echo -e "  ${BOLD}AgentCert UI${NC}  ${ACE_WEB_URL:-$(cur CHAOS_CENTER_PUBLIC_ENDPOINT)}          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+        echo -e "  ${BOLD}Langfuse${NC}      ${ACE_LANGFUSE_URL:-$(cur NEXTAUTH_URL)}          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+        if [[ "$(cur ACE_EXPOSE_TYPE)" == ClusterIP ]]; then
+            echo -e "  ${DIM}  (ClusterIP: first run ${_pf} svc/web 2001:2001 and ${_pf} svc/langfuse-web 4000:3000)${NC}"
+        fi
+        echo -e "  ${BOLD}Certifier${NC}     ${ACE_CERTIFIER_URL:-${_pf} svc/certifier 18000:8000  → http://localhost:18000/docs}"
+        echo -e "  ${BOLD}LiteLLM${NC}       ${_pf} svc/litellm 14000:14000"
+        echo -e "  ${BOLD}MongoDB${NC}       ${_pf} svc/mongodb 27017:27017"
     else
         echo -e "  ${BOLD}AgentCert UI${NC}  http://localhost:${_hp_web}          login: ${BOLD}${admu}${NC} / ${BOLD}${admp}${NC}"
+        echo -e "  ${BOLD}Langfuse${NC}      http://localhost:${_hp_langfuse}          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
+        echo -e "  ${BOLD}Certifier${NC}     http://localhost:${_hp_certifier}/docs"
+        echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:${_hp_litellm}"
+        echo -e "  ${BOLD}MongoDB${NC}       localhost:${_hp_mongo}"
     fi
-    echo -e "  ${BOLD}Langfuse${NC}      http://localhost:${_hp_langfuse}          login: ${BOLD}${luser}${NC} / ${BOLD}${lpass}${NC}"
-    echo -e "  ${BOLD}Certifier${NC}     http://localhost:${_hp_certifier}/docs"
-    echo -e "  ${BOLD}LiteLLM${NC}       http://localhost:${_hp_litellm}"
-    echo -e "  ${BOLD}MongoDB${NC}       localhost:${_hp_mongo}"
     echo
     echo -e "  ${DIM}status:   kubectl get pods -n ace${NC}"
-    echo -e "  ${DIM}upgrade:  helm upgrade --install ace deploy/helm/ace --create-namespace -f deploy/helm/ace/values-env.yaml --timeout 10m${NC}"
+    echo -e "  ${DIM}upgrade:  helm upgrade --install ace deploy/helm/ace -n ace --create-namespace -f deploy/helm/ace/values-env.yaml -f deploy/helm/ace/values-platform.yaml --timeout 10m${NC}"
     echo -e "  ${DIM}rollback: helm rollback ace -n ace${NC}"
     echo -e "  ${DIM}teardown: helm uninstall ace -n ace${NC}"
     echo -e "${GREEN}=======================================================${NC}"
 }
+
+# --- Cluster profile (both modes, before any build) --------------------------
+CLOUD_PUBLISH=0
+apply_cluster_profile
 
 # --- Pre-warm KinD cluster in background (express mode only) ----------------
 # ensure_kind_cluster's `kind create cluster` step (~1-2 min) has no
@@ -4576,6 +4899,25 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     echo
 fi
 
+# --- Cloud: publish this checkout's images ------------------------------------
+# A cloud cluster pulls ACE's own images from the registry, so "build and push"
+# must publish all of them, including the hub bundle and the ITBench runner
+# that the build loop above does not cover. scripts/build-and-push.sh is the
+# canonical publisher (docs/setup/setup-and-image-releases.md §3.1): it builds
+# every "build" row of deploy/images.txt and pushes it under ACE_IMAGE_TAG
+# (or :latest) plus a revision tag.
+if [[ "${CLOUD_PUBLISH}" -eq 1 ]]; then
+    echo -e "${CYAN}  Publishing every ACE image from this checkout to $(cur IMAGE_REGISTRY)${NC}"
+    _publish_args=(--env-file "${ENV_FILE}")
+    [[ "${ALLOW_BUILD_CACHE:-0}" -eq 1 ]] && _publish_args+=(--allow-build-cache)
+    if ! "${SCRIPT_DIR}/build-and-push.sh" "${_publish_args[@]}"; then
+        warn "Publishing the ACE images failed; setup stopped before deployment."
+        abort_after_build_failure
+    fi
+    unset _publish_args
+    echo
+fi
+
 # Tell prepare-images.sh (invoked below, for LITMUS_IMAGES_SOURCE=local or
 # JFrog secret setup) which images this run already built + kind-loaded, so
 # its own "local" branches for install-app/install-agent don't redundantly
@@ -4624,6 +4966,13 @@ if [[ $EXPRESS_MODE -eq 0 ]]; then
     fi
 fi
 deploy_choice="${deploy_choice:-${_DEPLOY_CHOICE:-h}}"
+# Cloud clusters are Helm-only: the chart carries the load-balancer, storage
+# and registry settings (values-platform.yaml) that the plain deploy/k8s
+# manifests do not.
+if [[ "${CLUSTER_MODE}" == cloud && "${deploy_choice,,}" == k ]]; then
+    warn "CLUSTER_MODE=cloud deploys with Helm (the kubectl manifests have no load-balancer or cloud-disk settings) — using Helm."
+    deploy_choice="h"
+fi
 case "${deploy_choice,,}" in
     k) k8s_deploy ;;
     h) helm_deploy ;;

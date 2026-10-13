@@ -582,7 +582,9 @@ helm install ace deploy/helm/ace -n ace --create-namespace \
 **Post-install hook:** `mongodb-rs-init` Job (backoffLimit=10, ttl=600s) initializes rs0.
 
 **Key Helm values:**
-- `web.serviceType`: NodePort (local) or LoadBalancer (cloud)
+- `expose.*`: how web and langfuse-web are published: NodePort (KinD default), LoadBalancer (cloud; `expose.provider` aks/eks/gke + `expose.internal` adds the internal-LB annotation), or ClusterIP
+- `storage.cloudDisks`: cloud block disks (Postgres PGDATA subdir, MinIO fsGroup, Recreate strategy); setup.sh sets it for `CLUSTER_MODE=cloud`
+- setup.sh writes every value it derives into `values-platform.yaml` (gitignored) next to `values-env.yaml`; cloud profile logic lives in `scripts/lib/cluster_profile.sh`, tests in `scripts/tests/test-cloud-profile.sh`
 - `images.*`: All `agentcert/*` images use `imagePullPolicy: Always`; infra images use `IfNotPresent`
 - `litellm.config`: Multi-provider config (Gemini, Azure OpenAI, OpenRouter, Ollama)
 

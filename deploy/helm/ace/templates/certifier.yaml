@@ -16,6 +16,13 @@ metadata:
   namespace: {{ include "ace.namespace" . }}
 spec:
   replicas: 1
+  {{- if .Values.storage.cloudDisks }}
+  # ReadWriteOnce cloud disk: it attaches to one node at a time, so stop the
+  # old pod before starting the new one (RollingUpdate can deadlock on
+  # Multi-Attach when the new pod lands on another node).
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app: certifier
@@ -142,11 +149,17 @@ kind: Service
 metadata:
   name: certifier
   namespace: {{ include "ace.namespace" . }}
+  {{- with include "ace.expose.annotations" (dict "root" $ "service" "certifier") }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   selector:
     app: certifier
-  type: NodePort
+  {{- include "ace.expose.spec" (dict "root" $ "service" "certifier") | nindent 2 }}
   ports:
     - port: 8000
       targetPort: 8000
+      {{- if eq (include "ace.expose.type" (dict "root" $ "service" "certifier")) "NodePort" }}
       nodePort: 32080
+      {{- end }}

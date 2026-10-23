@@ -87,7 +87,8 @@ registry_load() {
     ACE_BUILD_NETWORK="${ACE_BUILD_NETWORK:-default}"
     case "${ACE_BUILD_NETWORK}" in
         default|host|none) ;;
-        *) echo "ACE_BUILD_NETWORK must be default, host or none" >&2; return 1 ;;
+        *) echo "ACE_BUILD_NETWORK='${ACE_BUILD_NETWORK}' (environment or ${env_file}) is invalid: use default, host or none." >&2
+           return 1 ;;
     esac
     export ACE_BUILD_NETWORK
 
@@ -298,30 +299,35 @@ inventory_rows() {
     done < "${file}"
 }
 
-# Count the build rows in an inventory, so callers never hardcode "N images".
-# $1 = inventory file
-inventory_build_count() {
-    inventory_rows "$1" build | grep -c . || true
-}
-
 # Print an anchored --only regex selecting exactly the build rows whose context
 # or recipe matches, so callers never hardcode an image name. Matching is on the
 # inventory's own fields, which keeps the selection correct when an image is
 # renamed, retagged or moved to a different namespace.
 # $1 = inventory file, $2 = field (context|recipe), $3 = exact field value
 inventory_only_regex() {
-    local file="$1" field="$2" want="$3" kind group image context recipe flags names=()
+    local file="$1" field="$2" want="$3" kind group image context recipe flags images=()
     while IFS='|' read -r kind group image context recipe flags; do
         case "${field}" in
             context) [[ "${context}" == "${want}" ]] || continue ;;
             recipe)  [[ "${recipe}"  == "${want}" ]] || continue ;;
             *) echo "inventory_only_regex: field must be context or recipe" >&2; return 1 ;;
         esac
-        # Anchor on the repository, so ":tag" cannot match a different image
-        # that merely shares a name prefix.
-        names+=("^$(printf '%s' "${image%%:*}" | sed 's/[.[\*^$()+?{|]/\\&/g'):")
+        images+=("${image}")
     done < <(inventory_rows "${file}" build)
-    [[ ${#names[@]} -gt 0 ]] || { echo "inventory_only_regex: no build row with ${field}=${want}" >&2; return 1; }
+    [[ ${#images[@]} -gt 0 ]] || { echo "inventory_only_regex: no build row with ${field}=${want}" >&2; return 1; }
+    image_only_regex "${images[@]}"
+}
+
+# Print an --only regex selecting exactly the given images by repository, so
+# a tag that differs from the inventory's (e.g. SUBSCRIBER_IMAGE) still
+# selects its row. Anchored on the repository, so ":tag" cannot match a
+# different image that merely shares a name prefix.
+# $@ = image references
+image_only_regex() {
+    local image names=()
+    for image in "$@"; do
+        names+=("^$(printf '%s' "${image%%:*}" | sed 's/[.[\*^$()+?{|]/\\&/g'):")
+    done
     local IFS='|'
     printf '%s\n' "${names[*]}"
 }
@@ -431,6 +437,14 @@ source_revision() {
     sha="$(git -C "${dir}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
     dirty="$(git -C "${dir}" status --porcelain -- . 2>/dev/null | sed -n '1p')"
     if [[ -n "${dirty}" ]]; then printf '%s-dirty' "${sha}"; else printf '%s' "${sha}"; fi
+}
+
+# True when a source_revision value identifies image content exactly: a clean
+# commit, or the hub bundle's content digest. "<sha>-dirty" is a commit plus
+# uncommitted changes recorded nowhere, and "unknown" (git failed) names
+# nothing, so two builds labelled with either may differ.
+revision_is_exact() {
+    [[ "$1" =~ ^[0-9a-f]{7,40}$ || "$1" =~ ^content-[0-9a-f]{12}$ ]]
 }
 
 # Revision label of an image already in a registry ("" if absent/unreadable).

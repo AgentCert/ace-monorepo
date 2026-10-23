@@ -34,7 +34,7 @@
   - [3. Services](#3-services)
   - [4. Day-to-day operations](#4-day-to-day-operations)
   - [📚 Detailed setup guides (docs/setup/)](#-detailed-setup-guides--docssetup)
-- [Legacy script-based setup](#legacy-script-based-setup)
+- [Local Development (host processes)](#local-development-host-processes)
 - [Certifier API service (Dockerized)](#certifier-api-service-dockerized)
 - [Certifier Dev Tools](#certifier-dev-tools)
   - [Dump a Langfuse trace into pipeline-compatible JSON](#dump-a-langfuse-trace-into-pipeline-compatible-json)
@@ -74,7 +74,7 @@ All project documentation lives in **[`docs/`](./docs)**:
 | **Compliance** | [`docs/rai-compliance-workflow.md`](./docs/rai-compliance-workflow.md) | Responsible-AI compliance workflow. |
 | **Testing & coverage** | [`docs/testing.md`](./docs/testing.md) | Running the test suites (Python/Go/TS), generating coverage, and the SonarQube dashboard. |
 
-> New to the platform? Go straight to **[`docs/setup/`](./docs/setup/)** and the [Quick Start](#quick-start-docker-compose) below.
+> New to the platform? Go straight to **[`docs/setup/`](./docs/setup/)** and the [Quick Start](#quick-start-kubernetes) below.
 
 ---
 
@@ -105,7 +105,7 @@ agent, from where, running on what framework."
 | Agent | Location | Framework | Role |
 |---|---|---|---|
 | **flash-agent** | [`agents/flash-agent/`](./agents/flash-agent) (inlined; the former standalone `flash-agent/` submodule at the repo root has been removed) | Custom ReAct loop (OpenAI-compatible SDK + MCP tools) | The primary agent under test for SRE fault scenarios. Discovers Kubernetes/Prometheus MCP tools at startup, reasons over multiple tool-calling iterations, and emits a structured JSON health analysis with remediation guidance. No native tracing of its own — relies on the LiteLLM gateway's Langfuse callback. |
-| **CISO Agent** | [`agents/ciso-agent/`](./agents/ciso-agent) (inlined from upstream `itbench-hub/ITBench-CISO-CAA-Agent`, with fixes) | **CrewAI + LangGraph** | ITBench's reference CISO agent. Generates and deploys compliance policies (Kyverno `ClusterPolicy`, OPA Rego) against injected CIS Benchmark violations, then reports the deployed resource. Exercised end-to-end against a real `Gen-CIS-b-K8s-Kyverno` scenario — see [`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8 for the full trial and the two bugs found in its LLM integration. |
+| **CISO Agent** | [`agents/ciso-agent/`](./agents/ciso-agent) (inlined from upstream `itbench-hub/ITBench-CISO-CAA-Agent`, with fixes) | **CrewAI + LangGraph** | ITBench's reference CISO agent. Generates and deploys compliance policies (Kyverno `ClusterPolicy`, OPA Rego) against injected CIS Benchmark violations, then reports the deployed resource. Exercised end-to-end against a real `Gen-CIS-b-K8s-Kyverno` scenario — see [`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./docs_2/OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8 for the full trial and the two bugs found in its LLM integration. |
 | **SRE Agent ("Zero")** | [`agents/sre-agent/`](./agents/sre-agent) (inlined from upstream `itbench-hub/ITBench-CISO-SRE-FinOps-Agent`, unmodified) | Wrapper around OpenAI's **Codex CLI** | ITBench's other reference agent (despite the repo name, covers SRE/CISO/FinOps scenarios). Considered as a candidate for the SRE certification track but not the one actually exercised — flash-agent was used instead, and the CISO Agent above was used for the CISO track per explicit instruction to use "the CrewAI based agent." |
 
 ### Using CrewAI with a single agent
@@ -147,7 +147,7 @@ declare a provider).
 
 Verified end-to-end with `qwen2.5:7b-instruct` served locally via Ollama, routed through
 the LiteLLM gateway described in [Submodules](#submodules) — see
-[`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8.3 for
+[`OPEN_WEIGHT_CERTIFICATION_HANDOFF.md`](./docs_2/OPEN_WEIGHT_CERTIFICATION_HANDOFF.md) §8.3 for
 both real bugs found getting this working and how they were fixed.
 
 ---
@@ -271,10 +271,9 @@ host-process flow is fully documented at
 cp .env.example .env
 cp build-paths.env.example build-paths.env
 ./scripts/start-local-services.sh --deploy          # MongoDB + Langfuse + LiteLLM + Certifier (Docker)
-bash scripts/azure_build/start-agentcert-v2.sh \
+bash scripts/azure_build/start-agentcert-v2.sh --deploy \
     --env-file   $(pwd)/.env \
     --paths-file $(pwd)/build-paths.env     # auth + GraphQL + frontend on the host
-bash AgentCert/stop-agentcert.sh           # stop the host processes
 ```
 
 

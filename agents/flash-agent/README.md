@@ -150,8 +150,8 @@ flash-agent/
 ├── mcp/
 │   └── client.py           # MCPClient (JSON-RPC 2.0 + SSE) + MCPScope + scope discovery
 ├── Dockerfile              # Two-stage python:3.12-slim, non-root agent:1000
-├── Makefile                # build / push / build-push / tag / kind-load / run / clean
-├── build-flash-agent.sh    # CI: monorepo .env sync, timestamped tag, minikube load
+├── Makefile                # build / push / build-push / tag / run / clean
+├── build-flash-agent.sh    # builds this image via scripts/build-and-push.sh (--push / --kind-load)
 ├── requirements.txt        # kubernetes, openai, requests, python-dotenv
 ├── FUNCTIONING.md          # Behavioural spec (may lag code — verify against source)
 ├── LICENSE
@@ -476,19 +476,19 @@ Dockerfile (`python:3.12-slim`, non-root `agent:1000`, entrypoint `python -u mai
 ```bash
 make build                       # → agentcert/agentcert-flash-agent:latest
 make build-no-cache              # full rebuild
-make push                        # to registry
+make push                        # push IMAGE_TAG (default latest)
 make build-push                  # build + push
-make run                         # docker run with .env mounted
+make run                         # docker run with ~/.kube/config mounted
 make tag NEW_TAG=v1.0.0          # retag
 make version                     # echo current image/registry/tag
 make clean                       # docker rmi
 ```
 
-[`build-flash-agent.sh`](build-flash-agent.sh) is the CI driver: reads the monorepo
-`.env`, prunes old `agentcert/agentcert-flash-agent` images, builds with a `ci-*`
-timestamp tag plus `latest` + `dev`, `minikube image load`s the result, and writes
-`FLASH_AGENT_IMAGE=…` back into `.env`. When a `flash-agent` Deployment or CronJob
-already exists in the target cluster, it updates the image reference in place.
+[`build-flash-agent.sh`](build-flash-agent.sh) builds only this image through the
+monorepo's `scripts/build-and-push.sh`: locally by default, `--push` publishes it,
+`--kind-load` loads it into the KinD cluster named in `.env`; the other
+`build-and-push.sh` options (`--help` lists them) work too. Release tags come from
+`scripts/build-and-push.sh --push --tag RELEASE-N`, not from `make push`.
 
 ---
 
@@ -549,13 +549,13 @@ that to a particular chaos experiment is the sidecar's responsibility (it inject
 
 | Repository | Role for flash-agent |
 |---|---|
-| [`AgentCert`](../AgentCert) | Registers this agent, installs it via the `install-agent` image, runs the Argo workflow that exercises it |
-| [`agent-charts`](../agent-charts) | Helm chart that deploys this agent + sidecar with all the wiring |
-| [`agent-sidecar`](../agent-sidecar) | Stamps experiment + agent identity onto every LLM call |
-| [`agentcert-stack`](../agentcert-stack) | Runs the LiteLLM proxy this agent talks to |
-| [`app-charts`](../app-charts) | Deploys the MCP servers referenced in `MCP_URLS` |
-| [`chaos-charts`](../chaos-charts) | Defines the faults this agent diagnoses (and is judged against) |
-| [`certifier`](../certifier) | Consumes the resulting Langfuse traces and produces the certification report |
+| [`AgentCert`](../../AgentCert) | Registers this agent, installs it via the `install-agent` image, runs the Argo workflow that exercises it |
+| [`agent-charts`](../../agent-charts) | Helm chart that deploys this agent + sidecar with all the wiring |
+| [`agent-sidecar`](../../agent-sidecar) | Stamps experiment + agent identity onto every LLM call |
+| [`agentcert-stack`](../../agentcert-stack) | Runs the LiteLLM proxy this agent talks to |
+| [`app-charts`](../../app-charts) | Deploys the MCP servers referenced in `MCP_URLS` |
+| [`chaos-charts`](../../chaos-charts) | Defines the faults this agent diagnoses (and is judged against) |
+| [`certifier`](../../certifier) | Consumes the resulting Langfuse traces and produces the certification report |
 
 ---
 

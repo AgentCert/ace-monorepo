@@ -45,13 +45,15 @@ and listens on `:14000` by default.
 
 Each `setup.sh` builds the agent's Docker image. Run it once before the first
 benchmark (or re-run to rebuild after code changes). `ace-bench.py` calls it
-automatically on first run unless `--skip-setup` is passed.
+automatically on first run unless `--skip-setup` is passed. Add `--install` to
+also install the agent's host development dependencies (its `.venv`, or
+`uv sync` for `sre-agent`).
 
 | Agent | Command |
 |-------|---------|
 | `sre-agent-crewai` | `bash agents/harness/sre-agent-crewai/setup.sh` |
 | `ciso-agent` | `bash agents/harness/ciso-agent/setup.sh` |
-| `sre-agent` | `bash agents/harness/sre-agent/setup.sh` (requires `uv`) |
+| `sre-agent` | `bash agents/harness/sre-agent/setup.sh` (`--install` requires `uv`) |
 | `flash-agent` | `bash agents/harness/flash-agent/setup.sh` |
 
 Resulting local image tags:

@@ -14,16 +14,22 @@
 #      before running yarn generate-certificate.
 #
 # Usage:
-#   bash start-agentcert-v2.sh \
+#   bash start-agentcert-v2.sh [BUILD OPTIONS]
+#       Default: build all ACE images locally. BUILD OPTIONS are those of
+#       scripts/build-and-push.sh (see its --help).
+#   bash start-agentcert-v2.sh --deploy \
 #       --env-file   /path/to/.env \
 #       --paths-file /path/to/build-paths.env
+#       Legacy host-startup flow; prefer scripts/setup.sh --deploy.
 #
-# Options:
+# Deploy options (with --deploy):
 #   --env-file   PATH   Path to .env             (required)
-#   --paths-file PATH   Path to build-paths.env  (required — provides AGENTCERT_ROOT)
+#   --paths-file PATH   Path to build-paths.env  (provides AGENTCERT_ROOT;
+#                       default: build-paths.env next to this script)
 #   --skip-mongo        Skip MongoDB startup check
 #   --skip-frontend     Skip Frontend startup
-#   --skip-litellm      Skip LiteLLM K8s sync (useful when no kubectl/cluster)
+#   --skip-litellm      Accepted for compatibility; no effect (LiteLLM is
+#                       expected to be running already and is not synced)
 # ============================================================================
 
 set -e
@@ -39,9 +45,9 @@ for _arg in "$@"; do
         --deploy) _deploy=true ;;
         --local) _local_requested=true; _forward+=(--local) ;;
         -h|--help)
-            echo 'Default: build all ACE images locally.'
-            echo 'Use --deploy to enter this legacy host-startup flow; prefer scripts/setup.sh --deploy.'
-            echo 'Build-only options are those of scripts/build-and-push.sh.'
+            # Both modes, from the header above: --deploy's options are only
+            # discoverable here, since build mode hands off to build-and-push.sh.
+            sed -n '/^# Usage:/,/^# =====/{/^# =====/d; s/^# \{0,1\}//; p; }' "${BASH_SOURCE[0]}"
             exit 0 ;;
         *) _forward+=("$_arg") ;;
     esac
@@ -483,5 +489,5 @@ echo "  - Auth:     $PID_DIR/.auth.log"
 echo "  - GraphQL:  $PID_DIR/.graphql.log"
 [[ "$SKIP_FRONTEND" == false ]] && echo "  - Frontend: $PID_DIR/.frontend.log"
 echo ""
-echo -e "\033[33mTo stop: bash ${AGENTCERT_ROOT}/stop-agentcert.sh\033[0m"
+echo -e "\033[33mTo stop: kill \$(cat ${PID_DIR}/.agentcert-*.pid)\033[0m"
 echo ""

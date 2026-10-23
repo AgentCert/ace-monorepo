@@ -28,7 +28,18 @@
 #   --only RE    only images whose public name matches the regex
 #
 # Images already in the registry are skipped, so re-running is cheap and safe.
-# Local copies remain cached after both local preparation and explicit push.
+#
+# Default (no --push): pull each upstream image into the local Docker cache
+# under its upstream name only. It is deliberately NOT tagged with its
+# registry name: with IMAGE_REGISTRY empty that name is the frozen Docker Hub
+# copy (mongo:5 -> agentcert/mongo:5), and a local tag would make that name
+# resolve to today's upstream content for every local consumer (docker build
+# FROM, compose, kind load) — exactly the drift the frozen copies prevent.
+# Images already cached locally are skipped.
+#
+# --push: pull, tag with the registry name, push, then remove the local copies
+# this run created (the registry tag, and the upstream image when it was not
+# cached before the run). Images that existed locally before the run are kept.
 # =============================================================================
 set -uo pipefail
 
@@ -64,7 +75,7 @@ while [[ $# -gt 0 ]]; do
         --platform)         PLATFORM="$2"; shift 2 ;;
         --jobs)             JOBS="$2"; shift 2 ;;
         --only)             ONLY="$2"; shift 2 ;;
-        -h|--help)          sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help)          sed -n '2,/^set -uo pipefail/{/^set -uo pipefail/d;p}' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -119,29 +130,37 @@ push_platform() {
 
 # Copy one image. Writes "<status> <src> -> <dst>" to the result dir.
 mirror_one() {
-    local src dst log status idx="$2"
+    local src dst log status idx="$2" had_src=0 had_dst=0
     src="$(upstream_ref "$1")"
     dst="$(registry_ref "$1")"
     log="${LOG_DIR}/$(printf '%s' "${src}" | tr '/:@' '___').log"
+    # What is in the local cache before this run touches it: only images this
+    # run creates are removed afterwards.
+    docker image inspect "${src}" >/dev/null 2>&1 && had_src=1
+    docker image inspect "${dst}" >/dev/null 2>&1 && had_dst=1
 
     if [[ "${FORCE}" -eq 0 ]] && {
         if [[ "${PUSH}" -eq 1 ]]; then image_exists "${dst}"
-        else docker image inspect "${dst}" >/dev/null 2>&1; fi
+        else [[ "${had_src}" -eq 1 ]]; fi
     }; then
         status="SKIP"
     elif [[ "${DRY_RUN}" -eq 1 ]]; then
         status="WOULD-COPY"
+    elif ! docker pull --platform "${PLATFORM}" "${src}" >"${log}" 2>&1; then
+        status="FAILED"
+    elif [[ "${PUSH}" -eq 0 ]]; then
+        status="CACHED"
     else
-        if docker pull --platform "${PLATFORM}" "${src}" >"${log}" 2>&1 \
-            && docker tag "${src}" "${dst}" >>"${log}" 2>&1; then
-            status="CACHED"
-            if [[ "${PUSH}" -eq 1 ]]; then
-                if push_platform "${dst}" >>"${log}" 2>&1; then status="COPIED"
-                else status="FAILED"; fi
-            fi
+        if docker tag "${src}" "${dst}" >>"${log}" 2>&1 && push_platform "${dst}" >>"${log}" 2>&1; then
+            status="COPIED"
         else
             status="FAILED"
         fi
+        # Pushed or not, drop the copies this run added (a shared host's disk
+        # is not a cache for ~100 third-party images). src == dst when the
+        # image already lives in the target namespace.
+        if [[ "${had_dst}" -eq 0 ]]; then docker rmi "${dst}" >>"${log}" 2>&1 || true; fi
+        if [[ "${had_src}" -eq 0 && "${src}" != "${dst}" ]]; then docker rmi "${src}" >>"${log}" 2>&1 || true; fi
     fi
     printf '%s %s -> %s\n' "${status}" "${src}" "${dst}" | tee "${RESULT_DIR}/${idx}"
 }

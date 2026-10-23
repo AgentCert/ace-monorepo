@@ -94,7 +94,7 @@ Each phase lists **what** changes and **why** it is done that way.
    - Pushes `latest` **and** a fixed tag such as the git commit.
    - Covers images that were never pushed: `ace-hub-bundle`, `itbench-experiment`, `sre-agent*`, `ciso-agent`.
 
-   > **what pushes future changes?** Yes. After this phase, running `build-and-push.sh` with `IMAGE_REGISTRY` set pushes new builds to JFrog. With it empty, they go to Docker Hub as today.
+   > **what pushes future changes?** Yes. After this phase, running `build-and-push.sh --push` with `IMAGE_REGISTRY` set pushes new builds to JFrog. With it empty, they go to Docker Hub as today.
 
 **Why**
 - **Every later phase only switches image names to JFrog.** If an image isn't there, the pod fails with `ImagePullBackOff`. Filling JFrog first means later failures point at the code, not at missing images.
@@ -130,7 +130,7 @@ Each phase lists **what** changes and **why** it is done that way.
 - One secret name everywhere (`IMAGE_PULL_SECRET_NAME`), including in `prepare-images.sh`.
 - Remove its built-in JFrog default, and stop it from editing `.env`.
 - Add the missing sync manifest (`deploy/registry-secret-sync.yaml`, vendor-neutral name). Its kubectl image is `alpine/k8s:1.29.2`, already in `images.txt`.
-- Switching `IMAGE_REGISTRY` back to empty removes the sync (`apply_cluster_prereqs.sh --uninstall`).
+- Switching `IMAGE_REGISTRY` back to empty removes the sync (`apply_cluster_prereqs.sh --deploy --uninstall`).
 
 **Why**
 - Pointing an image name at JFrog is only half the job. Without the login, JFrog refuses the pull with `401`.

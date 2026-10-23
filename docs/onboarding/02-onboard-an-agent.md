@@ -288,8 +288,9 @@ cd ace-monorepo/agent-charts/install-agent
 make build-push
 ```
 
-Other targets: `make build`, `make tag NEW_TAG=v1.0.0`, `make kind-load`,
-`make install FOLDER=my-sre-agent NAMESPACE=my-app`.
+Other targets: `make build`, `make tag NEW_TAG=v1.0.0`,
+`make install FOLDER=my-sre-agent NAMESPACE=my-app`. To load the image into KinD instead of
+pushing it, run `./build-install-agent.sh --kind-load`.
 
 ### Step 5 — Wire into a benchmark workflow
 

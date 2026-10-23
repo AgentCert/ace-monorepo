@@ -3402,3 +3402,21 @@ They had patched the chart by hand to get past these. Rendering those patches sh
 **Still to do:**
 - Clusters that strictly forbid privileged pods or require CPU/memory limits need more work.
 - The bookinfo chart change needs a commit in the app-charts submodule and new images.
+
+## §142 — Pre-push review: old experiments run again, release tags are safe, docs match the new modes (2026-10-23, committed)
+
+**What:** before pushing, the unpushed work across the monorepo and all eight submodules was reviewed and every confirmed problem was fixed.
+- **Experiments:** the new typed fault settings had stopped older experiments from saving and running, including the hub's own sock-shop workflows and every schedule built from them. Experiments created before the change, or from an older version of a fault, now only need their declared settings to be valid. Three ITBench faults that could not be saved at all now work, and a cosmetic hub update no longer breaks saved experiments.
+- **Fault settings:** they now accept the runner's range syntax (e.g. 50-100) and `random` order. Node restart can use a non-root SSH user, which AKS and EKS need.
+- **Images:** a component `make push` can no longer overwrite a release tag. From the repo root it could even publish every image. A release tag is only re-pushed from the same clean commit. Local builds log in to a private registry when one is set.
+- **Setup:** choosing "publish" without `--push` now stops right away instead of after all the questions. A saved "publish" choice no longer makes every `--restart` fail.
+- **AKS:** the sock-shop front-end no longer asks for a public load balancer.
+- **Docs:** every doc now shows the right flags.
+
+**Why:** these blocked real use. Old experiments and schedules would have failed on every run after the upgrade, one fault could not be added at all, and releases could be silently replaced. A 78 MB Go download had also been committed by mistake; it was removed from the unpushed history before pushing.
+
+**Verified:** all three script test suites pass (153, 151 and 66 checks). The AgentCert server tests pass, including a new test that runs every hub experiment through the real validation. The web tests, lint and type check pass. No live cluster run, and the images have not been rebuilt yet.
+
+**Still to do:**
+- Rebuild the images.
+- Do a live KinD and AKS run.

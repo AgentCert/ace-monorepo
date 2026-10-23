@@ -11,23 +11,31 @@ Complete reference for all scripts in the `/scripts` directory and how to run th
 
 **Usage:**
 ```bash
-# First-time interactive setup (prompts for credentials and config)
+# Default: build every ACE image locally and exit (no .env changes, no deployment)
 ./scripts/setup.sh
+
+# First-time interactive setup (prompts for credentials and config)
+./scripts/setup.sh --deploy
 
 # Restart deployment without prompts (uses existing .env values)
 ./scripts/setup.sh --restart
 
+# Publish images during an install (e.g. answering p for a cloud cluster)
+./scripts/setup.sh --deploy --push
+
 # Bootstrap personal rootless Docker daemon (avoid shared host conflicts)
-./scripts/setup.sh --rootless-docker
+./scripts/setup.sh --deploy --rootless-docker
 ./scripts/setup.sh --restart --rootless-docker
 
 # Pre-select which agent to benchmark (pre-answers "Agent to benchmark" question)
-./scripts/setup.sh --agent=flash-agent
+./scripts/setup.sh --deploy --agent=flash-agent
 ./scripts/setup.sh --restart --agent=ciso-agent
 
 # Combine flags
-./scripts/setup.sh --rootless-docker --agent=flash-agent
+./scripts/setup.sh --deploy --rootless-docker --agent=flash-agent
 ```
+
+`--rootless-docker` and `--agent=` require `--deploy` (alias `--setup`) or `--restart`.
 
 **What it does:**
 - Checks prerequisites (Docker, git, kind, kubectl, helm, Python 3.12)
@@ -51,33 +59,36 @@ Complete reference for all scripts in the `/scripts` directory and how to run th
 
 **Usage:**
 ```bash
-# Start all services
+# Default: build the certifier image only (starts nothing)
 ./scripts/start-local-services.sh
 
+# Start all services
+./scripts/start-local-services.sh --deploy
+
 # Start specific services only
-./scripts/start-local-services.sh --only-mongo
-./scripts/start-local-services.sh --only-langfuse
-./scripts/start-local-services.sh --only-litellm
-./scripts/start-local-services.sh --only-certifier
-./scripts/start-local-services.sh --only-ollama
+./scripts/start-local-services.sh --deploy --only-mongo
+./scripts/start-local-services.sh --deploy --only-langfuse
+./scripts/start-local-services.sh --deploy --only-litellm
+./scripts/start-local-services.sh --deploy --only-certifier
+./scripts/start-local-services.sh --deploy --only-ollama
 
 # Skip specific services
-./scripts/start-local-services.sh --skip-ollama          # skip Ollama (use cloud LLMs)
-./scripts/start-local-services.sh --skip-langfuse       # skip Langfuse
-./scripts/start-local-services.sh --skip-certifier      # skip Certifier
+./scripts/start-local-services.sh --deploy --skip-ollama          # skip Ollama (use cloud LLMs)
+./scripts/start-local-services.sh --deploy --skip-langfuse       # skip Langfuse
+./scripts/start-local-services.sh --deploy --skip-certifier      # skip Certifier
 
-# Restart services (even if already running)
+# Restart services (even if already running; implies --deploy)
 ./scripts/start-local-services.sh --restart
 
 # Pull pre-built certifier image instead of building from source
-./scripts/start-local-services.sh --pull-certifier
+./scripts/start-local-services.sh --deploy --pull-certifier
 
 # Check for local uncommitted changes before starting
-./scripts/start-local-services.sh --check-local-mods
+./scripts/start-local-services.sh --deploy --check-local-mods
 
 # Specify custom env file or Langfuse directory
-./scripts/start-local-services.sh --env-file /path/to/.env
-./scripts/start-local-services.sh --langfuse-dir /opt/langfuse
+./scripts/start-local-services.sh --deploy --env-file /path/to/.env
+./scripts/start-local-services.sh --deploy --langfuse-dir /opt/langfuse
 
 # Combine options
 ./scripts/start-local-services.sh --restart --skip-ollama --pull-certifier
@@ -304,25 +315,24 @@ done
 ## 3. **Image Management & Deployment**
 
 ### `build-and-push.sh` — Build & Push Docker Images to Docker Hub
-**Purpose:** Builds all AgentCert component Docker images and pushes them to Docker Hub.
+**Purpose:** Builds every ACE image (`build` rows of `deploy/images.txt`) locally; `--push` publishes them to `IMAGE_REGISTRY` (Docker Hub when empty).
 
 **Usage:**
 ```bash
-# Build and push to Docker Hub (reads DOCKERHUB_USERNAME / DOCKERHUB_TOKEN from .env)
+# Build only, don't push (default; same as --local)
 ./scripts/build-and-push.sh
 
-# Build only, don't push
-./scripts/build-and-push.sh --local
+# Build and push (reads REGISTRY_USERNAME / REGISTRY_PASSWORD, or DOCKERHUB_USERNAME / DOCKERHUB_TOKEN, from .env)
+./scripts/build-and-push.sh --push
 
 # Build and load into local KinD cluster (implies --local)
 ./scripts/build-and-push.sh --kind-load
 
 # Custom env file
 ./scripts/build-and-push.sh --env-file /path/to/.env
-
-# Combine options
-./scripts/build-and-push.sh --local --kind-load
 ```
+
+`--local`, `--push` and `--kind-load` cannot be combined.
 
 **Images built:**
 1. agentcert/agentcert-flash-agent
@@ -337,9 +347,8 @@ done
 **What it does:**
 - Runs `docker build` on each component's Dockerfile
 - Tags as `agentcert/<name>:latest` (or custom tag from .env)
-- Logs into Docker Hub (requires DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in .env)
-- Pushes all images
-- Optionally loads into KinD cluster
+- With `--push`: logs into the registry and pushes all images
+- With `--kind-load`: loads them into the KinD cluster
 
 ---
 
@@ -348,8 +357,8 @@ done
 
 **Usage:**
 ```bash
-# Auto-detect sources from .env and prepare accordingly
-./scripts/prepare-images.sh
+# Auto-detect sources from .env and prepare accordingly (without --deploy it only builds the ACE images)
+./scripts/prepare-images.sh --deploy
 
 # Called automatically by setup.sh when any source is non-default
 # Safe to run standalone to rebuild/reload
@@ -585,8 +594,11 @@ scripts/audit_non_python_image_deps.py --quiet
 
 **Usage:**
 ```bash
-bash scripts/azure_build/start-agentcert-v2.sh
+bash scripts/azure_build/start-agentcert-v2.sh --deploy \
+    --env-file $(pwd)/.env --paths-file $(pwd)/build-paths.env
 ```
+
+Without `--deploy` it only builds the ACE images locally.
 
 ---
 
@@ -595,7 +607,9 @@ bash scripts/azure_build/start-agentcert-v2.sh
 
 **Usage:**
 ```bash
-bash scripts/azure_build/build-and-deploy-app-chart.sh
+bash scripts/azure_build/build-and-deploy-app-chart.sh            # build install-app locally
+bash scripts/azure_build/build-and-deploy-app-chart.sh --push     # also publish it
+bash scripts/azure_build/build-and-deploy-app-chart.sh --deploy   # load into Minikube + update .env
 ```
 
 ---
@@ -605,8 +619,10 @@ bash scripts/azure_build/build-and-deploy-app-chart.sh
 
 **Usage:**
 ```bash
-bash scripts/azure_build/run.sh
+bash scripts/azure_build/run.sh --deploy
 ```
+
+Without `--deploy` it only builds the ACE images locally.
 
 ---
 
@@ -614,8 +630,8 @@ bash scripts/azure_build/run.sh
 
 ### Setup from Scratch
 ```bash
-./scripts/setup.sh                    # Interactive wizard
-./scripts/start-local-services.sh     # Start Docker services
+./scripts/setup.sh --deploy                    # Interactive wizard
+./scripts/start-local-services.sh --deploy     # Start Docker services
 ```
 
 ### Tear Down Everything
@@ -635,7 +651,7 @@ python scripts/ace-bench.py flash-agent --runs 10
 
 ### Push to Docker Hub
 ```bash
-./scripts/build-and-push.sh
+./scripts/build-and-push.sh --push
 ```
 
 ### Check System Health
@@ -650,10 +666,10 @@ python scripts/ace-bench.py flash-agent --runs 10
 
 On shared hosts (where multiple users checkout this repo):
 
-1. **Run setup.sh first** — it auto-generates a unique `ACE_INSTANCE_NAME` and port numbers to avoid collisions
+1. **Run `setup.sh --deploy` first** — it auto-generates a unique `ACE_INSTANCE_NAME` and port numbers to avoid collisions
 2. **Use compose-up-guard.sh** instead of bare `docker compose` — it prevents cross-checkout accidents
 3. **Run shut_down.sh before leaving** — cleanup is automatic, not manual
-4. **Pass --rootless-docker to setup.sh** — for complete container isolation from other users
+4. **Pass --rootless-docker to `setup.sh --deploy`** — for complete container isolation from other users
 5. **Never manually docker rm/stop containers** — they might belong to another checkout's active experiment
 
 ---
@@ -666,7 +682,7 @@ All scripts read from the root `.env` file (created by `setup.sh`). Key variable
 - `OLLAMA_PORT`, `MONGO_PORT`, `LANGFUSE_PORT`, `LITELLM_PORT` — Service ports (auto-assigned)
 - `AZURE_OPENAI_API_KEY`, `GEMINI_API_KEY` — LLM credentials
 - `MONGODB_CONNECTION_STRING` — MongoDB URI for certifier
-- `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` — For `build-and-push.sh`
+- `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` (or `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`) — For `build-and-push.sh --push`
 - `JFROG_*` — JFrog registry credentials (optional, for image sources)
 
 See CLAUDE.md Section 8 for the complete list.

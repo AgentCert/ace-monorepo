@@ -16,6 +16,7 @@ for arg in "$@"; do
   esac
 done
 REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../../../scripts/lib/registry.sh
 source "${REPO_ROOT}/scripts/lib/registry.sh"
 registry_load "${REPO_ROOT}/.env"
@@ -38,6 +39,7 @@ if [[ "${INSTALL}" == true ]]; then
     "${PYTHON}" -m venv .venv
   fi
 
+  # shellcheck source=/dev/null  # created by the venv step above
   source .venv/bin/activate
 
   pip install --quiet --upgrade pip
@@ -49,6 +51,12 @@ if [[ "${INSTALL}" == true ]]; then
 fi
 
 # ── Docker sandbox image ──────────────────────────────────────────────────────
+# With IMAGE_REGISTRY set, docker_build_resolved points the Dockerfile's
+# ARG *_IMAGE base images at that registry, so log in first (no-op without
+# credentials; a failure only warns, as an earlier docker login may still work).
+if [[ -n "${IMAGE_REGISTRY}" ]]; then
+  registry_login >/dev/null || echo "[flash-agent setup] WARN: login to $(registry_host) failed — base-image pulls may get 401" >&2
+fi
 echo "[flash-agent setup] building Docker image ace-harness/flash-agent:local ..."
 docker_build_resolved "${AGENT_DIR}/Dockerfile" -t ace-harness/flash-agent:local "${AGENT_DIR}/"
 echo "[flash-agent setup] Docker image ready."

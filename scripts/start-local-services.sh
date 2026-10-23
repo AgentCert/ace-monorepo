@@ -22,10 +22,10 @@ set -uo pipefail
 #   --only-litellm                Run only LiteLLM
 #   --only-certifier              Run only Certifier
 #   --only-ollama                 Run only Ollama
-#   --pull-certifier              Pull the certifier image from a registry
-#                                 instead of building from source. Default tag:
-#                                 agentcert/certifier:latest. Override the tag
-#                                 with CERTIFIER_IMAGE in your .env.
+#   --pull-certifier              With --deploy: pull the certifier image from
+#                                 a registry instead of building from source.
+#                                 Default tag: agentcert/certifier:latest.
+#                                 Override the tag with CERTIFIER_IMAGE in .env.
 #   --check-local-mods             Before starting, check certifier/ (submodule)
 #                                 and .tmp/langfuse (upstream clone) for
 #                                 uncommitted local changes. If found, ask
@@ -110,6 +110,13 @@ if [[ "${LOCAL_REQUESTED}" -eq 1 ]] && [[ "${DEPLOY}" == true ]]; then
     echo 'ERROR: --local cannot be combined with --deploy.' >&2
     exit 2
 fi
+# Without --deploy this script only builds the certifier from source, which is
+# the opposite of what --pull-certifier asks for -- refuse rather than build.
+if [[ "${PULL_CERTIFIER}" == true && "${DEPLOY}" == false ]]; then
+    echo 'ERROR: --pull-certifier only applies when starting services; add --deploy.' >&2
+    echo '       (Without --deploy this script only builds the certifier from source; it never pulls.)' >&2
+    exit 2
+fi
 
 if [[ "${DEPLOY}" == false ]]; then
     build_args=(--env-file "${ENV_FILE}")
@@ -120,6 +127,7 @@ if [[ "${DEPLOY}" == false ]]; then
     # Derived from deploy/images.txt (the build row whose context is the
     # certifier checkout) rather than hardcoded, so renaming or retagging the
     # certifier image cannot silently turn this into "no images match".
+    # shellcheck source-path=SCRIPTDIR
     # shellcheck source=lib/registry.sh
     source "${REPO_ROOT}/scripts/lib/registry.sh"
     build_args+=(--only "$(inventory_only_regex "${REPO_ROOT}/deploy/images.txt" context certifier)")
@@ -131,6 +139,7 @@ docker compose version >/dev/null 2>&1 || { log_error "'docker compose' plugin n
 
 # Images come from IMAGE_REGISTRY / the frozen agentcert/ Docker Hub copies
 # (scripts/lib/registry.sh): resolve the compose override images and log in.
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/registry.sh
 source "${REPO_ROOT}/scripts/lib/registry.sh"
 registry_load "${ENV_FILE}" || exit 1

@@ -9,14 +9,20 @@ make build
 ./scripts/setup.sh
 ```
 
-All three build **every `build` row in `deploy/images.txt`**. They do not log
-in, push, prune images, load a cluster, restart workloads, or change `.env`.
+All three build **every `build` row in `deploy/images.txt`**. They do not push,
+prune images, load a cluster, restart workloads, or change `.env`. When
+`IMAGE_REGISTRY` is set they log in to it first, because base images resolve
+there (a failed login only warns).
 Base images and package dependencies can still be downloaded during a build.
 The default rebuilds without Docker's build cache. For a development rebuild:
 
 ```bash
 make build BUILD_ARGS="--allow-build-cache"
 ```
+
+`BUILD_ARGS` goes to `build-and-push.sh` (`make build`, `make push`);
+`SETUP_ARGS` goes to `setup.sh` (`make install`, e.g. `SETUP_ARGS="--restart"`).
+Only `make push` publishes.
 
 ## Explicit operations
 
@@ -29,14 +35,14 @@ make build BUILD_ARGS="--allow-build-cache"
 | `scripts/start-local-services.sh` | Build certifier locally | `--deploy` starts the selected supporting services; `--restart` explicitly recreates them |
 | Component `build-*.sh` wrappers | Build their one inventory image through the common builder | Same `--push` and `--kind-load` options as the common builder |
 | Both `build-and-deploy-app-chart.sh` wrappers | Build install-app locally | `--push` publishes; `--deploy` loads Minikube and updates the selected `.env` |
-| `scripts/mirror-images.sh` | Pull and tag third-party images into the local cache | `--push` publishes the copies; `--dry-run` previews the operation |
+| `scripts/mirror-images.sh` | Pull the upstream third-party images into the local cache (no retagging) | `--push` publishes the copies and then removes only the copies that run created; `--dry-run` previews the operation |
 | `agentcert-stack/litellm-setup/build-litellm.sh` | Cache the upstream LiteLLM image locally | `--deploy` applies Kubernetes resources |
 | `scripts/apply_cluster_prereqs.sh` | Explain the required deployment flag | `--deploy` applies prerequisites; combine with `--uninstall` to remove the sync controller |
 | `scripts/kubectl-apply-images.sh -f FILE` | Render resolved manifests to stdout | `--deploy` applies the rendered manifests |
 | Legacy Azure launchers | Build every inventory image locally | `--deploy` enters the legacy host-startup flow; prefer `setup.sh --deploy` for installation |
 | Agent harness `setup.sh` scripts | Build their local Docker sandbox image | `--install` additionally installs host development dependencies where supported |
 | SRE Qwen harness | Prepare the shared local SRE image | `--check-model` also checks the running Ollama service |
-| A2A/MCP harness | Show installation instructions; it uses no Docker image | `--install` creates its local Python environment |
+| A2A/MCP harness | Create its local Python environment; it uses no Docker image | — |
 
 `--local` cannot be combined with `--push`, `--kind-load`, or `--deploy` on
 entry points that expose those mutually exclusive modes. `--local-build` on
@@ -59,18 +65,21 @@ with `--push`.
 ./scripts/setup.sh --deploy
 ```
 
-The publisher refuses to replace an existing named release when it cannot
-prove that the existing image has the same digest. Registry credentials are
+An existing release tag is only re-pushed from the same clean commit: the
+publisher compares the image's revision label and otherwise refuses and asks
+for a new tag. Registry credentials are
 required for `--push`, not for an ordinary local build. A successful complete
 `--push --tag` updates `ACE_IMAGE_TAG` in the selected `.env`; a partial
 `--only` publication does not.
 
 `ACE_BUILD_NETWORK` is read from the environment or `.env` by the shared
-builder. This checkout uses `host` because its default Docker network could
-not reach package repositories. All five root Compose build definitions also
-honor it. Component Makefile builds use the same base-image resolution and
-network setting. Explicit Makefile `build-push` targets finish the build before
-pushing, including with `make -j`.
+builder. Set it to `host` when the default Docker network cannot reach package
+repositories. All five root Compose build definitions also honor it. Component
+Makefile builds use the same base-image resolution and network setting.
+Explicit Makefile `build-push` targets finish the build before pushing,
+including with `make -j`. A component Makefile's `make push` pushes `IMAGE_TAG`
+(default `latest`) through the registry library and never `ACE_IMAGE_TAG`;
+release tags belong to `build-and-push.sh --push --tag`.
 
 Installer Makefile targets validate and mount kubeconfig and values files,
 forward the chosen Kubernetes context, and enable dry-run only for
@@ -93,15 +102,9 @@ overrides, and web-hook handling of filenames and failed type checks. They do
 not publish images or deploy services. They use Python, Bash, Git, Make and
 Node; manifest-rendering checks also use the repository's YAML tooling.
 
-The 16 October 2026 audit passed **103 mode checks**, **143 registry checks**,
-**66 cloud/install checks**, and syntax checks for all **49 shell scripts**.
-An actual local build completed **every inventory image** successfully.
-Evidence is in `.tmp/script-audit/`. Live deployment and full agent/chaos
-workflows are separate integration checks.
-
-Local ShellCheck analysis of the **48 maintained shell scripts** reported
-**zero errors**. The binary came from Ubuntu's package repository and was
-extracted into `.tmp/script-audit/`, without a system-wide installation.
+`make test-scripts` runs the three suites above. Live deployment and full
+agent/chaos workflows are separate integration checks. Maintained shell scripts
+are expected to report zero ShellCheck errors.
 
 Generated dependencies such as Husky's `.husky/_/husky.sh` are excluded from
 maintained-source lint checks. Historical handoff documents under `docs_2/`

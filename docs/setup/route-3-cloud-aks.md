@@ -51,9 +51,11 @@ Use one of these:
 - **A published release** (simplest). Ask for the current tag, e.g. `RELEASE-2`, and give it to
   the wizard as `ACE_IMAGE_TAG`. Third-party images (mongo, litmuschaos/*, the demo apps, …)
   must also be mirrored there: `./scripts/mirror-images.sh --push` once per registry.
-- **This checkout.** Answer `p` at the wizard's *Images* question: setup runs
-  `scripts/build-and-push.sh`, which builds and pushes every ACE image (including the hub
-  bundle and the ITBench runner). You need push rights to the registry.
+- **This checkout.** Run setup as `./scripts/setup.sh --deploy --push` and answer `p` at the
+  wizard's *Images* question: setup runs `scripts/build-and-push.sh --push`, which builds and
+  pushes every ACE image (including the hub bundle and the ITBench runner). You need push
+  rights to the registry. Without `--push`, answering `p` stops with
+  *"publishing during setup requires --push"*.
 
 Check at any time: `./scripts/check-registry-images.sh` (setup also runs this check before it
 deploys and lists anything missing).
@@ -85,8 +87,8 @@ Set these in `.env` before running setup (all are documented in `.env.example`, 
 
 1. **Where will ACE run?** — setup reads your kube context; for an AKS/EKS/GKE cluster it
    offers `cloud`. Press Enter.
-2. **Images** — `n` (use the published images, default) or `p` (publish this checkout first),
-   then the `ACE_IMAGE_TAG`.
+2. **Images** — `n` (use the published images, default) or `p` (publish this checkout first;
+   needs `./scripts/setup.sh --deploy --push`), then the `ACE_IMAGE_TAG`.
 3. Experiment image sources are set to `registry` for you; give `IMAGE_REGISTRY` and
    credentials, then the LLM keys as usual (Azure OpenAI or another hosted model — Ollama
    runs on the VM and cannot be reached from the cluster).
@@ -136,7 +138,7 @@ What setup then does on a cloud cluster:
 |---|---|
 | `admission webhook "validation.gatekeeper.sh" denied … Load Balancers should not have public IPs` | `ACE_EXPOSE_INTERNAL=false`, or the provider was not recognised: set `CLUSTER_PROVIDER=aks` in `.env`. |
 | Load balancer stays `<pending>` | `kubectl describe svc -n ace web` — a pinned `ACE_*_LB_IP` that is in use or outside the subnet, or a quota. |
-| `ImagePullBackOff` | The image is not in the registry (`./scripts/check-registry-images.sh`), or the pull secret is missing in that namespace: `./scripts/apply_cluster_prereqs.sh`. |
+| `ImagePullBackOff` | The image is not in the registry (`./scripts/check-registry-images.sh`), or the pull secret is missing in that namespace: `./scripts/apply_cluster_prereqs.sh --deploy`. |
 | UI says *Invalid origin* / subscriber logs `websocket: bad handshake` | You open the UI from a host that is not allowed: add it to `ACE_EXTRA_ALLOWED_ORIGINS`, then `./scripts/setup.sh --restart`. |
 | Langfuse login loops back to the login page | `NEXTAUTH_URL` is not the URL in your browser — re-run `./scripts/setup.sh --restart` (it re-reads the LB address). |
 | `CLUSTER_MODE=cloud, but kubectl cannot reach a cluster` | Log in again (`az aks get-credentials …`). |
@@ -151,7 +153,7 @@ This deletes ACE's data in the cluster (MongoDB, Langfuse, reports). Check the c
 kubectl config current-context                  # must be the cluster you mean to wipe
 helm uninstall ace -n ace
 kubectl delete namespace ace litmus sock-shop book-info otel-demo --ignore-not-found --wait=false
-./scripts/apply_cluster_prereqs.sh --uninstall  # removes registry-secret-sync from kube-system
+./scripts/apply_cluster_prereqs.sh --deploy --uninstall  # removes registry-secret-sync from kube-system
 kubectl get namespaces                          # wait until those are gone
 ./scripts/setup.sh --deploy
 ```

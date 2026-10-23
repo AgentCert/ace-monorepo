@@ -22,7 +22,8 @@ The `run` stanza in `agent-harness.yaml` tells the framework how to launch the a
 ## Quick start
 
 ```bash
-# 1. Install dependencies for a specific agent (one-time, per machine)
+# 1. Build the agent's harness image (one-time, per machine);
+#    add --install to also install its host development dependencies
 bash agents/harness/<agent>/setup.sh
 
 # 2. Point the ITBench framework at the harness directory
@@ -137,14 +138,14 @@ harness/
   a2a-mcp-agent/
     agent-harness.yaml   ← universal ITBench entry-point for any A2A/MCP agent
     a2a_bridge.py        ← A2A client: reads scenario_data.json, drives agent, packages result
-    setup.sh             ← pip-installs httpx + tenacity into .venv/
+    setup.sh             ← creates .venv/ with httpx + tenacity (no Docker image)
   ciso-agent/
     agent-harness.yaml   ← ITBench harness entry-point
-    setup.sh             ← installs deps into agents/ciso-agent/.venv/
+    setup.sh             ← builds ace-harness/ciso-agent:local; --install also installs deps into agents/ciso-agent/.venv/
   sre-agent/
     agent-harness.yaml
-    setup.sh             ← runs `uv sync` in agents/sre-agent/
+    setup.sh             ← builds ace-harness/sre-agent:local; --install also runs `uv sync` in agents/sre-agent/
   flash-agent/
     agent-harness.yaml
-    setup.sh             ← pip-installs into agents/flash-agent/.venv/
+    setup.sh             ← builds ace-harness/flash-agent:local; --install also pip-installs into agents/flash-agent/.venv/
 ```

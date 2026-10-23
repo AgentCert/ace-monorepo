@@ -84,11 +84,11 @@ The [README](./README.md) is the source of truth for environment setup. The shor
    ```
 4. **Start AgentCert** once `kubectl` access is configured:
    ```bash
-   bash scripts/azure_build/start-agentcert-v2.sh \
+   bash scripts/azure_build/start-agentcert-v2.sh --deploy \
      --env-file $(pwd)/.env --paths-file $(pwd)/build-paths.env
    ```
 
-For the full walkthrough — prerequisites, MongoDB/Langfuse/LiteLLM, Kubernetes access, and the build pipeline — see [Setup](./README.md#setup) and `scripts/azure_build/AZURE_BUILD_GUIDE.md`.
+For the full walkthrough — prerequisites, MongoDB/Langfuse/LiteLLM, Kubernetes access, and the build pipeline — see [Local development](./docs/setup/local-dev.md) and [script modes](./docs/setup/script-modes.md).
 
 **Always verify your change locally** before opening a PR. Run the affected service (or the full stack) and confirm the behaviour you intend. For certifier changes, the dev tools (`scripts/run_certification.py`, `scripts/dump_langfuse_trace.py`) let you exercise the pipeline without the FastAPI service.
 

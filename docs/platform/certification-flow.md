@@ -616,11 +616,11 @@ To connect AgentCert to the Certifier API and PDF service (local, Azure, or any 
   - `CERTIFICATE_PDF_BASE_URL=https://your-azure-pdf-host`
 - Pass this file to the startup script:
   ```bash
-  bash scripts/azure_build/start-agentcert-v2.sh --env-file $(pwd)/.env --paths-file $(pwd)/build-paths.env
+  bash scripts/azure_build/start-agentcert-v2.sh --deploy --env-file $(pwd)/.env --paths-file $(pwd)/build-paths.env
   ```
 
 > **Note:**
-> The only supported startup script for full stack bring-up is `start-agentcert-v2.sh`. If you see references to `start-agentcert.sh` in older docs or comments, use `start-agentcert-v2.sh` instead. Both required environment variables must be set in the `.env` file you provide to this script.
+> The only supported host-process startup script is `start-agentcert-v2.sh --deploy` (without `--deploy` it only builds images locally; the Kubernetes stack is installed with `./scripts/setup.sh --deploy`). If you see references to `start-agentcert.sh` in older docs or comments, use `start-agentcert-v2.sh` instead. Both required environment variables must be set in the `.env` file you provide to this script.
 
 #### 2. Kubernetes Deployment (using provided manifests)
 - Edit all three manifest files:

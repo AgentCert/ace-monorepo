@@ -9,7 +9,7 @@ Verify the certifier *service* (not the dev script) end-to-end.
 
 ## Prerequisites
 
-- Certifier API running: `./scripts/start-local-services.sh --only-certifier`, reachable at http://localhost:8000/docs.
+- Certifier API running: `./scripts/start-local-services.sh --deploy --only-certifier`, reachable at http://localhost:8000/docs.
 - A real Langfuse run to certify (`agent_id`, `experiment_id`, `experiment_run_id`).
 
 ## Steps

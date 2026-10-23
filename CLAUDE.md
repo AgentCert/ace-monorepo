@@ -166,11 +166,11 @@ ace-monorepo/
 │   ├── litellm.override.yml     # Instance isolation override for agentcert-stack LiteLLM (LITELLM_PORT, container_name)
 │   └── certifier.override.yml   # Instance isolation override for certifier submodule (container_name)
 ├── scripts/
-│   ├── setup.sh                 # Interactive setup wizard: creates .env, generates Helm values, deploys; auto-sets ACE_INSTANCE_NAME + OLLAMA_PORT
-│   ├── start-local-services.sh  # Idempotent local dev stack bringup (MongoDB, Langfuse, Ollama, LiteLLM, Certifier)
+│   ├── setup.sh                 # Default: build all ACE images locally. --deploy: interactive install wizard (creates .env, generates Helm values, deploys; auto-sets ACE_INSTANCE_NAME + OLLAMA_PORT)
+│   ├── start-local-services.sh  # Default: build certifier image. --deploy: idempotent local dev stack bringup (MongoDB, Langfuse, Ollama, LiteLLM, Certifier)
 │   ├── compose-up-guard.sh      # Safety wrapper for `docker compose up` — refuses if any container already belongs to a different checkout
-│   ├── build-and-push.sh        # Builds all 5 Docker images, pushes to Docker Hub
-│   ├── prepare-images.sh        # Build/load/configure experiment workflow images per *_IMAGE_SOURCE in .env (dockerhub/jfrog/local); called by setup.sh
+│   ├── build-and-push.sh        # Builds every `build` row of deploy/images.txt locally; --push publishes to IMAGE_REGISTRY (Docker Hub when empty)
+│   ├── prepare-images.sh        # --deploy: build/load/configure experiment workflow images per *_IMAGE_SOURCE in .env (registry/local); called by setup.sh
 │   ├── ace-bench.py             # Dev-tool: trace_based pipeline only (flash-agent local dev). Production orchestration uses LitmusChaos Argo Workflow.
 │   ├── run_certification.py     # End-to-end certifier runner (dev/CI, no FastAPI server needed)
 │   ├── dump_langfuse_trace.py   # Fetches Langfuse trace → raw_trace.json + trace_meta.json
@@ -470,7 +470,7 @@ LLM establishes baseline thresholds once
 Every agent has under `agents/harness/<agent-name>/`:
 - `bench.yaml` — ITBench pipeline config (scenario type, docker image, env vars)
 - `agent-harness.yaml` — How the harness invokes the agent (command, volumes, ports)
-- `setup.sh` — Per-agent environment setup (venv, pip deps, credentials)
+- `setup.sh` — Builds the agent's harness Docker image; `--install` also installs host dependencies (venv, pip deps) where supported
 
 For flash-agent local dev, invoke via:
 ```bash
@@ -569,7 +569,7 @@ docker volume create --label ace.kind.owner=${PWD} ace-kind-owner-agentcert-<ACE
 
 **Setup first (generates values-env.yaml from .env):**
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 **Install:**
@@ -638,11 +638,11 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 
 | Script | Usage |
 |--------|-------|
-| `setup.sh` | `./scripts/setup.sh [--setup\|--restart] [--local-build] [--rootless-docker]` — interactive wizard first time; `--restart` skips prompts; `--local-build` forces all images to build locally (no Docker Hub). Auto-backfills `ACE_INSTANCE_NAME`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT`, `APP_CHARTS_ROOT` in `.env`. Prompts for Ollama model (default: `qwen2.5:32b-instruct`) and image source (dockerhub/jfrog/local) per service. `--rootless-docker` is a modifier, not a separate mode: it bootstraps a personal rootless Docker daemon and switches the CLI context to it (sudo-free, isolated from other users on a shared host), then falls straight through into whichever of `--setup`/`--restart` you combined it with. Passing the flag skips straight to the bootstrap with no prompt; running plain `--setup` (no flag) asks it as a y/N question at the very start instead; `--restart` never asks — pass the flag explicitly there. See §6 "Personal rootless Docker". |
-| `start-local-services.sh` | `./scripts/start-local-services.sh [--skip-mongo] [--skip-langfuse] [--skip-ollama] [--skip-litellm] [--skip-certifier] [--only-mongo] [--only-langfuse] [--only-ollama] [--only-litellm] [--only-certifier] [--restart] [--pull-certifier]` |
+| `setup.sh` | `./scripts/setup.sh [--deploy\|--setup\|--restart] [--push] [--local-build] [--rootless-docker] [--agent=<name>]` — with no mode flag it only builds every ACE image locally (hands off to `build-and-push.sh`) and exits; `--deploy` (alias `--setup`) runs the interactive install wizard; `--restart` re-applies the saved `.env` without prompts; publishing images during either needs `--push`; `--local-build` forces all images to build locally (no Docker Hub). Auto-backfills `ACE_INSTANCE_NAME`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT`, `APP_CHARTS_ROOT` in `.env`. Prompts for Ollama model (default: `qwen2.5:32b-instruct`) and image source (dockerhub/jfrog/local) per service. `--rootless-docker` is a modifier, not a separate mode: it bootstraps a personal rootless Docker daemon and switches the CLI context to it (sudo-free, isolated from other users on a shared host), then falls straight through into whichever of `--deploy`/`--restart` you combined it with (it, and `--agent=`, are rejected without one). Passing the flag skips straight to the bootstrap with no prompt; running plain `--deploy` (no flag) asks it as a y/N question at the very start instead; `--restart` never asks — pass the flag explicitly there. See §6 "Personal rootless Docker". |
+| `start-local-services.sh` | `./scripts/start-local-services.sh --deploy [--skip-mongo] [--skip-langfuse] [--skip-ollama] [--skip-litellm] [--skip-certifier] [--only-mongo] [--only-langfuse] [--only-ollama] [--only-litellm] [--only-certifier] [--restart] [--pull-certifier]` — without `--deploy` (or `--restart`, which implies it) it only builds the certifier image |
 | `compose-up-guard.sh` | `./scripts/compose-up-guard.sh up -d` — drop-in wrapper for `docker compose`; refuses to proceed if any container in the stack already exists under a different checkout's working directory |
-| `prepare-images.sh` | `./scripts/prepare-images.sh` — builds, loads, or configures registry credentials for experiment workflow images based on `*_IMAGE_SOURCE` settings in `.env` (dockerhub/jfrog/local). Called automatically by `setup.sh`; safe to run standalone to rebuild/reload. |
-| `build-and-push.sh` | `./scripts/build-and-push.sh [--env-file PATH]` — reads DOCKERHUB_USERNAME + DOCKERHUB_TOKEN from .env |
+| `prepare-images.sh` | `./scripts/prepare-images.sh --deploy` — builds, loads, or configures registry credentials for experiment workflow images based on `*_IMAGE_SOURCE` settings in `.env` (registry/local). Called automatically by `setup.sh`; safe to run standalone to rebuild/reload. Without `--deploy` it only builds the ACE images locally. |
+| `build-and-push.sh` | `./scripts/build-and-push.sh [--env-file PATH] [--push\|--kind-load] [--only REGEX] [--tag RELEASE-N] [--committed-only]` — builds locally by default; `--push` publishes with `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` from .env (`DOCKERHUB_*` as fallback) |
 | `ace-bench.py` | **Dev-tool, trace_based only.** `python scripts/ace-bench.py flash-agent [--runs N] [--runs-per-fault N] [--resume] [--skip-setup] [--skip-certifier]`. Production runs use the LitmusChaos Argo Workflow. |
 | `run_certification.py` | `python scripts/run_certification.py --trace-id <UUID> [--workspace DIR] [--skip-cert] [--no-pdf] [--debug]` |
 | `dump_langfuse_trace.py` | `python scripts/dump_langfuse_trace.py --experiment-id <UUID> --run-id <UUID> [--output-dir DIR]` |
@@ -716,7 +716,7 @@ helm install k8s-agent agent-charts/charts/k8s-agent -n target-ns ...
 - Node.js 20+ (web frontend changes — Node 18 is too old for `sass@1.102.0` and causes build failure)
 - At minimum one LLM API credential: Google Gemini (recommended for local dev) or Azure OpenAI
 
-`./scripts/setup.sh` checks all of the above automatically on every run (both `--setup` and `--restart`) via `scripts/check-prerequisites.sh` — it reports versions found, auto-bootstraps Python 3.12 through `uv` (no sudo) when apt doesn't package it, and prints the exact fix command for anything else missing (docker, git, kind, kubectl all need sudo, so those are never installed silently). Run it standalone for a fast sanity check without the full wizard: `./scripts/check-prerequisites.sh`.
+`./scripts/setup.sh` checks all of the above automatically on every install run (both `--deploy` and `--restart`) via `scripts/check-prerequisites.sh` — it reports versions found, auto-bootstraps Python 3.12 through `uv` (no sudo) when apt doesn't package it, and prints the exact fix command for anything else missing (docker, git, kind, kubectl all need sudo, so those are never installed silently). Run it standalone for a fast sanity check without the full wizard: `./scripts/check-prerequisites.sh`.
 
 ### First-Time Setup (Kubernetes)
 
@@ -726,7 +726,7 @@ git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
 cd ace-monorepo
 
 # 2. Interactive wizard: prompts for credentials, creates .env, generates values-env.yaml, optionally deploys
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 
 # 3. Check pods
 kubectl get pods -n ace
@@ -739,22 +739,22 @@ kubectl get pods -n ace
 cp .env.example .env
 # Edit .env with AZURE_OPENAI_KEY, GEMINI_API_KEY, etc.
 # Run setup.sh at least once — it auto-generates ACE_INSTANCE_NAME and OLLAMA_PORT in .env
-./scripts/setup.sh --restart   # or ./scripts/setup.sh for interactive first-time
+./scripts/setup.sh --restart   # or ./scripts/setup.sh --deploy for interactive first-time
 
-# Start MongoDB + Langfuse + Ollama + LiteLLM + Certifier
-./scripts/start-local-services.sh
+# Start MongoDB + Langfuse + Ollama + LiteLLM + Certifier (without --deploy it only builds the certifier image)
+./scripts/start-local-services.sh --deploy
 
 # Selective start
-./scripts/start-local-services.sh --only-mongo
-./scripts/start-local-services.sh --skip-langfuse
-./scripts/start-local-services.sh --skip-ollama   # skip Ollama (if using cloud LLM only)
-./scripts/start-local-services.sh --only-ollama   # start only Ollama
+./scripts/start-local-services.sh --deploy --only-mongo
+./scripts/start-local-services.sh --deploy --skip-langfuse
+./scripts/start-local-services.sh --deploy --skip-ollama   # skip Ollama (if using cloud LLM only)
+./scripts/start-local-services.sh --deploy --only-ollama   # start only Ollama
 
-# Force restart everything
+# Force restart everything (--restart implies --deploy)
 ./scripts/start-local-services.sh --restart
 
 # Use pre-built certifier image instead of building from source
-./scripts/start-local-services.sh --pull-certifier
+./scripts/start-local-services.sh --deploy --pull-certifier
 
 # Alternatively: use the one-command root docker-compose.yml with the safety guard
 # (belt-and-suspenders check against cross-checkout container collisions)
@@ -850,7 +850,7 @@ git submodule update --remote --merge
 Otherwise the old image remains in the cluster with no warning.
 
 **JFrog 401 kills experiments mid-run.**
-If any `*_IMAGE_SOURCE` in `.env` is set to `jfrog`, containerd will attempt to pull from JFrog at experiment execution time. If credentials are missing, expired, or the token has been rotated, the experiment step fails unrecoverably — there is no retry and the run must be abandoned. For KinD-based experiments, always prefer `local` (build from source + kind load via `scripts/prepare-images.sh`) unless you have verified JFrog credentials are fresh in the cluster.
+If any `*_IMAGE_SOURCE` in `.env` is `registry` (or the legacy `jfrog`) with `IMAGE_REGISTRY` pointing at JFrog, containerd will attempt to pull from JFrog at experiment execution time. If credentials are missing, expired, or the token has been rotated, the experiment step fails unrecoverably — there is no retry and the run must be abandoned. For KinD-based experiments, always prefer `local` (build from source + kind load via `scripts/prepare-images.sh --deploy`) unless you have verified JFrog credentials are fresh in the cluster.
 
 **KIND_CLUSTER_NAME mismatch in `.env` breaks cluster access.**
 If `.env` was copied from another machine or checkout, `KIND_CLUSTER_NAME` may not match the actual cluster name on this host. `setup.sh --restart` auto-detects the running cluster and corrects `.env`, but a raw `kubectl` or `helm` command will fail if the kubeconfig context is wrong. Always run `kind get clusters` to verify before manual kubectl work.
@@ -865,7 +865,7 @@ Ubuntu ships whatever CPython is current as the `python3` default at release tim
 Verify before trusting it: `docker info | grep "Docker Root Dir"`, and confirm there's no separate mount at that path (`findmnt /var/lib/docker`) and no override in `/etc/docker/daemon.json` or a `docker.service` systemd drop-in (`systemctl cat docker.service`). On at least one host in this fleet, a Docker reinstall (`docker.io` → `docker-ce`) silently reset the daemon to its default `data-root` (`/var/lib/docker`, on the host's root filesystem) with no override configured anywhere — so every container/image/volume/KinD-node on that host, from every user sharing the daemon, accumulates on root fs instead of the large `/Innovation` volume, unnoticed until root fs nears capacity (`df -h /`). This is a single shared daemon serving every user's checkout; relocating its `data-root` means stopping `docker.service` for the whole host, which stops every other user's running containers too — do not do this without host-admin coordination and explicit confirmation from whoever's containers are currently up (`docker ps -a` first).
 
 **Personal rootless Docker (avoiding the shared host's `data-root` without touching other users).**
-If root fs is tight and a full `data-root` migration isn't warranted (or isn't your call to make on a shared host), rootless Docker is available two ways: pass `--rootless-docker` explicitly (combine with `--setup`, the default, or `--restart` — e.g. `./scripts/setup.sh --rootless-docker` or `./scripts/setup.sh --restart --rootless-docker`) to skip straight to the bootstrap with no prompt, or just run plain `./scripts/setup.sh` (`--setup`, no flag) and answer "y" to the "Personal rootless Docker?" question asked at the very start of the wizard. `--restart` without the flag never asks — it skips all prompts by design. Either path bootstraps a private, per-OS-user Docker daemon via `dockerd-rootless-setuptool.sh` (already installed via the `docker-ce-rootless-extras` package on hosts set up for this) and switches the CLI's default context to it — no sudo, and zero effect on the shared daemon or any other user's containers — then falls straight through into the wizard (or `--restart`) under that new context in the same invocation. Its default `data-root` is `$HOME/.local/share/docker`; on hosts where `$HOME` is itself a path under `/Innovation` (check `df -h "$HOME"`), this lands off root fs automatically with no extra config. `docker context use` persists in `~/.docker/config.json`, so every later `docker`/`kind`/`docker compose` invocation — from any shell, not just this script — transparently targets the rootless daemon afterward. Existing containers on the shared daemon (e.g. an existing KinD cluster) are untouched and keep running there; they're simply invisible to `docker ps`/`kind get clusters` until you `docker context use default` again.
+If root fs is tight and a full `data-root` migration isn't warranted (or isn't your call to make on a shared host), rootless Docker is available two ways: pass `--rootless-docker` explicitly (combine with `--deploy` or `--restart` — e.g. `./scripts/setup.sh --deploy --rootless-docker` or `./scripts/setup.sh --restart --rootless-docker`; it is rejected without one of them) to skip straight to the bootstrap with no prompt, or just run `./scripts/setup.sh --deploy` (no flag) and answer "y" to the "Personal rootless Docker?" question asked at the very start of the wizard. `--restart` without the flag never asks — it skips all prompts by design. Either path bootstraps a private, per-OS-user Docker daemon via `dockerd-rootless-setuptool.sh` (already installed via the `docker-ce-rootless-extras` package on hosts set up for this) and switches the CLI's default context to it — no sudo, and zero effect on the shared daemon or any other user's containers — then falls straight through into the wizard (or `--restart`) under that new context in the same invocation. Its default `data-root` is `$HOME/.local/share/docker`; on hosts where `$HOME` is itself a path under `/Innovation` (check `df -h "$HOME"`), this lands off root fs automatically with no extra config. `docker context use` persists in `~/.docker/config.json`, so every later `docker`/`kind`/`docker compose` invocation — from any shell, not just this script — transparently targets the rootless daemon afterward. Existing containers on the shared daemon (e.g. an existing KinD cluster) are untouched and keep running there; they're simply invisible to `docker ps`/`kind get clusters` until you `docker context use default` again.
 
 *Two things a bare context switch does not cover, both handled by `--rootless-docker` itself:*
 - **The `docker.sock` bind-mount.** `docker-compose.yml`'s `cluster-init` service mounts the Docker socket into the container so `kind create` can run there. A bind-mount source is a literal host filesystem path, not context-aware — `docker context use rootless` does not redirect it. `--rootless-docker` detects the rootless daemon's actual socket path and writes it to `.env` as `DOCKER_HOST_SOCK`, which `docker-compose.yml` reads (`${DOCKER_HOST_SOCK:-/var/run/docker.sock}`) instead of a hardcoded path. Without this, `kind create` would silently keep hitting the shared root daemon even after switching contexts.
@@ -888,9 +888,9 @@ Net effect: daemon-agnostic by construction — `cluster-init`'s `kind create cl
 **Remaining rootless-Docker notes specific to the `setup.sh`-driven Kubernetes/Helm path** (§6 "First-Time Setup (Kubernetes)"), which is architecturally separate from `docker-compose.yml` — `auth`/`graphql`/`web`/`mongo`/etc. run there as Kubernetes Deployments + Services over K8s Service DNS, with pods getting in-cluster API access automatically via their ServiceAccount, so the host-networking workaround above simply doesn't apply to that path at all:
 - **Docker-socket-bind-mount-not-context-aware** (the `DOCKER_HOST_SOCK` fix described above) — this is also why `setup.sh`'s Kubernetes/Helm path never had this problem: it calls `kind create cluster` directly as a host-side script (`scripts/setup.sh`, search `kind create cluster --name`), inheriting whatever `docker context` is active via normal CLI context resolution — no bind-mount is involved, so there's no path for it to silently target the wrong daemon.
 - **Multi-checkout port collisions** for web/auth/graphql/litellm/langfuse/mongo/minio — already solved, independently of the above, by `pick_kind_hostport()` (`scripts/setup.sh`), which resolves all 16 KinD `extraPortMappings` (`KIND_HOSTPORT_*`) with a live free-port walk plus intra-batch collision tracking, feeding `deploy/kind/render-kind-config.sh`. This is a distinct, older, already-correct mechanism from `docker-compose.yml`'s separate (and largely unimplemented) `*_PORT` vars — don't conflate the two when reasoning about port collisions in this repo.
-- **GPU passthrough for Ollama** — applies, but not via `docker-compose.yml`. `setup.sh` brings up Ollama by shelling out to `start-local-services.sh --only-ollama` (`scripts/setup.sh` ~L1268), which does a **raw `docker run`**, not Compose. That invocation used the legacy `--gpus all` flag — routed through the nvidia-container-runtime OCI hook, which is registered per-daemon and doesn't carry over to the rootless daemon's separate `~/.config/docker/daemon.json` — now fixed to `--device nvidia.com/gpu=all` (CDI) in `scripts/start-local-services.sh`'s `start_ollama()`, matching `docker-compose.yml`'s already-CDI `ollama` service and resolving correctly under both daemons via the same CDI-spec setup `--rootless-docker` already performs above.
-- **Missing `uidmap` prerequisite check** — applied unconditionally; this is daemon-setup-level, independent of which deployment path is used afterward. `setup.sh --rootless-docker` now checks for `newuidmap`/`newgidmap` (the `uidmap` package) alongside its existing `docker-ce-rootless-extras` and subuid/subgid checks, before attempting install. Previously this failed deep inside `dockerd-rootless-setuptool.sh install` with a raw, non-ACE-styled error instead of the script's own clean early-exit pattern.
-- **Linger as a soft, best-effort warning** — hardened, also unconditionally. Previously: attempted once during first install, warned and continued silently on failure. Now: checked and enforced on **every** run (not just first install) — `setup.sh --rootless-docker` exits with an explicit `sudo loginctl enable-linger` instruction if linger isn't actually enabled after the attempt, rather than reporting overall success while the rootless daemon (and everything under it — the KinD cluster, Ollama, an in-progress N=30 certification run) is still one logout away from dying silently.
+- **GPU passthrough for Ollama** — applies, but not via `docker-compose.yml`. `setup.sh` brings up Ollama by shelling out to `start-local-services.sh --deploy --only-ollama` (`scripts/setup.sh`, search `--only-ollama`), which does a **raw `docker run`**, not Compose. That invocation used the legacy `--gpus all` flag — routed through the nvidia-container-runtime OCI hook, which is registered per-daemon and doesn't carry over to the rootless daemon's separate `~/.config/docker/daemon.json` — now fixed to `--device nvidia.com/gpu=all` (CDI) in `scripts/start-local-services.sh`'s `start_ollama()`, matching `docker-compose.yml`'s already-CDI `ollama` service and resolving correctly under both daemons via the same CDI-spec setup `--rootless-docker` already performs above.
+- **Missing `uidmap` prerequisite check** — applied unconditionally; this is daemon-setup-level, independent of which deployment path is used afterward. `setup.sh --deploy --rootless-docker` (or `--restart --rootless-docker`) now checks for `newuidmap`/`newgidmap` (the `uidmap` package) alongside its existing `docker-ce-rootless-extras` and subuid/subgid checks, before attempting install. Previously this failed deep inside `dockerd-rootless-setuptool.sh install` with a raw, non-ACE-styled error instead of the script's own clean early-exit pattern.
+- **Linger as a soft, best-effort warning** — hardened, also unconditionally. Previously: attempted once during first install, warned and continued silently on failure. Now: checked and enforced on **every** run (not just first install) — `setup.sh --deploy --rootless-docker` (or `--restart --rootless-docker`) exits with an explicit `sudo loginctl enable-linger` instruction if linger isn't actually enabled after the attempt, rather than reporting overall success while the rootless daemon (and everything under it — the KinD cluster, Ollama, an in-progress N=30 certification run) is still one logout away from dying silently.
 
 **MongoDB replica set stuck in `ReplicaSetNoPrimary`/`RSGhost` forever on the Kubernetes/Helm path — `auth`/`graphql`/`certifier` crash-loop with `context deadline exceeded` reaching Mongo.** Root cause: the `mongodb-rs-init` post-install Job called `rs.initiate({..., members:[{_id:0, host:"mongodb:27017"}]})` using the **ClusterIP Service name** as the replica-set member host. A ClusterIP is a virtual address rewritten by kube-proxy iptables/ipvs NAT — it is never bound to an interface inside the `mongodb-0` pod's own network namespace, so mongod's `isSelf()` check can never match it. The pod is left believing it is not a member of its own replica set, so it never holds an election and stays primary-less indefinitely even though `mongodb-0` itself stays `Running`/`Ready` the whole time — `rs.status()` fails with `"Our replica set config is invalid or we are not a member of it"`. Every dependent service that talks to Mongo with `replicaSet=rs0` in its connection string then fails replica-set topology discovery and crash-loops (`auth` was observed at 159 restarts / 17h before diagnosis). Fixed in both `deploy/helm/ace/templates/mongodb.yaml` and `deploy/k8s/mongodb.yaml`: the member host is now the StatefulSet pod's stable per-pod DNS name via the headless service, `mongodb-0.mongodb-headless.<namespace>.svc.cluster.local:27017` — a real, resolvable, pod-bound address `isSelf()` can match — instead of the ClusterIP name. This is the standard, correct pattern for a Mongo replica set member on Kubernetes; the Docker Compose path (`docker-compose.yml`, `scripts/start-local-services.sh`) never had this bug because it already used `localhost:27017` (correct for a single-container topology). If you hit this on an already-deployed cluster before picking up the fix, `rs.reconfig()` the live member host and restart the crash-looping pods — see `OPEN_WEIGHT_CERTIFICATION_HANDOFF.md` for the exact commands used.
 
@@ -914,9 +914,9 @@ python scripts/run_certification.py --trace-id <LANGFUSE_UUID>
 python scripts/run_certification.py --trace-id <UUID> --no-pdf --debug
 
 # Start local dev stack (start-local-services manages MongoDB, Langfuse, Ollama, LiteLLM, Certifier)
-./scripts/start-local-services.sh
+./scripts/start-local-services.sh --deploy
 ./scripts/start-local-services.sh --restart
-./scripts/start-local-services.sh --skip-ollama   # skip Ollama when using cloud LLMs only
+./scripts/start-local-services.sh --deploy --skip-ollama   # skip Ollama when using cloud LLMs only
 
 # Alternative: one-command root docker-compose.yml with ownership guard
 ./scripts/compose-up-guard.sh up -d
@@ -924,7 +924,7 @@ python scripts/run_certification.py --trace-id <UUID> --no-pdf --debug
 # Redeploy Kubernetes stack with existing .env (no prompts)
 ./scripts/setup.sh --restart
 
-# Build and push all Docker images to Docker Hub
+# Build all ACE images locally (add --push to publish to IMAGE_REGISTRY / Docker Hub)
 ./scripts/build-and-push.sh
 
 # Start certifier API server
@@ -953,8 +953,8 @@ cd certifier && python -m hypothesis_framework.scripts.run_statistical_hypothesi
 
 # Docker image management
 cd certifier && make build    # build certifier image
-cd certifier && make push     # push to Docker Hub
-cd certifier && make kind-load  # load into local kind cluster
+cd certifier && make push     # push IMAGE_TAG (default latest) to the resolved registry
+cd certifier && make kind-load KIND_CLUSTER_NAME=<cluster>  # load into that kind cluster
 cd flash-agent && make build && make run
 ```
 
@@ -992,7 +992,7 @@ All consumed from root `.env` file (created by `scripts/setup.sh`). Values prefi
 
 ### Shared-Host Isolation (auto-set by `setup.sh`)
 
-These are backfilled into `.env` automatically on every `setup.sh` run (both `--setup` and `--restart`). Do not set them to the same value as another checkout on this host.
+These are backfilled into `.env` automatically on every `setup.sh` install run (both `--deploy` and `--restart`). Do not set them to the same value as another checkout on this host.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -1005,7 +1005,7 @@ These are backfilled into `.env` automatically on every `setup.sh` run (both `--
 | `LITELLM_PORT` | `14000` | Host port for LiteLLM proxy; override if :14000 is taken. |
 | `AGENT_CHARTS_ROOT` | `<repo-root>/agent-charts` | Absolute path to agent Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
 | `APP_CHARTS_ROOT` | `<repo-root>/app-charts` | Absolute path to app Helm charts for this checkout. Auto-set by `setup.sh`; corrects values copied from another checkout. |
-| `DOCKER_HOST_SOCK` | `/var/run/docker.sock` (shared root daemon) | Host path `docker-compose.yml`'s `cluster-init` service bind-mounts for `kind create`. Auto-set by `setup.sh --rootless-docker` to the personal rootless daemon's socket — see §6 "Personal rootless Docker". |
+| `DOCKER_HOST_SOCK` | `/var/run/docker.sock` (shared root daemon) | Host path `docker-compose.yml`'s `cluster-init` service bind-mounts for `kind create`. Auto-set by `setup.sh --deploy --rootless-docker` to the personal rootless daemon's socket — see §6 "Personal rootless Docker". |
 | `CERT_REPORTS_HOST_DIR` | `<repo-root>/.tmp/certification-reports-${ACE_INSTANCE_NAME}` | Host directory both Compose entry points bind-mount into the certifier container as `CERT_HOST_EXPORT_DIR` for finished-report export — see §4.1 "Workspace Layout". KinD uses the analogous `KIND_CERT_EXPORT_DIR` (read by `deploy/kind/render-kind-config.sh`), same default path. |
 
 ### Critical — Certifier
@@ -1049,7 +1049,7 @@ These are backfilled into `.env` automatically on every `setup.sh` run (both `--
 | `OPENROUTER_API_KEY` | OpenRouter (optional fallback) |
 | `LITELLM_MASTER_KEY` | LiteLLM gateway auth key (local dev: `sk-agentcert-2026`) |
 | `LANGFUSE_ORG_ID` / `LANGFUSE_PROJECT_ID` | Langfuse project scoping for GraphQL server |
-| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Used by `build-and-push.sh` |
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Fallback push credentials for `build-and-push.sh --push` when `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` are unset |
 | `ALLOWED_ORIGINS` | CORS/WebSocket origin allowlist. Extended regex includes `[a-z0-9.-]+\.svc\.cluster\.local` so in-cluster Kubernetes services (e.g. subscriber) can connect. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Langfuse PostgreSQL |
 | `REDIS_AUTH` | Langfuse Redis password |
@@ -1058,17 +1058,15 @@ These are backfilled into `.env` automatically on every `setup.sh` run (both `--
 
 ### Experiment Image Sources
 
-Controls where Argo Workflow step images are pulled at experiment run time. `setup.sh` prompts for each; can also be edited directly in `.env` and applied with `scripts/prepare-images.sh`.
+Controls where Argo Workflow step images are pulled at experiment run time. `setup.sh` prompts for each; can also be edited directly in `.env` and applied with `scripts/prepare-images.sh --deploy`.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `INSTALL_APP_IMAGE_SOURCE` | `dockerhub` | Image source for the install-app workflow step: `dockerhub` (public, no creds), `jfrog` (requires JFROG_* creds), `local` (build from source + kind load) |
-| `INSTALL_AGENT_IMAGE_SOURCE` | `dockerhub` | Same options for the install-agent step |
-| `LITMUS_IMAGES_SOURCE` | `dockerhub` | LitmusChaos helper images: `dockerhub` or `local` (pre-pull + kind load; JFrog not supported for these). `litmuschaos/go-runner:latest` must be present — verify it is included in `prepare-images.sh` before running chaos faults. |
-| `JFROG_HOST` | `infyartifactory.jfrog.io` | JFrog Artifactory hostname — only needed when any `*_IMAGE_SOURCE=jfrog` |
-| `JFROG_REGISTRY_PATH` | `docker-local` | JFrog registry path |
-| `JFROG_USER` | — | JFrog username |
-| `JFROG_TOKEN` | — | JFrog API token / password |
+| `INSTALL_APP_IMAGE_SOURCE` | `local` | Image source for the install-app workflow step: `local` (build from this checkout + kind load, pull policy Never; what `setup.sh` writes for KinD) or `registry` (pull from `IMAGE_REGISTRY`, Docker Hub when empty; forced on cloud clusters). Older `.env` values `dockerhub` / `jfrog` both mean `registry`. |
+| `INSTALL_AGENT_IMAGE_SOURCE` | `local` | Same options for the install-agent step |
+| `LITMUS_IMAGES_SOURCE` | `local` | LitmusChaos helper and fault images: `local` (pre-pull once, from `IMAGE_REGISTRY` when set, then kind load) or `registry` (pulled at run time). `litmuschaos/go-runner:latest` must be present — it is listed in `deploy/images.txt`. |
+| `IMAGE_REGISTRY` | — (Docker Hub) | The one registry setting, e.g. `infyartifactory.jfrog.io/docker-local`; see `.env.example` "Image registry". |
+| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | — | Credentials for `IMAGE_REGISTRY` (a JFrog access token goes in the password). Legacy `JFROG_USER` / `JFROG_TOKEN` are still read as fallbacks. |
 
 ### Critical — Flash Agent
 
@@ -1222,7 +1220,7 @@ sonar-project.properties defines:
 
 ## 11. Published Docker Images
 
-All pushed to Docker Hub under the `agentcert` org by `scripts/build-and-push.sh`.
+All pushed to Docker Hub under the `agentcert` org by `scripts/build-and-push.sh --push` (with `IMAGE_REGISTRY` empty).
 
 | Image | Built from | Purpose |
 |-------|-----------|---------|

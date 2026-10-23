@@ -331,7 +331,7 @@ def run_trace_based_pipeline(cfg: dict, harness_dir: Path, output_dir: Path,
     except Exception:
         die(
             f"Langfuse unreachable at {langfuse_url}.\n"
-            "Start it with: bash scripts/start-local-services.sh"
+            "Start it with: bash scripts/start-local-services.sh --deploy"
         )
 
     workdir = output_dir / "scenarios"

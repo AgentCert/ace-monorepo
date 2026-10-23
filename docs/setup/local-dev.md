@@ -152,14 +152,18 @@ Once `.env`, `build-paths.env`, MongoDB, Langfuse, LiteLLM, and `kubectl` are al
 set up:
 
 ```bash
-bash scripts/azure_build/start-agentcert-v2.sh \
+bash scripts/azure_build/start-agentcert-v2.sh --deploy \
   --env-file   $(pwd)/.env \
   --paths-file $(pwd)/build-paths.env
 ```
 
+Without `--deploy` the script only builds the ACE images locally (it hands its
+arguments to `scripts/build-and-push.sh`).
+
 **What it does:**
 
-1. Frees ports `3000`, `3030`, `8081`, `8082`, `2001` (prompts before killing).
+1. Checks ports `3000`, `3030`, `8081`, `8082`, `2001` (from `.env`) and refuses to
+   start if any is in use; existing processes are left running.
 2. Ensures MongoDB is running (skip with `--skip-mongo`).
 3. Exports every variable from `.env` and starts:
    - **Auth service** (`go run`) on `:3000` (REST) / `:3030` (gRPC)
@@ -169,14 +173,10 @@ bash scripts/azure_build/start-agentcert-v2.sh \
 
 Login with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from `.env` (defaults `admin` / `litmus`).
 
-**Stop everything:**
+**Stop everything:** stop the auth, GraphQL and frontend processes the script
+started (their PIDs and logs are in `/tmp/agentcert-runtime/`).
 
-```bash
-bash AgentCert/stop-agentcert.sh
-```
-
-For a deeper walk-through of the build pipeline (image builds, Docker Hub pushes,
-the `--llm` flag), see [`scripts/azure_build/AZURE_BUILD_GUIDE.md`](../../scripts/azure_build/AZURE_BUILD_GUIDE.md).
+For image builds and publishing, see [script-modes.md](script-modes.md).
 
 ---
 

@@ -49,7 +49,7 @@ Full flag reference:
 | `--output-dir DIR` | Override the output directory |
 | `--runs N` | Limit the number of scenarios/runs (SRE and trace_based pipelines) |
 | `--resume` | Continue a previous run — skip scenarios whose results already exist |
-| `--skip-setup` | Do not re-run `setup.sh` (use when the venv is already built) |
+| `--skip-setup` | Do not re-run `setup.sh` (use when the harness image is already built) |
 | `--skip-scenarios` | Skip agent execution and use existing metrics docs |
 | `--skip-certifier` | Run only the scenario phase; stop before PDF generation |
 

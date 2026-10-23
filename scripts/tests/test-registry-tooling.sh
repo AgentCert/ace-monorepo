@@ -333,6 +333,21 @@ check "invalid build network rejected" bash -c '
     ACE_BUILD_NETWORK=invalid
     ! registry_load /dev/null
 '
+eq "invalid build network error names the setting, not IMAGE_REGISTRY" "$(
+    ACE_BUILD_NETWORK=bogus
+    registry_load /dev/null 2>&1 >/dev/null
+)" "ACE_BUILD_NETWORK='bogus' (environment or /dev/null) is invalid: use default, host or none."
+
+section "release revisions and --only selection"
+for r in 0123456789ab content-0123456789ab; do
+    check "revision_is_exact accepts ${r}" revision_is_exact "${r}"
+done
+for r in 0123456789ab-dirty unknown unknown-dirty ""; do
+    if revision_is_exact "${r}"; then fail "revision_is_exact refuses '${r}'"; else pass "revision_is_exact refuses '${r}'"; fi
+done
+re="$(image_only_regex agentcert/litmusportal-subscriber:9.9.9 agentcert/agentcert-web:latest)"
+eq "image_only_regex selects a row whatever its tag" "$(inventory_rows deploy/images.txt build | cut -d'|' -f3 | grep -E "${re}" | tr '\n' ' ')" \
+   "agentcert/agentcert-web:latest agentcert/litmusportal-subscriber:3.0.0 "
 eq "shared Docker builder forwards network and preserves spaced paths" "$(
     ACE_BUILD_NETWORK=host
     docker() { printf '%s\n' "$@"; }

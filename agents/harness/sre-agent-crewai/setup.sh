@@ -13,10 +13,17 @@ for arg in "$@"; do
   esac
 done
 REPO_ROOT="$(cd "${HARNESS_DIR}/../../.." && pwd)"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../../../scripts/lib/registry.sh
 source "${REPO_ROOT}/scripts/lib/registry.sh"
 registry_load "${REPO_ROOT}/.env"
 
+# With IMAGE_REGISTRY set, docker_build_resolved points the Dockerfile's
+# ARG *_IMAGE base images at that registry, so log in first (no-op without
+# credentials; a failure only warns, as an earlier docker login may still work).
+if [[ -n "${IMAGE_REGISTRY}" ]]; then
+  registry_login >/dev/null || echo "[sre-agent-crewai setup] WARN: login to $(registry_host) failed — base-image pulls may get 401" >&2
+fi
 echo "[sre-agent-crewai setup] building Docker image ace-harness/sre-agent-crewai:local ..."
 docker_build_resolved "${AGENT_DIR}/Dockerfile" -t ace-harness/sre-agent-crewai:local "${AGENT_DIR}"
 echo "[sre-agent-crewai setup] done."

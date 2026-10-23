@@ -88,7 +88,7 @@ if [[ "${DEPLOY}" -eq 0 ]]; then
 fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-    echo "ERROR: ${ENV_FILE} not found — run scripts/setup.sh first." >&2
+    echo "ERROR: ${ENV_FILE} not found — run ./scripts/setup.sh --deploy first." >&2
     exit 1
 fi
 
@@ -159,7 +159,7 @@ if [[ -z "${ACE_KIND_LOAD_TMPDIR}" ]]; then
     else
         ACE_KIND_LOAD_TMPDIR="${REPO_ROOT}/.tmp/kind-load"
     fi
-    warn "ACE_KIND_LOAD_TMPDIR is unset; using ${ACE_KIND_LOAD_TMPDIR}. Run scripts/setup.sh to persist a host-local choice."
+    warn "ACE_KIND_LOAD_TMPDIR is unset; using ${ACE_KIND_LOAD_TMPDIR}. Run ./scripts/setup.sh --deploy (or --restart) to persist a host-local choice."
 fi
 export ACE_KIND_LOAD_TMPDIR
 
@@ -297,7 +297,7 @@ assert_runtime_images_are_available_or_authenticated() {
     if (( missing_count > 5 )); then
         warn "  ... plus $(( missing_count - 5 )) more"
     fi
-    warn "Set REGISTRY_USERNAME/REGISTRY_PASSWORD, or provide a complete RUNTIME_IMAGES_ARCHIVE, then re-run scripts/prepare-images.sh."
+    warn "Set REGISTRY_USERNAME/REGISTRY_PASSWORD, or provide a complete RUNTIME_IMAGES_ARCHIVE, then re-run scripts/prepare-images.sh --deploy."
     return 1
 }
 
@@ -568,7 +568,11 @@ build_and_load_sre_agent() {
         return 1
     fi
     info "Building ${img} from ${ctx} …"
-    docker_build_resolved "${dockerfile}" --network=host -t "${img}" "${ctx}" \
+    # Network from ACE_BUILD_NETWORK (docker_build_resolved), like every other
+    # build of these images. A hardcoded --network=host here (4636870) was the
+    # per-host workaround for package downloads failing on the default Docker
+    # network; that is now ACE_BUILD_NETWORK=host in .env, for every build.
+    docker_build_resolved "${dockerfile}" -t "${img}" "${ctx}" \
         || { warn "Building ${img} failed"; return 1; }
     ok "Built ${img}"
     kind_load "${img}"
@@ -836,7 +840,7 @@ ensure_registry_pull_secret() {
     fi
     if ! registry_has_credentials; then
         warn "REGISTRY_USERNAME or REGISTRY_PASSWORD not set in .env — cannot create pull secret"
-        warn "Set them and re-run this script (or scripts/apply_cluster_prereqs.sh)."
+        warn "Set them and re-run scripts/prepare-images.sh --deploy (or scripts/apply_cluster_prereqs.sh --deploy)."
         return 1
     fi
 
@@ -844,7 +848,7 @@ ensure_registry_pull_secret() {
     namespaces="$(experiment_namespaces)"
     if [[ -z "${namespaces}" ]]; then
         warn "No experiment namespaces found on the cluster (itbench, sock-shop, book-info, otel-demo)."
-        warn "registry-secret-sync (scripts/apply_cluster_prereqs.sh) covers them once they are created."
+        warn "registry-secret-sync (installed by scripts/apply_cluster_prereqs.sh --deploy) covers them once they are created."
         return 0
     fi
 
@@ -894,7 +898,7 @@ case "${HUB_BUNDLE_SRC}" in
         fi
         registry_login >/dev/null 2>&1 || true
         if ! image_exists "${_hub_ref}"; then
-            warn "hub-bundle: ${_hub_ref} not found in the registry (publish it with scripts/build-and-push.sh)"
+            warn "hub-bundle: ${_hub_ref} not found in the registry (publish it with scripts/build-and-push.sh --push)"
             exit 1
         fi
         info "hub-bundle: registry image ${_hub_ref}"
@@ -1020,7 +1024,7 @@ esac
 
 if (( ${#_failures[@]} > 0 )); then
     warn "Required image preparation failed: ${_failures[*]}"
-    warn "Experiments that use these images would fail with ImagePullBackOff; fix the build above and re-run scripts/prepare-images.sh."
+    warn "Experiments that use these images would fail with ImagePullBackOff; fix the build above and re-run scripts/prepare-images.sh --deploy."
     exit 1
 fi
 

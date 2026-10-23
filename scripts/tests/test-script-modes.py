@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -27,7 +28,8 @@ if name=='docker':
    assert pathlib.Path(args[args.index('-f')+1]).is_file()
   if args[-1]!='-':assert pathlib.Path(args[-1]).is_dir()
  elif args[:2]==['image','inspect']:
-  if os.getenv('AUDIT_EXISTING_RELEASE'):print('sha256:local')
+  # AUDIT_LOCAL_IMAGES: comma-separated references already in the local cache.
+  if os.getenv('AUDIT_EXISTING_RELEASE') or set(args[2:]) & set(os.getenv('AUDIT_LOCAL_IMAGES','').split(',')):print('sha256:local')
   else:sys.exit(1)
  elif args[:3]==['buildx','imagetools','inspect']:
   if not os.getenv('AUDIT_EXISTING_RELEASE'):sys.exit(1)
@@ -71,7 +73,7 @@ def main():
         environment.update(PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                            AUDIT_COMMAND_LOG=str(log), AUDIT_TSC_CONFIG=str(work / 'tsconfig.json'))
 
-        def run(name, args, expected=0, builds=None, pushes=None, deploy=False, extra=None, cwd=ROOT):
+        def run(name, args, expected=0, builds=None, pushes=None, deploy=False, extra=None, cwd=ROOT, logins=None, removes=None):
             global passed
             log.write_text(''); env_file.write_text(config)
             result = subprocess.run(args, cwd=cwd, env={**environment, **(extra or {})},
@@ -82,11 +84,17 @@ def main():
             push_calls = [c for c in commands if c[:2] == ['docker', 'push'] and '--help' not in c]
             if builds is not None: assert len(build_calls) == builds, (name, build_calls)
             if pushes is not None: assert len(push_calls) == pushes, (name, push_calls)
-            assert not any(c[:2] in [['docker', 'rmi'], ['docker', 'prune']] or c[:3] == ['docker', 'image', 'prune'] for c in commands), (name, commands)
+            rmi_calls = [c for c in commands if c[:2] == ['docker', 'rmi']]
+            assert len(rmi_calls) == (removes or 0), (name, rmi_calls)
+            assert not any(c[:2] == ['docker', 'prune'] or c[:3] == ['docker', 'image', 'prune'] for c in commands), (name, commands)
             if not deploy:
                 assert not any(c[0] in ['kubectl', 'kind', 'minikube', 'helm'] for c in commands), (name, commands)
-            if pushes == 0:
-                assert not any(c[:2] == ['docker', 'login'] for c in commands), (name, commands)
+            login_calls = [c for c in commands if c[:2] == ['docker', 'login']]
+            if logins is not None:
+                assert len(login_calls) == logins, (name, login_calls)
+                if logins and build_calls: assert commands.index(login_calls[0]) < commands.index(build_calls[0]), (name, commands)
+            elif pushes == 0:
+                assert not login_calls, (name, commands)
             if build_calls:
                 for c in build_calls:
                     if '--network' in c:
@@ -114,7 +122,7 @@ def main():
         # image does not silently turn these into assertions about a stale number.
         all_images = sum(1 for line in (ROOT / 'deploy/images.txt').read_text().splitlines()
                          if line.startswith('build|') and 'optional' not in line)
-        flash_revision = source_revision('agents/flash-agent')
+        flash_commit = source_revision('agents/flash-agent').removesuffix('-dirty')
         run(f'default builds all {all_images} locally', shell(builder), builds=all_images, pushes=0)
         run(f'setup default builds all {all_images} locally', shell('scripts/setup.sh'), builds=all_images, pushes=0)
         run(f'prepare default builds all {all_images} locally', shell('scripts/prepare-images.sh'), builds=all_images, pushes=0)
@@ -155,9 +163,28 @@ def main():
         calls = run('local tag', shell(builder, '--tag','local-test', *flash), builds=1, pushes=0)
         assert any(c[:2] == ['docker','tag'] and c[-1].endswith(':local-test') for c in calls)
         run('explicit push', shell(builder, '--push', *flash), builds=1, pushes=2)
-        run('different content cannot replace a release tag', shell(builder, '--push', *flash), expected=1, builds=1, extra={'ACE_IMAGE_TAG':'fixture-release','AUDIT_EXISTING_RELEASE':'different'})
-        run('identical release can be republished', shell(builder, '--push', *flash), builds=1, pushes=2, extra={'ACE_IMAGE_TAG':'fixture-release','AUDIT_EXISTING_RELEASE':'same','AUDIT_REMOTE_REVISION':flash_revision})
-        run('unlabelled release cannot be replaced', shell(builder, '--push', *flash), expected=1, builds=1, extra={'ACE_IMAGE_TAG':'fixture-release','AUDIT_EXISTING_RELEASE':'same','AUDIT_REMOTE_REVISION':''})
+        # Release-tag guard: refusals happen before anything is built.
+        release = {'ACE_IMAGE_TAG':'fixture-release','AUDIT_EXISTING_RELEASE':'same'}
+        run('different content cannot replace a release tag', shell(builder, '--push', *flash), expected=1, builds=0, pushes=0, logins=1, extra={**release,'AUDIT_EXISTING_RELEASE':'different'})
+        # --committed-only builds the clean commit whatever the working tree
+        # holds, so this does not depend on the developer's uncommitted files.
+        run('identical clean release can be republished', shell(builder, '--push', '--committed-only', *flash), builds=1, pushes=2, extra={**release,'AUDIT_REMOTE_REVISION':flash_commit})
+        run('unlabelled release cannot be replaced', shell(builder, '--push', *flash), expected=1, builds=0, pushes=0, logins=1, extra={**release,'AUDIT_REMOTE_REVISION':''})
+        scratch = ROOT / 'agents/flash-agent/.ace-script-modes-scratch'
+        scratch.write_text('transient fixture\n')
+        try:
+            # Same "<sha>-dirty" label, but uncommitted changes are recorded
+            # nowhere, so equal labels do not prove equal content.
+            run('dirty revision cannot replace a release tag', shell(builder, '--push', *flash), expected=1, builds=0, pushes=0, logins=1, extra={**release,'AUDIT_REMOTE_REVISION':flash_commit+'-dirty'})
+        finally:
+            scratch.unlink(missing_ok=True)
+        no_git = work / 'no-git'; no_git.mkdir()
+        (no_git / 'git').write_text('#!/bin/sh\nexit 128\n'); (no_git / 'git').chmod(0o755)
+        run('unknown revision cannot replace a release tag', shell(builder, '--push', *flash), expected=1, builds=0, pushes=0, logins=1,
+            extra={**release,'AUDIT_REMOTE_REVISION':'unknown','PATH':str(no_git)+os.pathsep+environment['PATH']})
+        private = {'IMAGE_REGISTRY': 'registry.example/docker-local', 'REGISTRY_USERNAME': 'fixture', 'REGISTRY_PASSWORD': 'fixture'}
+        run('local build logs in to a private registry for base images', shell(builder, *flash), builds=1, pushes=0, logins=1, extra=private)
+        run('local build continues when that login fails', shell(builder, *flash), builds=1, pushes=0, logins=1, extra={**private,'AUDIT_FAIL_LOGIN':'1'})
         run('push login failure', shell(builder, '--push', *flash), expected=1, builds=0, extra={'AUDIT_FAIL_LOGIN':'1'})
         run('push build failure prevents publication', shell(builder, '--push', *flash), expected=1, builds=1, extra={'AUDIT_FAIL_BUILD':'1'})
         run('push failure reported', shell(builder, '--push', *flash), expected=1, builds=1, extra={'AUDIT_FAIL_PUSH':'1'})
@@ -168,11 +195,19 @@ def main():
             run(script+' rejects conflicting modes',shell(script,'--local','--push'),expected=1,builds=0,pushes=0)
         for script in ['scripts/prepare-images.sh','scripts/start-local-services.sh','agentcert-stack/litellm-setup/build-litellm.sh']:
             run(script+' rejects local deploy',shell(script,'--local','--deploy'),expected=1,builds=0,pushes=0)
+        for args in [('--pull-certifier',), ('--only-certifier','--pull-certifier')]:
+            run('pull-certifier without --deploy is refused '+str(args),shell('scripts/start-local-services.sh',*args),expected=2,builds=0,pushes=0)
         inventory=work/'images.txt';inventory.write_text('mirror|infra|mongo:5\n')
-        run('mirror default caches without publication',shell('scripts/mirror-images.sh','--images',str(inventory)),builds=0,pushes=0)
-        run('mirror explicit push',shell('scripts/mirror-images.sh','--push','--images',str(inventory)),builds=0,pushes=1)
+        calls=run('mirror default caches without publication',shell('scripts/mirror-images.sh','--images',str(inventory)),builds=0,pushes=0)
+        # The frozen-copy name (agentcert/mongo:5) must not be pointed at today's upstream image.
+        assert any(c[:2]==['docker','pull'] and c[-1]=='mongo:5' for c in calls) and not any(c[:2]==['docker','tag'] for c in calls), calls
+        calls=run('mirror explicit push removes the copies it pulled',shell('scripts/mirror-images.sh','--push','--images',str(inventory)),builds=0,pushes=1,removes=2)
+        assert sorted(c[2] for c in calls if c[:2]==['docker','rmi'])==['agentcert/mongo:5','mongo:5'], calls
+        calls=run('mirror push keeps images cached before the run',shell('scripts/mirror-images.sh','--push','--images',str(inventory)),builds=0,pushes=1,removes=1,extra={'AUDIT_LOCAL_IMAGES':'mongo:5'})
+        assert [c[2] for c in calls if c[:2]==['docker','rmi']]==['agentcert/mongo:5'], calls
         run('mirror dry run',shell('scripts/mirror-images.sh','--dry-run','--images',str(inventory)),builds=0,pushes=0)
         run('LiteLLM default only caches image',shell('agentcert-stack/litellm-setup/build-litellm.sh'),builds=0,pushes=0)
+        run('LiteLLM private registry logs in before pulling',['bash',str(ROOT/'agentcert-stack/litellm-setup/build-litellm.sh'),'--env-file',str(env_file)],builds=0,pushes=0,logins=1,extra={'IMAGE_REGISTRY':'registry.example/docker-local'})
         run('cluster prerequisites default does not deploy',shell('scripts/apply_cluster_prereqs.sh'),builds=0,pushes=0)
         run('chart explicit push',shell('app-charts/install-app/build-and-deploy-app-chart.sh','--push'),builds=1,pushes=2)
         run('chart explicit deployment',shell('app-charts/install-app/build-and-deploy-app-chart.sh','--deploy'),builds=1,pushes=0,deploy=True)
@@ -191,18 +226,119 @@ def main():
         manifest.write_text('apiVersion: v1\nkind: Pod\nmetadata:\n  name: fixture\nspec:\n  containers:\n  - name: main\n    image: mongo:5\n')
         run('manifest helper renders without deployment',shell('scripts/kubectl-apply-images.sh','-f',str(manifest)),builds=0,pushes=0)
         run('manifest deployment requires explicit flag',shell('scripts/kubectl-apply-images.sh','--deploy','-f',str(manifest)),builds=0,pushes=0,deploy=True)
+        # ── setup.sh pieces, run exactly as written in setup.sh (no wizard, no cluster) ──
         setup_source=(ROOT/'scripts/setup.sh').read_text()
-        start=setup_source.index('declare -a ALL_BUILD_IMAGES=()')
-        end=setup_source.index('if [[ "$SETUP_MODE" == "restart" ]]',start)
-        inventory_setup=setup_source[start:end]
-        result=subprocess.run(['bash','-c','source "$1/scripts/lib/registry.sh"; REPO_ROOT="$1"; _SUBSCRIBER_IMAGE_TAG=agentcert/litmusportal-subscriber:3.0.0; '+inventory_setup+'\nprintf "%s\\n" "${ALL_BUILD_IMAGES[@]}"','_',str(ROOT)],capture_output=True,text=True,check=True)
-        entries=result.stdout.splitlines()
-        assert len(entries)==14 and any('ace-hub-bundle' in entry for entry in entries) and any('itbench-experiment' in entry for entry in entries)
-        passed+=1; print('PASS deployment build inventory contains all 14 images',flush=True)
-        for agent in ['flash-agent','ciso-agent','sre-agent','sre-agent-crewai','sre-agent-comprehensive']:
-            run(agent+' harness default is Docker only', ['bash',str(ROOT/'agents/harness'/agent/'setup.sh')], builds=1,pushes=0)
+        def setup_part(begin, end):
+            i = setup_source.index(begin)
+            return setup_source[i:setup_source.index(end, i) + len(end)]
+        def setup_fn(name): return setup_part(name + '() {', '\n}\n')
+        setup_env = work / 'setup.env'
+        prelude = ('set -euo pipefail; source "$1/scripts/lib/registry.sh"; ENV_FILE="$2"; '
+                   'BOLD=; CYAN=; GREEN=; YELLOW=; RED=; DIM=; NC=\n'
+                   'cur() { grep -m1 "^$1=" "${ENV_FILE}" 2>/dev/null | cut -d= -f2- || true; }\n'
+                   'set_env() { printf "%s=%s\\n" "$1" "$2" >> "${ENV_FILE}"; }\n'
+                   'ok() { echo "ok: $*"; }; warn() { echo "warn: $*"; }; ask() { echo fixture; }\n'
+                   'detect_k3s_gw() { :; }; detect_kind_gw() { :; }\n'
+                   + setup_fn('abort_setup') + setup_fn('publish_choice_note') + setup_fn('refuse_publish_without_push'))
+        def setup_snippet(name, body, env_text, stdin='', expected=0, **variables):
+            global passed
+            setup_env.write_text(env_text)
+            assigns = ''.join(f'{k}={v!r}\n' for k, v in variables.items())
+            result = subprocess.run(['bash', '-c', prelude + assigns + body, '_', str(ROOT), str(setup_env)],
+                                    input=stdin, capture_output=True, text=True, timeout=30)
+            assert result.returncode == expected, (name, result.returncode, result.stdout[-2000:], result.stderr[-2000:])
+            passed += 1; print('PASS', name, flush=True)
+            return result
+
+        # Build inventory: every build row except the hub bundle (prepare-images.sh
+        # builds HUB_BUNDLE_IMAGE) and, unless its source is local, the ITBench runner.
+        build_rows = [l.split('|') for l in (ROOT/'deploy/images.txt').read_text().splitlines()
+                      if l.startswith('build|') and 'optional' not in l]
+        def setup_label(image):
+            label = image.removeprefix('agentcert/').rsplit(':', 1)[0]; return label.removeprefix('agentcert-')
+        inventory_setup = setup_part('declare -a ALL_BUILD_IMAGES=()', 'unset _build_num')
+        for source, itbench_built in [('', True), ('local', True), ('registry', False)]:
+            result = setup_snippet('setup build inventory, ITBench source ' + (source or 'unset'),
+                                   'REPO_ROOT="$1"; _SUBSCRIBER_IMAGE_TAG=agentcert/litmusportal-subscriber:3.0.0\n'
+                                   + inventory_setup + '\nprintf "%s\\n" "${ALL_BUILD_IMAGES[@]}"\n',
+                                   f'ITBENCH_EXPERIMENT_IMAGE_SOURCE={source}\n' if source else '')
+            entries = [e.split('|') for e in result.stdout.splitlines()]
+            want = [r for r in build_rows if r[4] != 'hub-bundle'
+                    and (itbench_built or setup_label(r[2]) != 'itbench-experiment')]
+            assert [e[2].rsplit(':', 1)[0] for e in entries] == [r[2].rsplit(':', 1)[0] for r in want], (entries, want)
+            assert [e[0] for e in entries] == [str(n) for n in range(1, len(want) + 1)], entries
+
+        # --restart with a saved "push" policy: without --push it must deploy
+        # the published images (no exit, no publish, .env untouched).
+        restart = (setup_part('if [[ "$SETUP_MODE" == "restart" ]]; then', '    unset _restart_choice\nfi\n')
+                   + setup_part('PUBLISH_SELECTED=0\n', '\nfi\n')
+                   + 'echo "DO_BUILD=${DO_BUILD} PUBLISH_SELECTED=${PUBLISH_SELECTED}"\n')
+        saved = 'CLUSTER_MODE=auto\nPLATFORM_IMAGE_SOURCE=push\nREGISTRY_USERNAME=fixture\nREGISTRY_PASSWORD=fixture\n'
+        array = 'ALL_BUILD_IMAGES=("1|graphql|agentcert/agentcert-graphql:latest|%s|server/Dockerfile|direct")\n' % (ROOT/'AgentCert/chaoscenter/graphql')
+        result = setup_snippet('restart with saved push policy and no --push deploys without publishing',
+                               array + restart, saved, PUSH_IMAGES='0', SETUP_MODE='restart', BUILD_MODE='prompt', REPO_ROOT=str(work))
+        assert 'DO_BUILD=0 PUBLISH_SELECTED=0' in result.stdout and 'add --push to publish' in result.stdout, result.stdout
+        assert setup_env.read_text() == saved, setup_env.read_text()
+        result = setup_snippet('restart with saved push policy and --push publishes through build-and-push',
+                               array + restart, saved, PUSH_IMAGES='1', SETUP_MODE='restart', BUILD_MODE='prompt', REPO_ROOT=str(work))
+        assert 'DO_BUILD=0 PUBLISH_SELECTED=1' in result.stdout, result.stdout
+
+        # Choosing "p" without --push stops at the prompt: nothing saved, no credentials asked.
+        guided = setup_part('# --- Build: push to the image registry or build locally (optional)', 'fi # EXPRESS_MODE -eq 0 (build section)\n')
+        prompt_vars = dict(EXPRESS_MODE='0', BUILD_MODE='prompt', CLUSTER_MODE='auto', _PUSH_TARGET_LABEL='Docker Hub')
+        start_env = 'CLUSTER_MODE=auto\n'
+        result = setup_snippet('guided p without --push stops before saving the policy', array + guided, start_env,
+                               stdin='p\n', expected=2, PUSH_IMAGES='0', **prompt_vars)
+        assert '(requires --push)' in result.stdout and './scripts/setup.sh --deploy --push' in result.stderr, result
+        assert setup_env.read_text() == start_env
+        setup_snippet('guided l saves the local policy', array + guided, start_env, stdin='l\n\n', PUSH_IMAGES='0', **prompt_vars)
+        assert 'PLATFORM_IMAGE_SOURCE=local' in setup_env.read_text()
+        setup_snippet('guided p with --push saves the push policy', array + guided, start_env, stdin='p\n\n', PUSH_IMAGES='1', **prompt_vars)
+        assert 'PLATFORM_IMAGE_SOURCE=push' in setup_env.read_text()
+        express = setup_part('    # Build\n    DO_BUILD=0; DO_LOCAL_BUILD=0', '    unset _pis\n')
+        setup_snippet('express p without --push stops before saving the policy', array + 'declare -a SELECTED_BUILD_IMAGES=()\n' + express,
+                      start_env, stdin='p\n', expected=2, PUSH_IMAGES='0', CLUSTER_MODE='auto', _PUSH_TARGET_LABEL='Docker Hub')
+        assert setup_env.read_text() == start_env
+        setup_snippet('cloud p without --push stops before the release-tag question',
+                      array + setup_fn('ask_cloud_build_choice') + 'ask_cloud_build_choice\n', start_env,
+                      stdin='p\n', expected=2, PUSH_IMAGES='0', _PUSH_TARGET_LABEL='registry.example')
+        assert setup_env.read_text() == start_env
+        # The refusal reaps the express-mode background KinD pre-warm first.
+        result = setup_snippet('publish refusal reaps the background KinD job',
+                               'sleep 2 & _KIND_PREWARM_PID=$!; echo "pid=${_KIND_PREWARM_PID}"; refuse_publish_without_push\n',
+                               '', expected=2, PUSH_IMAGES='0')
+        pid = result.stdout.split('pid=')[1].split()[0]
+        assert not Path('/proc', pid).exists(), 'background KinD job was orphaned'
+
+        # The harness scripts read <repo>/.env with no override, so pin what the
+        # assertions depend on through the environment, which wins over .env.
+        public = {'IMAGE_REGISTRY': '', 'ACE_BUILD_NETWORK': 'host'}
+        harness_private = {**private, 'ACE_BUILD_NETWORK': 'host'}
+        for agent in ['flash-agent','ciso-agent','sre-agent','sre-agent-crewai','sre-agent-comprehensive','sre-agent-qwen']:
+            run(agent+' harness default is Docker only', ['bash',str(ROOT/'agents/harness'/agent/'setup.sh')], builds=1,pushes=0,extra=public)
+            run(agent+' harness private registry logs in to pull', ['bash',str(ROOT/'agents/harness'/agent/'setup.sh')], builds=1,pushes=0,logins=1,extra=harness_private)
             run(agent+' harness help', ['bash',str(ROOT/'agents/harness'/agent/'setup.sh'),'--help'], builds=0,pushes=0)
-        run('adapter requires explicit installation', ['bash',str(ROOT/'agents/harness/a2a-mcp-agent/setup.sh')], builds=0,pushes=0)
+            run(agent+' harness accepts --install', ['bash',str(ROOT/'agents/harness'/agent/'setup.sh'),'--install','--help'], builds=0,pushes=0)
+        # The A2A adapter has no image: its default (what scripts/ace-bench.py
+        # runs, no arguments) creates the venv agent-harness.yaml activates.
+        # Run from a copy with a python3 stub, so the checkout and network are untouched.
+        adapter = work / 'a2a'; adapter.mkdir()
+        (adapter / 'setup.sh').write_text((ROOT/'agents/harness/a2a-mcp-agent/setup.sh').read_text())
+        stub = work / 'python-stub'; stub.mkdir()
+        (stub / 'python3').write_text('#!/bin/bash\necho "python3 $*" >> "$AUDIT_A2A_LOG"\n'
+            'if [[ "$1 $2" == "-m venv" ]]; then mkdir -p "$3/bin"; : > "$3/bin/activate"\n'
+            '  printf \'#!/bin/bash\\necho "pip $*" >> "$AUDIT_A2A_LOG"\\n\' > "$3/bin/pip"; chmod +x "$3/bin/pip"; fi\n')
+        (stub / 'python3').chmod(0o755)
+        a2a_log = work / 'a2a.log'
+        for args, venv in [([], True), (['--install'], True), (['--help'], False)]:
+            a2a_log.write_text('')
+            shutil.rmtree(adapter / '.venv', ignore_errors=True)
+            result = subprocess.run(['bash', str(adapter / 'setup.sh'), *args], capture_output=True, text=True, timeout=30,
+                                    env={**environment, 'PATH': str(stub) + os.pathsep + environment['PATH'], 'AUDIT_A2A_LOG': str(a2a_log)})
+            assert result.returncode == 0, (args, result.stdout, result.stderr)
+            assert (adapter / '.venv/bin/activate').exists() == venv, args
+            if venv: assert f'python3 -m venv {adapter}/.venv' in a2a_log.read_text() and 'httpx' in a2a_log.read_text(), a2a_log.read_text()
+            passed += 1; print('PASS a2a adapter setup.sh', args or '(no arguments)', 'venv' if venv else 'help only', flush=True)
         for script in [builder,'scripts/setup.sh','scripts/mirror-images.sh','scripts/prepare-images.sh',
                        'scripts/start-local-services.sh','scripts/apply_cluster_prereqs.sh',
                        'scripts/azure_build/run.sh','scripts/azure_build/start-agentcert-v2.sh',
@@ -210,12 +346,27 @@ def main():
                        'scripts/azure_build/build-and-deploy-app-chart.sh',
                        'agentcert-stack/litellm-setup/build-litellm.sh']:
             run(script+' help', ['bash',str(ROOT/script),'--help'],builds=0,pushes=0)
+        private_env = work / 'private.env'
+        private_env.write_text(config.replace('IMAGE_REGISTRY=\n','IMAGE_REGISTRY=registry.example/docker-local\n'))
         for directory in ['agents/flash-agent','agent-sidecar','certifier','app-charts/install-app','agent-charts/install-agent']:
-            calls=run(directory+' make build', ['make','-C',str(ROOT/directory),'build'],builds=1,pushes=0)
-            if directory=='agents/flash-agent':assert 'agentcert/agentcert-flash-agent:latest' in calls[0]
-            calls=run(directory+' parallel build-push', ['make','-C',str(ROOT/directory),'-j8','build-push'],builds=1,pushes=1)
+            # ACE_ENV_FILE keeps make off the developer's real .env (its
+            # ACE_BUILD_NETWORK, registry and credentials).
+            makefile = str(ROOT/directory/'Makefile'); env_arg = 'ACE_ENV_FILE='+str(env_file)
+            calls=run(directory+' make build', ['make','-C',str(ROOT/directory),'build',env_arg],builds=1,pushes=0)
+            if directory=='agents/flash-agent':assert 'agentcert/agentcert-flash-agent:latest' in next(c for c in calls if c[:2]==['docker','build'])
+            calls=run(directory+' parallel build-push', ['make','-C',str(ROOT/directory),'-j8','build-push',env_arg],builds=1,pushes=1)
             assert next(i for i,c in enumerate(calls) if c[:2]==['docker','build']) < next(i for i,c in enumerate(calls) if c[:2]==['docker','push'])
-            run(directory+' build failure blocks make push', ['make','-C',str(ROOT/directory),'-j8','build-push'],expected=1,builds=1,pushes=0,extra={'AUDIT_FAIL_BUILD':'1'})
+            run(directory+' build failure blocks make push', ['make','-C',str(ROOT/directory),'-j8','build-push',env_arg],expected=1,builds=1,pushes=0,extra={'AUDIT_FAIL_BUILD':'1'})
+            # Same commands when the Makefile is named from elsewhere (repo root).
+            calls_f=run(directory+' make -f from the repo root', ['make','-f',makefile,'-j8','build-push',env_arg],builds=1,pushes=1)
+            built=next(c for c in calls_f if c[:2]==['docker','build'])
+            ctx=Path(built[-1]); assert ctx in (ROOT/directory, (ROOT/directory).parent), built
+            assert Path(built[built.index('-f')+1]) == ROOT/directory/'Dockerfile', built
+            run(directory+' private registry build logs in', ['make','-C',str(ROOT/directory),'build','ACE_ENV_FILE='+str(private_env)],builds=1,pushes=0,logins=1)
+            # `make push` publishes IMAGE_TAG; ACE_IMAGE_TAG (a release tag) never leaks in.
+            calls=run(directory+' make push publishes IMAGE_TAG, not ACE_IMAGE_TAG', ['make','-C',str(ROOT/directory),'push',env_arg],builds=0,pushes=1,extra={'ACE_IMAGE_TAG':'fixture-release'})
+            pushed=next(c for c in calls if c[:2]==['docker','push'])[-1]
+            assert pushed.endswith(':latest') and 'fixture-release' not in pushed, pushed
         for directory in ['app-charts/install-app','agent-charts/install-agent']:
             kube=work/'kube config';kube.write_text('fixture')
             values=work/'chart values.yaml';values.write_text('replicas: 1\n')

@@ -66,3 +66,6 @@ Report/
 pipe:*
 socket:*
 anon_inode:*
+
+# Toolchain downloads (e.g. a Go tarball fetched to install Go) never belong in the repo.
+/go*.tar.gz

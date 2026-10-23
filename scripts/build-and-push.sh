@@ -38,7 +38,8 @@ set -euo pipefail
 #                         ACE_IMAGE_TAG=RELEASE-N to the env file, so setup.sh,
 #                         the Helm chart, graphql and the installers pull that
 #                         release. Use a new number per release: a release tag
-#                         is never overwritten. Default: ACE_IMAGE_TAG from .env.
+#                         is never overwritten with different content (see
+#                         "Release tags" below). Default: ACE_IMAGE_TAG from .env.
 #   --allow-build-cache   Reuse Docker's build cache. Off by default: BuildKit
 #                         has been seen replaying stale COPY/go-build layers
 #                         after the source changed (same reason setup.sh builds
@@ -51,6 +52,14 @@ set -euo pipefail
 #                         org.opencontainers.image.revision label matches), and
 #                         just tag + push it. Pushes the identical image to a
 #                         second registry without rebuilding.
+#
+# Release tags: with ACE_IMAGE_TAG set (--tag or .env), every image is checked
+# before anything is built. If its release tag already exists in the registry,
+# the run stops unless this checkout builds exactly what is there: a clean
+# commit (or the hub bundle's content digest) equal to the registry copy's
+# revision label. A dirty tree ("<sha>-dirty") or an unreadable revision
+# ("unknown") never replaces an existing release tag; --committed-only builds
+# the clean commit instead.
 #
 # The revision tag is pushed before the release/moving tag. If the registry refuses to
 # overwrite an existing tag (JFrog without Delete/Overwrite permission), the
@@ -262,6 +271,12 @@ if [[ "${LOCAL_ONLY}" == false ]]; then
     fi
     registry_login || { log_error "Login to ${IMAGE_REGISTRY:-Docker Hub} failed"; exit 1; }
     log_success "Pushing to ${IMAGE_REGISTRY:-Docker Hub}"
+elif [[ -n "${IMAGE_REGISTRY}" ]]; then
+    # A local build still pulls its base images from IMAGE_REGISTRY
+    # (docker_build_resolved), which usually needs a login. A failed login is
+    # reported but does not stop the build: cached base images may suffice.
+    registry_login >/dev/null \
+        || log_warn "Login to $(registry_host) failed; base-image pulls from ${IMAGE_REGISTRY} may fail with 401."
 fi
 
 # ---------------------------------------------------------------------------
@@ -288,6 +303,62 @@ build_hub_bundle() {
     hub_bundle_build "${REPO_ROOT}" "${image}" ${NO_CACHE_FLAG} \
         --label "${ACE_REVISION_LABEL}=${revision}"
 }
+
+# Revision an inventory row's image will be labelled with, known before it is
+# built: source_revision, or the committed HEAD's with --committed-only (which
+# builds the commit when the working tree is dirty; not the hub bundle).
+# $1 = context (relative), $2 = recipe
+planned_revision() {
+    local rev
+    rev="$(source_revision "${REPO_ROOT}" "$1" "$2")"
+    if [[ "${COMMITTED_ONLY}" == true && "${rev}" == *-dirty && "$2" != hub-bundle ]]; then
+        rev="${rev%-dirty}"
+    fi
+    printf '%s' "${rev}"
+}
+
+# ---------------------------------------------------------------------------
+# Release-tag guard, before anything is built: a named release must never
+# replace different image content, even on registries whose account
+# permissions allow overwriting tags. An existing tag may be pushed again only
+# when this checkout builds exactly what it holds — an exact revision
+# (revision_is_exact: a clean commit or the hub bundle's content digest) equal
+# to the registry copy's revision label. "<sha>-dirty" is refused even when
+# the labels match, because two different sets of uncommitted changes carry
+# the same label; "unknown" is refused because it names nothing.
+# Compared via the revision LABEL, not a digest: `docker image inspect .Id` is
+# the config digest on the classic (overlay2) image store and the manifest
+# digest only under the containerd store, so a digest comparison against the
+# registry's manifest spuriously fails on most hosts. The label travels inside
+# the image and is stamped by this script on every build, so it means the
+# same thing on either store. Checking every selected image first means a
+# refused release builds and publishes nothing, instead of part of itself.
+# ---------------------------------------------------------------------------
+declare -A RELEASE_EXISTING=()   # image -> revision its existing release tag holds
+if [[ "${LOCAL_ONLY}" == false && -n "${ACE_IMAGE_TAG:-}" ]]; then
+    REFUSED=()
+    for row in "${BUILD_ROWS[@]}"; do
+        IFS='|' read -r _ _ image ctx recipe _ <<< "${row}"
+        dst="$(registry_ref "${image}")"
+        image_exists "${dst}" || continue
+        remote="$(remote_revision "${dst}")"
+        planned="$(planned_revision "${ctx}" "${recipe}")"
+        if revision_is_exact "${planned}" && [[ "${remote}" == "${planned}" ]]; then
+            RELEASE_EXISTING["${image}"]="${remote}"
+            log_info "${dst} already holds revision ${planned} — pushing the same revision again"
+        else
+            REFUSED+=("${dst}: registry has '${remote:-no revision label}', this checkout builds '${planned}'")
+        fi
+    done
+    if [[ ${#REFUSED[@]} -gt 0 ]]; then
+        log_error "Release tag :${ACE_IMAGE_TAG} already exists and this checkout cannot prove it builds the same content:"
+        for refused in "${REFUSED[@]}"; do echo "    ${refused}"; done
+        log_error "Nothing was built or pushed. Choose a new --tag (e.g. RELEASE-<n+1>); to re-push the same"
+        log_error "release, build its clean commit (commit the changes, or use --committed-only)."
+        exit 1
+    fi
+    unset REFUSED
+fi
 
 # ---------------------------------------------------------------------------
 # Build (+ optional push / kind-load)
@@ -437,20 +508,12 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
     elif [[ "${LOCAL_ONLY}" == false ]]; then
         dst="$(registry_ref "${image}")"
         dst_rev="${dst%:*}:${revision}"
-        # A named release must never replace different image content, even on
-        # registries whose account permissions allow overwriting tags.
-        # Compared via the revision LABEL, not a digest: `docker image inspect
-        # .Id` is the config digest on the classic (overlay2) image store and
-        # the manifest digest only under the containerd store, so a digest
-        # comparison against the registry's manifest spuriously fails on most
-        # hosts. The label travels inside the image and is stamped by this
-        # script on every build, so it means the same thing on either store.
-        if [[ -n "${ACE_IMAGE_TAG:-}" ]] && image_exists "${dst}"; then
-            if [[ "$(remote_revision "${dst}")" != "${revision}" ]]; then
-                log_error "${dst} already exists with different or unverifiable content. Choose a new --tag."
-                FAILED+=("${img_name} (release tag already exists)")
-                continue
-            fi
+        # The release-tag guard above approved re-pushing this existing tag for
+        # one exact revision; the source must not have changed since.
+        if [[ -n "${RELEASE_EXISTING[${image}]:-}" && "${revision}" != "${RELEASE_EXISTING[${image}]}" ]]; then
+            log_error "${dst} already exists with revision ${RELEASE_EXISTING[${image}]}, but ${img_name} was built from ${revision} (source changed during the run). Choose a new --tag."
+            FAILED+=("${img_name} (release tag already exists)")
+            continue
         fi
         # Revision tag first: it is new on every source change, so it lands
         # even on registries that refuse to overwrite an existing tag (JFrog
@@ -551,7 +614,7 @@ else:
     lines.append(f"ACE_IMAGE_TAG={tag}")
 open(path, "w").write("\n".join(lines) + "\n")
 PY
-    log_success "ACE_IMAGE_TAG=${RELEASE_TAG} written to ${ENV_FILE} — the next setup.sh deploys this release."
+    log_success "ACE_IMAGE_TAG=${RELEASE_TAG} written to ${ENV_FILE} — the next ./scripts/setup.sh --deploy (or --restart) deploys this release."
 fi
 
 [[ ${#FAILED[@]} -eq 0 ]]

@@ -16,7 +16,8 @@
 # Agent-specific Helm values, environment variables, and chart structure are
 # the agent's responsibility on its side.
 #
-# Run setup.sh once before the first benchmark run.
+# Run setup.sh once before the first benchmark run: with no arguments (as
+# scripts/ace-bench.py runs it) it creates the .venv activated below.
 path_to_data_provided_by_scenario: /tmp/agent/scenario_data.json
 path_to_data_pushed_to_scenario: /tmp/agent/agent_data.tar
 run:

@@ -12,7 +12,7 @@ Everything is driven by the single **`.env`** file at the repo root. This page e
 - [Profiles: how the switches map to what runs](#profiles-how-the-switches-map-to-what-runs)
 - [Required secrets](#required-secrets)
 - [Changing ports (busy-port scenario)](#changing-ports-busy-port-scenario)
-- [The `172.26.0.1` gateway IP](#the-172_26_0_1-gateway-ip)
+- [The kind gateway IP (`172.26.0.1`)](#the-kind-gateway-ip)
 
 ---
 
@@ -124,7 +124,7 @@ The certifier calls Azure OpenAI directly, not via LiteLLM. Gemini/OpenRouter ke
 
 ## Image Sources & Reproducibility
 
-`setup.sh` writes these into `.env`; `scripts/prepare-images.sh` acts on them (and can be re-run
+`setup.sh` writes these into `.env`; `scripts/prepare-images.sh --deploy` acts on them (and can be re-run
 standalone). The defaults make a run reproducible from the checkout alone.
 
 Where images come from is decided by **one** setting, `IMAGE_REGISTRY` (see
@@ -133,7 +133,7 @@ Where images come from is decided by **one** setting, `IMAGE_REGISTRY` (see
 | Variable | Default | What it controls |
 |---|---|---|
 | `IMAGE_REGISTRY` | *(empty)* | empty = Docker Hub, with third-party images taken from frozen copies under `IMAGE_MIRROR_NAMESPACE` (e.g. `litmuschaos/k8s:latest` → `agentcert/litmuschaos-k8s:latest`) so upstream changes cannot break ACE; set (e.g. `infyartifactory.jfrog.io/docker-local` inside Infosys) = every image is pulled as `<IMAGE_REGISTRY>/<public name>`. `*_IMAGE` values always hold public names |
-| `IMAGE_MIRROR_NAMESPACE` | `agentcert` | Docker Hub namespace of those frozen copies (made by `scripts/mirror-images.sh` with `IMAGE_REGISTRY` empty); `none` pulls upstream directly |
+| `IMAGE_MIRROR_NAMESPACE` | `agentcert` | Docker Hub namespace of those frozen copies (made by `scripts/mirror-images.sh --push` with `IMAGE_REGISTRY` empty); `none` pulls upstream directly |
 | `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | *(empty)* | credentials for `IMAGE_REGISTRY` (a JFrog access token goes in the password); with it empty, optional Docker Hub credentials for pushes and rate limits |
 | `IMAGE_PULL_SECRET_NAME` | `registry-pull` | Kubernetes image-pull Secret holding those credentials (only when `IMAGE_REGISTRY` is set) |
 | `PLATFORM_IMAGE_SOURCE` | `local` | auth, graphql, web, certifier, subscriber … — `local` builds them from this checkout on `--restart` |
@@ -295,7 +295,7 @@ For a disconnected client, prepare a bundle once on a connected build host:
 RUNTIME_IMAGES_EXPORT_PATH=/absolute/path/ace-runtime-images.tar
 ```
 
-Run `./scripts/prepare-images.sh` successfully, deliver the resulting archive with the checkout, then set this on the client before `./scripts/setup.sh --restart`:
+Run `./scripts/prepare-images.sh --deploy` successfully (without `--deploy` it only builds the ACE images and writes no archive), deliver the resulting archive with the checkout, then set this on the client before `./scripts/setup.sh --restart`:
 
 ```dotenv
 RUNTIME_IMAGES_ARCHIVE=/absolute/path/ace-runtime-images.tar

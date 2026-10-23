@@ -19,9 +19,9 @@
 #   OK       present at the expected name (and, for ACE images, built from the
 #            current source revision)
 #   OLD      ACE image present but built from a different revision than this
-#            checkout — re-run scripts/build-and-push.sh
-#   MISSING  not present — run scripts/mirror-images.sh (third-party) or
-#            scripts/build-and-push.sh (ACE images)
+#            checkout — re-run scripts/build-and-push.sh --push
+#   MISSING  not present — run scripts/mirror-images.sh --push (third-party) or
+#            scripts/build-and-push.sh --push (ACE images)
 #
 # Exit status: 0 when every row is OK, 1 otherwise.
 # =============================================================================
@@ -134,7 +134,7 @@ if [[ -n "${MARKDOWN_OUT}" ]]; then
         echo "- **OK**: present at the expected name (ACE images: built from the current source)."
         echo "- **OLD**: ACE image whose moving tag (\`:latest\`) is an older build; the current build is linked as *new build*."
         echo "- **MISSING**: not in the registry."
-        echo "- **build** = built from this repo by \`scripts/build-and-push.sh\`; **mirror** = third-party copy made by \`scripts/mirror-images.sh\`."
+        echo "- **build** = built from this repo and published by \`scripts/build-and-push.sh --push\`; **mirror** = third-party copy published by \`scripts/mirror-images.sh --push\`."
         echo
         echo "| Status | Kind | Group | Image | Registry location |"
         echo "|---|---|---|---|---|"

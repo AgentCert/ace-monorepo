@@ -18,13 +18,15 @@ This guide covers three things:
 | Install | `./scripts/setup.sh --deploy` | Yes (the wizard) |
 | Restart | `./scripts/setup.sh --restart [--local-build]` | No, it reuses `.env` |
 
-### 1.1 Preparation (runs in both modes)
+Publishing images during an install or restart additionally needs `--push` (for example `./scripts/setup.sh --deploy --push`).
+
+### 1.1 Preparation (runs in both install modes)
 
 | Step | What happens | Code |
 |---|---|---|
 | Paths | `REPO_ROOT` is resolved to the physical path (`pwd -P`), so `/home/x` and `/Innovation/home/x` count as the same checkout | top of `setup.sh` |
 | Shared helpers | Loads the image naming rule and registry login helpers | `source scripts/lib/registry.sh` |
-| Flags | `--setup`, `--restart`, `--local-build`, `--rootless-docker`, `--agent=…` | argument loop |
+| Flags | `--deploy` (alias `--setup`), `--restart`, `--push`, `--local-build`, `--rootless-docker`, `--agent=…` (the last two need `--deploy` or `--restart`) | argument loop |
 | KUBECONFIG | Fixed to `${KUBECONFIG:-~/.kube/config}`, so `kubectl` and `helm` always talk to the same cluster | "Pin KUBECONFIG" |
 | Prerequisites | Checks docker, git, kind, kubectl, helm and prints install commands for anything missing | `scripts/check-prerequisites.sh` |
 | Submodules | Initialises any submodule that is still empty | `ensure_submodules_initialized` |
@@ -34,14 +36,14 @@ This guide covers three things:
 | Fill in per-checkout values | `ACE_INSTANCE_NAME` (from your login), `HOST_KUBE_DIR`, `OLLAMA_PORT`, `AGENT_CHARTS_ROOT` / `APP_CHARTS_ROOT`, `ACE_KIND_LOAD_TMPDIR` | blocks after the rootless section; `configure_kind_load_tmpdir` |
 | Migrate old `.env` keys | `JFROG_*` / `DOCKERHUB_*` → `IMAGE_REGISTRY` + `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`; `*_IMAGE_SOURCE=jfrog\|dockerhub` → `registry` | "Image registry settings now live in one place" |
 | Image drift warning | Warns when a `:latest` image changed upstream since the last deploy | `check_image_drift` (uses `deploy/image-baseline.tsv`) |
-| Image list | The 12 images setup can build (`ALL_BUILD_IMAGES`) | `declare -a ALL_BUILD_IMAGES` |
+| Image list | Every `build` row of `deploy/images.txt` (`ALL_BUILD_IMAGES`, generated from the inventory) | `declare -a ALL_BUILD_IMAGES` |
 
 ### 1.2 The wizard (setup mode only)
 
 The questions are asked in this order. Answers are written to `.env` in the "write values" block.
 
 1. Setup style: **e** (all questions now) or **g** (section by section)
-2. **Build images?** `p` = build and push, `l` = build some locally, **`A`/Enter** = build everything locally, `n` = skip and pull from the registry. This sets `PLATFORM_IMAGE_SOURCE`.
+2. **Build images?** `p` = build and push (needs `--push` on the command line), `l` = build some locally, **`A`/Enter** = build everything locally, `n` = skip and pull from the registry. This sets `PLATFORM_IMAGE_SOURCE`.
 3. Experiment image sources: `l`/`r` for install-app, install-agent and workflow runtime images. Skipped when you chose `A`. This sets `INSTALL_APP_IMAGE_SOURCE`, `INSTALL_AGENT_IMAGE_SOURCE` and `LITMUS_IMAGES_SOURCE`.
 4. **IMAGE_REGISTRY**, plus username and token when it is set (`ask_image_registry`)
 5. LLM providers: Azure OpenAI, Gemini, OpenRouter, Ollama
@@ -58,7 +60,7 @@ In restart mode none of these are asked. `CLUSTER_MODE`, `PLATFORM_IMAGE_SOURCE`
 | LiteLLM config | Adds the chosen Ollama model to `litellm_config.yaml` | "patch litellm_config.yaml" |
 | Ollama | Starts this checkout's Ollama container and pulls the model in the background | `start-local-services.sh --deploy --only-ollama` |
 | kind pre-warm | Express mode only: creates the kind cluster in the background while images build | "Pre-warm KinD cluster" → `ensure_kind_cluster` |
-| Build | Builds the selected images in parallel, at most half the CPUs at once. Logs go to `.tmp/build-logs/<n>.log`. Base images come from the registry (`docker_build_resolved`). With `p` it also pushes them. Any failure stops setup. | "build (push to the image registry or local)" |
+| Build | Builds the selected images in parallel, at most half the CPUs at once. Logs go to `.tmp/build-logs/<n>.log`. Base images come from the registry (`docker_build_resolved`). With `p` (and `--push`) it also pushes them. Any failure stops setup. | "build (push to the image registry or local)" |
 | Deploy | `helm_deploy` (default) or `k8s_deploy` | `case "${deploy_choice,,}"` |
 | MongoDB restore | Wizard only: offers a `shut_down.sh` backup (the default is an empty database) | `offer_mongodb_restore` |
 | Experiment images | Builds or loads the experiment images whose source is `local` | `scripts/prepare-images.sh --deploy` (run in the background during deploy) |
@@ -185,7 +187,7 @@ What `build-and-push.sh` does for each `build` row of `deploy/images.txt`:
 1. It works out the source revision (git commit of the image's folder, with `-dirty` if there are uncommitted changes). With `--committed-only`, a dirty folder is exported from `HEAD` into `.tmp/build-src` and built from there; the working tree is not touched.
 2. It builds with `--no-cache`. Base images come from the registry (`docker_build_resolved` turns each `ARG <NAME>_IMAGE=` in the Dockerfile into a registry name). The image gets the label `org.opencontainers.image.revision=<revision>`. With `--reuse-local`, a local image with the same label is reused instead of rebuilt.
 3. With `--push`, it pushes `…/agentcert/<image>:<revision>` first, then `…/agentcert/<image>:RELEASE-2` (the name comes from `registry_ref`, which applies `ACE_IMAGE_TAG`).
-   - If a tag already exists with the same revision, it is kept.
+   - An existing release tag is only re-pushed from the same clean commit (the script compares the image's revision label).
    - If it exists with a different build, the script reports *"already exists with a different build — use a new release number"* and fails.
 4. When every image was pushed and `--only` was not used, it writes **`ACE_IMAGE_TAG=RELEASE-2` into `.env`**.
 
@@ -218,12 +220,12 @@ Third-party images are pinned. A change means a new tag, never overwriting the o
    ```
 4. Copy the image into both registries. Images that are already present are skipped, so re-running is cheap.
    ```bash
-   ./scripts/mirror-images.sh --dry-run          # show what would be copied to JFrog
-   ./scripts/mirror-images.sh                    # → …/docker-local/agentcert/<public name>
-   IMAGE_REGISTRY= ./scripts/mirror-images.sh    # → docker.io/agentcert/<flat name>
+   ./scripts/mirror-images.sh --dry-run                 # show what would be copied to JFrog
+   ./scripts/mirror-images.sh --push                    # → …/docker-local/agentcert/<public name>
+   IMAGE_REGISTRY= ./scripts/mirror-images.sh --push    # → docker.io/agentcert/<flat name>
    ./scripts/check-registry-images.sh --kind mirror   # expect 0 MISSING
    ```
-5. Commit. Deployments pick the new image up on the next `setup.sh`.
+5. Commit. Deployments pick the new image up on the next `setup.sh --deploy` or `--restart`.
 
 `mirror-images.sh` pulls each upstream image for `linux/amd64`, tags it with the target name and caches it locally. `--push` explicitly publishes it. `--only REGEX`, `--jobs N` and `--force` (copy again even if present) are available.
 
@@ -233,10 +235,10 @@ Third-party images are pinned. A change means a new tag, never overwriting the o
 
 Everything follows from **one line in `.env`**: `ACE_IMAGE_TAG=RELEASE-N`.
 
-- `build-and-push.sh --tag` writes it on the machine that published.
+- `build-and-push.sh --push --tag` writes it on the machine that published.
 - On any other machine (for example Azure), set it by hand.
 
-Then run `./scripts/setup.sh` (or `--restart`). Each part of the platform gets the tag this way:
+Then run `./scripts/setup.sh --deploy` (or `--restart`). Each part of the platform gets the tag this way:
 
 | Part | How the tag reaches it | Code |
 |---|---|---|

@@ -77,10 +77,10 @@ Whoever has Docker Hub push access to the `agentcert` org runs:
 
 ```bash
 # From the repo root
-./scripts/build-and-push.sh
+./scripts/build-and-push.sh --push
 ```
 
-This builds and pushes all 5 images. If you only want the affected ones:
+This builds and pushes every ACE image (without `--push` it only builds them locally). If you only want the affected ones:
 
 ```bash
 # Flash-agent (routing fix)

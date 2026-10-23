@@ -10189,3 +10189,54 @@ The user hand-patched the chart. Rendering their diff against HEAD with setup's 
 - Clusters whose policy *denies* (not audits) privileged pods or missing resource limits: the Litmus privileged faults, and the absent `resources` on platform and workflow pods (needs `kubectl get constraints` from the cluster).
 - An ACR attach-mode without registry credentials.
 - Duplicate app NodePorts 31090/31687 across sock-shop, bookinfo and otel-demo.
+
+### §142 — Pre-push review of the safe-by-default modes, typed fault configuration and registry library; review fixes across the monorepo and 8 submodules (2026-10-23, committed; images not rebuilt)
+
+**Trigger:** before pushing the monorepo (2a2a4bb "safe-by-default build/install modes", merge 6473816, 486d971) and 8 submodules, five parallel reviews covered AgentCert, chaos-charts, the six small submodules, the core setup scripts, and harness/azure_build/docs. Every finding below was checked against the code before it was fixed.
+
+**Blockers found**
+1. `go1.24.0.linux-amd64.tar.gz` (78 MB) was committed at the repo root in 2a2a4bb. It is the Go 1.24.0 toolchain download left over from installing Go to `/usr/local/go` (same version), swept in by `git add`; nothing references it. With the user's go-ahead it was removed from the four unpushed commits (`git filter-branch --index-filter 'git rm --cached --ignore-unmatch go1.24.0.linux-amd64.tar.gz' -- origin/stable_it_bench..HEAD`), so 2a2a4bb/6473816/486d971 became aa171ec/08e51bc/51501cc with otherwise identical trees. `/go*.tar.gz` is now ignored, and the local file was deleted.
+2. Typed fault configuration (AgentCert d54d3a5) rejected existing work on save, manual run, cron submit and multi-run dispatch:
+   - legacy engines carrying variables fault.yaml does not declare (CHAOS_KILL_COMMAND on pod-cpu-hog/pod-memory-hog in all 6 sock-shop hub workflows);
+   - ConfigMap-backed workflow parameters (`socketPath`), left as `{{…}}` and rejected by the `{{` rule;
+   - three ITBench faults whose directory name differs from fault.yaml `metadata.name` (`modified-kubernetes-workload-container-environment-variable` → `modified-container-environment-variable`, and two more): the UI stamps the directory name and the server compared it to the experiment name;
+   - any hub revision change (CSV description, keyword) broke every annotated experiment, and the multi-run reconciler only logged a retry.
+3. Range syntax: litmus-go `ValidateRange` accepts `lo-hi`, but ~30 settings were declared `integer`, so `PODS_AFFECTED_PERC=50-100` was rejected.
+
+**Root causes:** the fault-configuration validator treated "has a schema" as "built from this exact schema". The safe-by-default commit changed CLI semantics without updating the wizard's `p` option, the `--restart` policy path, hints and docs. Component Makefiles reused `registry_ref`, which applies ACE_IMAGE_TAG.
+
+| Area | Commit | Files | Change |
+|---|---|---|---|
+| Fault validation | AgentCert 4c1b2e8 | `pkg/faultconfig/{config,workflow,targets}.go` | Strict `ValidateEnvironment` only when the annotation's revision equals the current definition. Otherwise (legacy or older revision) `validateDeclaredSettings`: declared literals only; valueFrom and `{{` values skipped; undeclared or hidden variables accepted. `Definition.Experiment` = fault.yaml `metadata.name`, compared against the engine's experiment. `MaterializeTargets`: `pod` stays in appinfo (TARGETS uses pod names, not labels; cluster detection maps pod → workload), and a non-workload kind with an empty selector clears appinfo instead of refusing the run (otel-demo-itbench scenarios 1/3/52). `Load`/`Parse`: missing CSV/fault.yaml, non-ChaosExperiment and repeated env are errors only with a schema. |
+| Fault UI | AgentCert 4c1b2e8 | `ExperimentCreationChaosFaults.tsx`, `ExperimentCreationFaultConfiguration.tsx`, `strings.en.yaml` | Stamp the source only when `configurations` is non-null (schema-less faults keep the 30 s ON_DEMAND clamp). A changed definition is shown, no longer blocks Apply. |
+| Tests | AgentCert 4c1b2e8 | `config_test.go`, `targets_test.go`, `chaoshub/fault_configuration_test.go` | `TestHubExperimentsValidate` (real `ValidateWorkflow` over every `chaos-charts/experiments/*/experiment*.yaml`), `TestLegacyWorkflowsKeepRunning`, `TestSourceMatchesFaultExperimentName`, `TestFaultsWithoutSchemaAreNotHeldToSchemaRules`, revision cases, selector-less target. Mutation check: restoring strict legacy validation fails the hub test (SOCKET_PATH `{{`) and the legacy test. `go.mod`: golang-lru/v2 direct. |
+| Fault schemas | chaos-charts 45c80eb | 23 `*.chartserviceversion.yaml`, 6 sock-shop experiments | Range-capable settings → string + anchored pattern where that fault's chaoslib calls ValidateRange. netem loss/corruption/duplication → `number` (decimals; a range reaches `tc` before ValidateRange). SEQUENCE `random` in 19 faults. FLAG_STATE/FLAG_REVERT_STATE → string. SSH_USER and TARGET_NODE_IP offered behind shell-safe patterns (node-restart/poweroff; REBOOT_COMMAND pinned). STATUS_CODE allows spaces. STRESS_IMAGE/TC_IMAGE/APP_KIND (unread) removed. CHAOS_KILL_COMMAND removed from the sock-shop workflows. 60 faults / 446 fields. |
+| Runner | litmus-go ec1dd322 | `pkg/utils/common/common.go` | Reversed range swaps bounds instead of panicking in `rand.Intn`. Kubernetes faults run the mirrored upstream go-runner, so reversed ranges there still fail that step (descriptions say lower bound first). |
+| Component push | certifier a61d744, agent-charts 748de13, agent-sidecar 0b2173c, app-charts d3810fc, root `agents/flash-agent/Makefile` | Makefiles | `ACE_PUSH` clears ACE_IMAGE_TAG, so `make push` pushes IMAGE_TAG and never overwrites a release tag (proved: `:RELEASE-3` before, `:latest` after). Dockerfile/context/`$(MAKE) -f` anchored to the Makefile: from the repo root, `make -f <component>/Makefile build-push` used to run the ROOT Makefile's `push`, publishing every image. Builds log in when IMAGE_REGISTRY is set. |
+| App charts | app-charts d3810fc | `charts/sock-shop/values.yaml` | front-end LoadBalancer → NodePort 30001 (Azure Policy denies public LBs; bookinfo got the same fix in 056cf5e). |
+| LiteLLM | agentcert-stack 8d2ef82 | `litellm-setup/build-litellm.sh` | `.env` gets the public `litellm/litellm:<v>-stable`, not the resolved ref (which was re-resolved by every reader); login before the default-mode pull; standalone guard. |
+| setup.sh | this commit | `scripts/setup.sh` | `p` without `--push` exits 2 at the prompt, before credentials, `.env`, Ollama or the KinD pre-warm (`refuse_publish_without_push`, `abort_setup` reaps the pre-warm). `--restart` with saved `push` and no `--push` deploys what is published (was: exit 2 forever). The KinD push path goes through `build-and-push.sh --push --only` (guard + revision label). The local build list skips the hub bundle (prepare-images owns it) and itbench unless its source is local. Hints fixed. |
+| Release guard | this commit | `scripts/build-and-push.sh`, `scripts/lib/registry.sh` | Checks every selected image before building. An existing release tag is re-pushed only when `revision_is_exact` (clean SHA or hub `content-<sha12>`) equals the registry label; `-dirty` and `unknown` are refused. Local and `--kind-load` builds log in when IMAGE_REGISTRY is set. |
+| Mirror | this commit | `scripts/mirror-images.sh` | Local mode no longer tags upstream content under the frozen-copy name (`agentcert/mongo:5`). After `--push` it removes only the copies this run created. |
+| Misc scripts | this commit | `prepare-images.sh`, `start-local-services.sh`, harness `setup.sh` ×7, root `Makefile`, `azure_build/*`, `compose/web/Dockerfile`, `check-registry-images.sh` | `ACE_BUILD_NETWORK` governs prepare-images builds (hardcoded host removed). `--pull-certifier` without `--deploy` → exit 2. a2a harness creates its venv by default (`ace-bench.py` calls it without arguments). sre-agent-qwen accepts `--install`. Harness builds log in. `SETUP_ARGS` for `make install`. Deploy-mode `--help`. Web image: no baked nginx.conf, EXPOSE 2001 (every deployment mounts its own config). |
+| Docs | this commit + submodule READMEs | README, CONTRIBUTING, CLAUDE.md, `.env.example` (comments), `docs/setup/*`, `docs/platform/{fault-configuration,certification-flow}.md`, `docs_2/SCRIPTS_GUIDE.md`, `.claude/skills/*`, agents docs | Every invocation follows the modes (`--deploy`, `--push`, `--deploy --push` for wizard publishing). Host-specific evidence removed. CLAUDE.md image-source table updated (`local`/`registry`). fault-configuration.md documents ranges and the validation policy. |
+| Tests | this commit | `scripts/tests/*` | Hermetic: temp env files, never the real `.env`. New: guard refusals, restart push policy, prompt refusal + pre-warm reap, mirror cleanup, login order, Makefile anchoring and push tag, a2a venv. |
+
+**Verified (offline):**
+- `test-script-modes.py` 153 passed (was 104).
+- `test-registry-tooling.sh` 151/0 (was 143). The old Dockerfile.itbench FROM failure is gone (litmus-go pointer).
+- `test-cloud-profile.sh` 66/0.
+- `sync-imageref.sh --check` in sync; `bash -n` clean on every changed script.
+- AgentCert `go build ./...` and `go test ./pkg/...` with 0 FAIL. Catalog test: "validated 60 faults and 446 configurable fields".
+- Web: jest 4 suites / 28 tests, eslint on the touched views, `tsc` 0 errors outside node_modules.
+- litmus-go `pkg/utils/common`, `pkg/types` ok.
+- The schema validator's legacy pass over `experiments/*`: 0 errors.
+- `helm template` sock-shop: front-end NodePort, 0 LoadBalancers. `deploy/` unchanged.
+
+**Not verified:** no live KinD or AKS run. graphql, web, hub-bundle, install-app and itbench images were not rebuilt, so none of this runs until they are.
+
+**Open:**
+- duplicate app NodePorts 31090/31687 across sock-shop, bookinfo and otel-demo (from §141);
+- the chartconfig empty-numeric relaxation also applies to string-typed chart integers (minor);
+- legacy lookup by name only checks the default hub;
+- app-charts 056cf5e keeps its one-word message "fix" (it sits under a merge).

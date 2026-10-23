@@ -2,14 +2,17 @@
 # ============================================================================
 # AgentCert Unified Startup Script (Linux / Azure VM)
 # ============================================================================
-# This script starts all AgentCert components in the correct order with
-# health checks to ensure stability.
+# With --deploy, starts all AgentCert components in the correct order with
+# health checks to ensure stability. Without it, only builds images.
 #
 # Usage:
-#   chmod +x start-agentcert.sh
-#   ./start-agentcert.sh
+#   run.sh [BUILD OPTIONS]
+#       Default: build all ACE images locally. BUILD OPTIONS are those of
+#       scripts/build-and-push.sh (see its --help).
+#   run.sh --deploy [DEPLOY OPTIONS]
+#       Legacy host-startup flow; prefer scripts/setup.sh --deploy.
 #
-# Options:
+# Deploy options (with --deploy):
 #   --skip-mongo    Skip MongoDB startup
 #   --skip-frontend Skip Frontend startup
 # ============================================================================
@@ -27,9 +30,9 @@ for _arg in "$@"; do
         --deploy) _deploy=true ;;
         --local) _local_requested=true; _forward+=(--local) ;;
         -h|--help)
-            echo 'Default: build all ACE images locally.'
-            echo 'Use --deploy to enter this legacy host-startup flow; prefer scripts/setup.sh --deploy.'
-            echo 'Build-only options are those of scripts/build-and-push.sh.'
+            # Both modes, from the header above: --deploy's options are only
+            # discoverable here, since build mode hands off to build-and-push.sh.
+            sed -n '/^# Usage:/,/^# =====/{/^# =====/d; s/^# \{0,1\}//; p; }' "${BASH_SOURCE[0]}"
             exit 0 ;;
         *) _forward+=("$_arg") ;;
     esac

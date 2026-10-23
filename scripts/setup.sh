@@ -7,17 +7,25 @@ set -euo pipefail
 # Creates and fills the monorepo-root .env for a brand-new user, prompting ONLY
 # for what actually matters (Azure OpenAI) and defaulting everything else.
 #
-#   ./scripts/setup.sh                  # build all images locally
-#   ./scripts/setup.sh --deploy         # configure and deploy
+#   ./scripts/setup.sh                  # build all images locally, then exit
+#   ./scripts/setup.sh --deploy         # configure and deploy (wizard; = --setup)
+#   ./scripts/setup.sh --restart        # re-deploy the saved .env, no wizard
+#   ./scripts/setup.sh --deploy --push  # ... and allow the wizard's "p" (publish)
+#
+# Without --deploy/--restart nothing touches .env, a registry or a cluster.
+# Publishing additionally needs --push: without it the wizard's "p" stops at
+# once with the command to re-run, and a saved PLATFORM_IMAGE_SOURCE=push
+# makes --restart deploy the images already published instead of publishing.
 #
 # Idempotent: re-run any time. It reads your current .env (or .env.example) for
 # defaults, so pressing Enter keeps the existing value. Nothing is committed —
 # .env is gitignored.
 #
-#   ./scripts/setup.sh --rootless-docker            (combine with --setup, the default)
+#   ./scripts/setup.sh --deploy --rootless-docker
 #   ./scripts/setup.sh --restart --rootless-docker
 #
-# Modifier flag, not a standalone action: bootstraps a private, per-user
+# Modifier flag, not a standalone action (it requires --deploy or --restart):
+# bootstraps a private, per-user
 # rootless Docker daemon and switches the Docker CLI's default context to it
 # — so this checkout's containers/images/volumes/KinD cluster land under
 # $HOME/.local/share/docker instead of the shared host daemon's data-root —
@@ -26,17 +34,17 @@ set -euo pipefail
 # on other users' containers on this shared host — see CLAUDE.md section 6,
 # "Personal rootless Docker (avoiding the shared host's data-root)".
 #
-# Plain `./scripts/setup.sh` (--setup, no flag) asks this as a y/N question
+# `./scripts/setup.sh --deploy` without the flag asks this as a y/N question
 # instead, right at the start, before anything else. `--restart` never asks —
 # it skips all prompts by design — so pass the flag explicitly there.
 #
-#   ./scripts/setup.sh --agent=<name>
+#   ./scripts/setup.sh --deploy --agent=<name>
 #   ./scripts/setup.sh --restart --agent=<name>
 #
 # Sets BENCHMARK_AGENT in .env — which agent (a subfolder of agents/, e.g.
 # flash-agent, ciso-agent, sre-agent, sre-agent-crewai) `scripts/ace-bench.py`
 # should target. Pre-answers the interactive "Agent to benchmark" question
-# asked during --setup; combine with --restart to switch it with no other
+# asked by the --deploy wizard; combine with --restart to switch it with no other
 # prompts. Invalid names (anything not a folder under agents/) fail fast with
 # the list of valid choices.
 # =============================================================================
@@ -80,6 +88,17 @@ BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED=
 say()  { echo -e "$*"; }
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
 warn() { echo -e "${YELLOW}!${NC} $*"; }
+
+# abort_setup [STATUS] — exit, first reaping the express-mode background KinD
+# pre-warm (_KIND_PREWARM_PID, started before the builds) so a retry cannot
+# race an orphaned `kind create cluster`. Every exit after that job may have
+# started goes through here.
+abort_setup() {
+    if [[ -n "${_KIND_PREWARM_PID:-}" ]]; then
+        wait "${_KIND_PREWARM_PID}" || true
+    fi
+    exit "${1:-1}"
+}
 
 # Parse arguments before checking prerequisites or touching .env. In
 # particular, --help must be safe to run from a newly cloned checkout.
@@ -392,8 +411,10 @@ agent_is_available() {
 }
 
 # --- Invocation mode ----------------------------------------------------------
-#   --setup            (default) full first-time wizard: prompts, writes .env, deploys
+#   (no mode flag)     build every inventory image locally and exit (build-and-push.sh)
+#   --deploy / --setup full wizard: prompts, writes .env, deploys
 #   --restart          skip all prompts and .env edits; just re-apply the stack
+#   --push             allow publishing (the wizard's "p", a saved "push" policy)
 #   --rootless-docker   modifier, see header comment above; runs before --setup/--restart, does not exit
 #   --agent=<name>      pre-answers "which agent to benchmark" (BENCHMARK_AGENT in .env);
 #                       name must be a subfolder of agents/ (see AVAILABLE_AGENTS above).
@@ -504,7 +525,7 @@ if [[ "${ROOTLESS_DOCKER_ACTION}" -eq 1 ]]; then
     if ! command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
         echo "ERROR: dockerd-rootless-setuptool.sh not found (docker-ce-rootless-extras package)." >&2
         echo "ERROR: this is a one-time host-admin install (needs sudo): sudo apt install -y docker-ce-rootless-extras" >&2
-        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --${SETUP_MODE/setup/deploy} --rootless-docker" >&2
         exit 1
     fi
     if ! grep -q "^$(id -un):" /etc/subuid 2>/dev/null || ! grep -q "^$(id -un):" /etc/subgid 2>/dev/null; then
@@ -521,7 +542,7 @@ if [[ "${ROOTLESS_DOCKER_ACTION}" -eq 1 ]]; then
     if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
         echo "ERROR: newuidmap/newgidmap not found (uidmap package) — required for rootless Docker." >&2
         echo "ERROR: this is a one-time host-admin install (needs sudo): sudo apt install -y uidmap" >&2
-        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+        echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --${SETUP_MODE/setup/deploy} --rootless-docker" >&2
         exit 1
     fi
 
@@ -598,7 +619,7 @@ Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_MTU=${_rootless_mtu}
         if ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
             echo "ERROR: linger is not enabled for $(id -un) — the rootless daemon would stop at logout, silently killing anything running under it (KinD cluster, Ollama, an in-progress N=30 run)." >&2
             echo "ERROR: this is a one-time host-admin step (needs sudo): sudo loginctl enable-linger $(id -un)" >&2
-            echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --rootless-docker" >&2
+            echo "ERROR: ask a host admin, then re-run ./scripts/setup.sh --${SETUP_MODE/setup/deploy} --rootless-docker" >&2
             exit 1
         fi
     fi
@@ -1275,18 +1296,30 @@ detect_k3s_gw() {
 _SUBSCRIBER_IMAGE_TAG="$(cur SUBSCRIBER_IMAGE)"
 _SUBSCRIBER_IMAGE_TAG="${_SUBSCRIBER_IMAGE_TAG:-agentcert/litmusportal-subscriber:3.0.0}"
 
-# Image build definitions — available to both --setup (interactive) and --restart --local-build
+# Image build definitions — available to both --setup (interactive) and --restart --local-build.
+# The images setup.sh builds itself: every "build" row of deploy/images.txt
+# except two that the deployment does not need from this loop:
+#   * the hub bundle (recipe hub-bundle): prepare-images.sh owns it — it builds
+#     HUB_BUNDLE_IMAGE (default :local, not the inventory's :latest) and
+#     side-loads it (prepare_hub_bundle_for_deploy), so building it here only
+#     built it twice;
+#   * the ITBench runner, unless ITBENCH_EXPERIMENT_IMAGE_SOURCE is local
+#     (prepare-images.sh's default when unset): with "registry" the cluster
+#     pulls it, so a local build is wasted work whose failure aborts setup.
+# Publishing (build-and-push.sh --push, "Publish" below) uses the inventory
+# itself, so a cloud publish still covers every image, these two included.
 declare -a ALL_BUILD_IMAGES=()
 _build_num=0
+_itbench_src="$(image_source_normalize "$(cur ITBENCH_EXPERIMENT_IMAGE_SOURCE)")"
 while IFS='|' read -r _kind _group _image _ctx _recipe _flags; do
-    _build_num=$(( _build_num + 1 ))
+    [[ "${_recipe}" == hub-bundle ]] && continue
     _label="${_image#agentcert/}"; _label="${_label%:*}"; _label="${_label#agentcert-}"
-    _method=direct
-    [[ "${_recipe}" == hub-bundle ]] && _method=hub-bundle
+    [[ "${_label}" == itbench-experiment && "${_itbench_src:-local}" != local ]] && continue
+    _build_num=$(( _build_num + 1 ))
     [[ "${_label}" == litmusportal-subscriber ]] && _image="${_SUBSCRIBER_IMAGE_TAG}"
-    ALL_BUILD_IMAGES+=("${_build_num}|${_label}|${_image}|${REPO_ROOT}/${_ctx}|${_recipe}|${_method}")
+    ALL_BUILD_IMAGES+=("${_build_num}|${_label}|${_image}|${REPO_ROOT}/${_ctx}|${_recipe}|direct")
 done < <(inventory_rows "${REPO_ROOT}/deploy/images.txt" build)
-unset _build_num _kind _group _image _ctx _recipe _flags _label _method
+unset _build_num _kind _group _image _ctx _recipe _flags _label _itbench_src
 
 
 if [[ "$SETUP_MODE" == "restart" ]]; then
@@ -1317,13 +1350,24 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
                 SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
                 ;;
             push)
-                DH_USER="$(cur REGISTRY_USERNAME)"
-                DH_TOKEN="$(cur REGISTRY_PASSWORD)"
-                if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
-                    DO_BUILD=1
-                    SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+                # Publishing needs --push on every run, also when the saved
+                # policy is "push": without it this run deploys what is
+                # already published (as "skip" would) and .env is left as is,
+                # so a later `--restart --push` publishes again.
+                if [[ "${PUSH_IMAGES}" -ne 1 ]]; then
+                    _saved_registry="$(cur IMAGE_REGISTRY)"
+                    warn "Saved image policy is 'push', but this run will not publish (add --push to publish)."
+                    warn "Deploying the ACE images already in ${_saved_registry:-Docker Hub} / the cluster."
+                    unset _saved_registry
                 else
-                    warn "PLATFORM_IMAGE_SOURCE=push but REGISTRY_USERNAME/REGISTRY_PASSWORD not set — skipping build."
+                    DH_USER="$(cur REGISTRY_USERNAME)"
+                    DH_TOKEN="$(cur REGISTRY_PASSWORD)"
+                    if [[ -n "${DH_USER}" && -n "${DH_TOKEN}" ]]; then
+                        DO_BUILD=1
+                        SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}")
+                    else
+                        warn "PLATFORM_IMAGE_SOURCE=push but REGISTRY_USERNAME/REGISTRY_PASSWORD not set — skipping build."
+                    fi
                 fi
                 ;;
         esac
@@ -1362,7 +1406,11 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
                 if [[ ${#_stale_images[@]} -gt 0 ]]; then
                     warn "Source changed since the last local build for: ${_stale_images[*]} — the currently running image(s) are stale."
                     warn "This --restart isn't rebuilding anything (image policy: ${PLATFORM_IMAGE_SOURCE}). To pick up the change:"
-                    warn "  ./scripts/setup.sh --restart --local-build"
+                    if [[ "${PLATFORM_IMAGE_SOURCE}" == push ]]; then
+                        warn "  ./scripts/setup.sh --restart --push   (publish this checkout, then deploy it)"
+                    else
+                        warn "  ./scripts/setup.sh --restart --local-build"
+                    fi
                 fi
                 unset _stale_images
             fi
@@ -1500,21 +1548,37 @@ ask_cluster_mode() {
     echo
 }
 
+# Publishing is opt-in: only a run with --push publishes. The wizard still
+# lists "p", marked as needing --push, and choosing it without the flag stops
+# right there — before credentials are asked or PLATFORM_IMAGE_SOURCE is
+# saved, and before Ollama or a background KinD cluster is started — instead
+# of after every question has been answered.
+publish_choice_note() {
+    [[ "${PUSH_IMAGES}" -eq 1 ]] || printf '%b' "  ${YELLOW}(requires --push)${NC}"
+}
+refuse_publish_without_push() {
+    [[ "${PUSH_IMAGES}" -eq 1 ]] && return 0
+    echo "ERROR: publishing images requires --push. Nothing was built or published by this choice, and the saved image policy is unchanged." >&2
+    echo "ERROR: re-run with: ./scripts/setup.sh --deploy --push   (or choose an option that does not publish)" >&2
+    abort_setup 2
+}
+
 # Build question for a cloud cluster. It pulls every image from the registry,
 # so the choice is between images already published there and publishing this
-# checkout first (all ACE images, see "Cloud: publish" below). Also asks which
+# checkout first (all ACE images, see "Publish this checkout's images" below). Also asks which
 # release tag to use. Sets the same DO_BUILD / DH_* variables as the KinD menu.
 ask_cloud_build_choice() {
     local reply tag
     echo -e "${BOLD}▸ Images${NC}  ${DIM}a cloud cluster pulls every image from ${_PUSH_TARGET_LABEL}; images built on this machine cannot be loaded into it${NC}"
     echo -e "   ${BOLD}n${NC}  use the images already published there ${DIM}(default)${NC}"
-    echo -e "   ${BOLD}p${NC}  build this checkout and push all ACE images there first"
+    echo -e "   ${BOLD}p${NC}  build this checkout and push all ACE images there first$(publish_choice_note)"
     read -rp "  Choice [p/N]: " reply
     DO_BUILD=0; DO_LOCAL_BUILD=0; DH_USER=""; DH_TOKEN=""; _ALL_LOCAL=0
     SELECTED_BUILD_IMAGES=()
     case "${reply,,}" in
         ""|n) ;;
-        p)  DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
+        p)  refuse_publish_without_push
+            DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
             DH_TOKEN="$(ask REGISTRY_PASSWORD "Registry password / token (${_PUSH_TARGET_LABEL})")"
             DH_USER="$(printf '%s' "${DH_USER}" | tr -d '[:space:]')"
             DH_TOKEN="$(printf '%s' "${DH_TOKEN}" | tr -d '[:space:]')"
@@ -1570,12 +1634,13 @@ if [[ $EXPRESS_MODE -eq 1 ]]; then
         ask_cloud_build_choice
         _eb="cloud"
     else
-        echo -e "${BOLD}▸ Build images?${NC}  p=push to ${_PUSH_TARGET_LABEL}  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
+        echo -e "${BOLD}▸ Build images?${NC}  p=push to ${_PUSH_TARGET_LABEL}$(publish_choice_note)  l=build locally  a=build ALL locally (platform + experiment images)  n=skip"
         read -rp "  Choice [p/l/A/n]: " _eb
     fi
     case "${_eb,,}" in
         "") DO_LOCAL_BUILD=1; SELECTED_BUILD_IMAGES=("${ALL_BUILD_IMAGES[@]}"); _ALL_LOCAL=1 ;;
-        p)  DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
+        p)  refuse_publish_without_push
+            DH_USER="$(ask REGISTRY_USERNAME "Registry username (${_PUSH_TARGET_LABEL})")"
             DH_TOKEN="$(ask REGISTRY_PASSWORD "Registry password / token (${_PUSH_TARGET_LABEL})")"
             DH_USER="$(echo "${DH_USER}" | tr -d '[:space:]')"
             DH_TOKEN="$(echo "${DH_TOKEN}" | tr -d '[:space:]')"
@@ -1725,7 +1790,7 @@ elif [[ "${CLUSTER_MODE}" == cloud ]]; then
     ask_cloud_build_choice
 else
     echo -e "${BOLD}Build Docker images?${NC}"
-    echo -e "   ${BOLD}p${NC}  Build and push to ${_PUSH_TARGET_LABEL}"
+    echo -e "   ${BOLD}p${NC}  Build and push to ${_PUSH_TARGET_LABEL}$(publish_choice_note)"
     echo -e "   ${BOLD}l${NC}  Build locally only  ${DIM}(loads into KinD; registry auth may be needed for base images)${NC}"
     echo -e "   ${BOLD}a${NC}  Build ALL locally   ${DIM}(platform + experiment images — also auto-fills and skips the image-source questions below)${NC}"
     echo -e "   ${BOLD}n${NC}  Skip"
@@ -1733,7 +1798,7 @@ else
     _sel_mode="none"
     case "${_build_ans,,}" in
         "") _sel_mode="local"; _ALL_LOCAL=1 ;;
-        p) _sel_mode="push"  ;;
+        p) refuse_publish_without_push; _sel_mode="push" ;;
         l) _sel_mode="local" ;;
         a) _sel_mode="local"; _ALL_LOCAL=1 ;;
     esac
@@ -1801,7 +1866,7 @@ if [[ "$SETUP_MODE" == "setup" && $EXPRESS_MODE -eq 0 ]]; then
     echo -e "   ${DIM}overriding whatever image the ChaosHub template carries.${NC}"
     echo
     echo -e "   ${BOLD}l${NC}  Local build  ${DIM}build from source in this repo, loaded into KinD — matches this checkout (recommended)${NC}"
-    echo -e "   ${BOLD}r${NC}  Registry     ${DIM}pull at run time from ${_PUSH_TARGET_LABEL} — publish with scripts/build-and-push.sh first${NC}"
+    echo -e "   ${BOLD}r${NC}  Registry     ${DIM}pull at run time from ${_PUSH_TARGET_LABEL} — publish with scripts/build-and-push.sh --push first${NC}"
     echo
     read -rp "$(echo -e "  install-application  ${DIM}(agentcert-install-app)   [l/r, Enter=l]${NC}: ")" _ans
     _INSTALL_APP_SRC="$(image_source_choice "${_ans}")"
@@ -2258,7 +2323,7 @@ echo -e "  Cluster mode      : ${BOLD}${CLUSTER_MODE}${NC}"
 echo -e "  Infra             : MongoDB + Langfuse + LiteLLM run locally ${DIM}(defaults; edit .env to change)${NC}"
 echo -e "${CYAN}-------------------------------------------------------${NC}"
 echo
-echo -e "Next:  ${BOLD}./scripts/setup.sh${NC} then answer Y to deploy, or run ${BOLD}kubectl get pods -n ace${NC}"
+echo -e "Next:  image builds and the deployment continue below; afterwards check ${BOLD}kubectl get pods -n ace${NC}"
 echo -e "       Re-deploy without re-entering values: ${BOLD}./scripts/setup.sh --restart${NC}"
 echo -e "       Run the benchmark: ${BOLD}python scripts/ace-bench.py ${BENCHMARK_AGENT}${NC}"
 echo -e "       Switch the benchmark agent: ${BOLD}./scripts/setup.sh --restart --agent=<name>${NC}  ${DIM}(available: ${AVAILABLE_AGENTS[*]})${NC}"
@@ -2303,7 +2368,7 @@ if [[ -n "${_ollama_tag_final}" ]]; then
         _OLLAMA_PULL_PID=$!
     else
         warn "Could not bring up ${_ollama_container} — flash-agent's Ollama route will not work until this is resolved."
-        warn "Retry with: ./scripts/start-local-services.sh --only-ollama"
+        warn "Retry with: ./scripts/start-local-services.sh --deploy --only-ollama"
     fi
     unset _ollama_container
 fi
@@ -2486,7 +2551,7 @@ preflight_registry_images() {
     if [[ -n "${missing}" ]]; then
         warn "These images are not in the registry; pods using them would fail with ImagePullBackOff:"
         sed 's/^MISSING */    /' <<<"${missing}"
-        warn "Publish them first: ./scripts/mirror-images.sh (third-party) and ./scripts/build-and-push.sh (ACE images),"
+        warn "Publish them first: ./scripts/mirror-images.sh --push (third-party) and ./scripts/build-and-push.sh --push (ACE images),"
         warn "or point ACE_IMAGE_TAG at a published release. ACE_SKIP_REGISTRY_CHECK=1 deploys anyway."
         return 1
     fi
@@ -2548,26 +2613,23 @@ apply_cluster_profile() {
 # machine, so every image must come from IMAGE_REGISTRY (or Docker Hub when it
 # is empty). Rewrites the *_IMAGE_SOURCE keys in .env, so --restart and
 # prepare-images.sh agree with what is deployed, and turns "build and push"
-# into publishing every ACE image (CLOUD_PUBLISH, see "Cloud: publish").
+# into publishing every ACE image (CLOUD_PUBLISH, see "Publish this checkout's images").
 enforce_registry_images() {
     local label key registry changed=()
     label="$(cluster_provider_label "${CLUSTER_PROVIDER}")"
     if [[ "${BUILD_MODE}" == local ]]; then
         echo "ERROR: --local-build cannot be used with ${label}: images built on this machine cannot be loaded into it." >&2
-        echo "ERROR: publish them instead (./scripts/build-and-push.sh) or re-run without --local-build." >&2
+        echo "ERROR: publish them instead (./scripts/build-and-push.sh --push, or ./scripts/setup.sh --deploy --push and choose p) or re-run without --local-build." >&2
         exit 1
     fi
     if [[ "${DO_LOCAL_BUILD:-0}" -eq 1 ]]; then
-        warn "PLATFORM_IMAGE_SOURCE=local does not apply to ${label} — using the registry images (p in the wizard publishes this checkout)."
+        warn "PLATFORM_IMAGE_SOURCE=local does not apply to ${label} — using the registry images (./scripts/setup.sh --deploy --push, then p, publishes this checkout)."
         DO_LOCAL_BUILD=0
         SELECTED_BUILD_IMAGES=()
         set_env PLATFORM_IMAGE_SOURCE skip
     fi
     if [[ "${DO_BUILD:-0}" -eq 1 ]]; then
-        if [[ "${PUSH_IMAGES:-0}" -ne 1 ]]; then
-            echo "ERROR: publishing during setup requires --push." >&2
-            exit 2
-        fi
+        refuse_publish_without_push   # defensive: the wizard prompts already stop this
         CLOUD_PUBLISH=1
         DO_BUILD=0
     fi
@@ -4648,6 +4710,22 @@ OLLAMA_SVC_EOF
 CLOUD_PUBLISH=0
 apply_cluster_profile
 
+# "push" on a KinD or existing local cluster publishes the images selected in
+# the wizard through build-and-push.sh ("Publish" below), the same publisher
+# the cloud path uses, instead of `docker push`-ing them from the build loop:
+# it stamps the revision label and refuses to replace an existing release tag
+# (ACE_IMAGE_TAG) with different content, which a bare push of
+# registry_ref(tag) did not. The cluster still pulls them from the registry
+# afterwards, as before (only DO_LOCAL_BUILD images are side-loaded).
+# Decided before the KinD pre-warm below starts, so this defensive refusal
+# can never leave that background job behind.
+PUBLISH_SELECTED=0
+if [[ "${DO_BUILD:-0}" -eq 1 ]]; then
+    refuse_publish_without_push   # defensive: the wizard prompts already stop this
+    PUBLISH_SELECTED=1
+    DO_BUILD=0
+fi
+
 # --- Pre-warm KinD cluster in background (express mode only) ----------------
 # ensure_kind_cluster's `kind create cluster` step (~1-2 min) has no
 # dependency on the Docker builds below — images are only kind-loaded AFTER
@@ -4673,35 +4751,31 @@ if [[ ${EXPRESS_MODE} -eq 1 && ( "${_DEPLOY_CHOICE,,}" == "h" || "${_DEPLOY_CHOI
     _KIND_PREWARM_PID=$!
 fi
 
-# --- build (push to the image registry or local) ----------------------------
-if [[ "${DO_BUILD:-0}" -eq 1 && "${PUSH_IMAGES:-0}" -ne 1 ]]; then
-    echo "ERROR: publishing during setup requires --push. Use --local-build for local images." >&2
-    exit 2
-fi
-abort_after_build_failure() {
-    # Express setup may already be creating KinD in the background. Reap that
-    # job before exiting so a retry cannot race an orphaned cluster creation.
-    if [[ -n "${_KIND_PREWARM_PID:-}" ]]; then
-        wait "${_KIND_PREWARM_PID}" || true
-    fi
-    exit 1
+# build_fingerprint ENTRY — the "IMG_<label>=<HEAD>:<dirty file count>" line
+# the --restart staleness check compares against (one ALL_BUILD_IMAGES entry;
+# nothing when it has no source dir).
+build_fingerprint() {
+    local _n label _i ctx _rest
+    IFS='|' read -r _n label _i ctx _rest <<< "$1"
+    [[ -n "${ctx}" && -d "${ctx}" ]] || return 0
+    printf 'IMG_%s=%s:%s\n' "${label}" "$(git -C "${ctx}" rev-parse HEAD 2>/dev/null || echo unknown)" \
+        "$(git -C "${ctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')"
 }
 
+# --- build locally ------------------------------------------------------------
 declare -a LOCAL_BUILT_IMAGES=()   # tracks successfully built images for kind load
 
-if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
+if [[ "${DO_LOCAL_BUILD}" -eq 1 ]]; then
     echo
     echo -e "${CYAN}=======================================================${NC}"
-    [[ "${DO_BUILD}" -eq 1 ]] \
-        && echo -e "${CYAN}  Build & push selected images${NC}" \
-        || echo -e "${CYAN}  Build selected images locally${NC}"
+    echo -e "${CYAN}  Build selected images locally${NC}"
     echo -e "${CYAN}=======================================================${NC}"
     echo
     _build_ready=1
     # IMAGE_REGISTRY + REGISTRY_* from .env (scripts/lib/registry.sh). Exported
-    # so the background build subshells below push to the same place.
+    # so the background build subshells below resolve base images the same way.
     unset IMAGE_REGISTRY REGISTRY_USERNAME REGISTRY_PASSWORD
-    registry_load "${ENV_FILE}" || { warn "Fix IMAGE_REGISTRY in .env — images were NOT built."; _build_ready=0; }
+    registry_load "${ENV_FILE}" || { warn "Fix the registry/build setting reported above in ${ENV_FILE} — images were NOT built."; _build_ready=0; }
     # Credentials typed this run win over .env: the Image-registry answers
     # (_REGISTRY_*, asked for the registry actually used) before the push
     # prompt's (DH_*, asked before the registry could change).
@@ -4711,7 +4785,7 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         REGISTRY_USERNAME="${DH_USER}"; REGISTRY_PASSWORD="${DH_TOKEN}"
     fi
     export REGISTRY_USERNAME REGISTRY_PASSWORD
-    if [[ "${_build_ready}" -eq 1 && ( "${DO_LOCAL_BUILD}" -eq 1 || "${DO_BUILD}" -eq 1 ) ]]; then
+    if [[ "${_build_ready}" -eq 1 ]]; then
         if [[ -n "${REGISTRY_USERNAME}" && -n "${REGISTRY_PASSWORD}" ]]; then
             if registry_login >/dev/null; then
                 ok "Logged in to ${IMAGE_REGISTRY:-Docker Hub} as ${REGISTRY_USERNAME}"
@@ -4719,9 +4793,6 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 warn "Login to ${IMAGE_REGISTRY:-Docker Hub} failed — images were NOT built."
                 _build_ready=0
             fi
-        elif [[ "${DO_BUILD}" -eq 1 ]]; then
-            warn "REGISTRY_USERNAME/REGISTRY_PASSWORD are unset — cannot push; images were NOT built."
-            _build_ready=0
         else
             warn "Registry credentials are unset; local base-image builds may hit anonymous Docker Hub pull limits."
         fi
@@ -4821,8 +4892,6 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 if [[ "${method}" == compose:* ]]; then
                     svc="${method#compose:}"
                     ( cd "${REPO_ROOT}" && docker compose build ${_no_cache_flag} "${svc}" ) && build_ok=1
-                elif [[ "${method}" == hub-bundle ]]; then
-                    hub_bundle_build "${REPO_ROOT}" "${tag}" ${_no_cache_flag} && build_ok=1
                 elif [[ ! -f "${ctx}/${df}" ]]; then
                     echo "Dockerfile not found: ${ctx}/${df}"
                 else
@@ -4831,28 +4900,9 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 fi
                 if [[ "${build_ok}" -eq 1 ]]; then
                     echo "${tag}" > "${_BUILD_RESULTS_DIR}/${idx}.built"
-                    # Fingerprint for the --restart staleness check (see
-                    # above) — ctx is empty for the compose:web entry (built
-                    # via docker-compose.yml, not a single source dir), so
-                    # there's nothing meaningful to fingerprint there.
-                    if [[ -n "${ctx}" && -d "${ctx}" ]]; then
-                        echo "IMG_${label}=$(git -C "${ctx}" rev-parse HEAD 2>/dev/null || echo unknown):$(git -C "${ctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')" \
-                            > "${_BUILD_RESULTS_DIR}/${idx}.fp"
-                    fi
-                    if [[ "${DO_BUILD}" -eq 1 ]]; then
-                        # agentcert/x:latest -> <IMAGE_REGISTRY>/agentcert/x:latest
-                        # (unchanged, i.e. Docker Hub, when IMAGE_REGISTRY is empty).
-                        _push_ref="$(registry_ref "${tag}")"
-                        if { [[ "${_push_ref}" == "${tag}" ]] || docker tag "${tag}" "${_push_ref}"; } \
-                            && docker push "${_push_ref}"; then
-                            echo pushed > "${_BUILD_RESULTS_DIR}/${idx}.status"
-                        else
-                            echo "push-failed" > "${_BUILD_RESULTS_DIR}/${idx}.status"
-                            echo "${label} (push)" > "${_BUILD_RESULTS_DIR}/${idx}.reason"
-                        fi
-                    else
-                        echo built > "${_BUILD_RESULTS_DIR}/${idx}.status"
-                    fi
+                    # Fingerprint for the --restart staleness check (see above).
+                    build_fingerprint "${entry}" > "${_BUILD_RESULTS_DIR}/${idx}.fp"
+                    echo built > "${_BUILD_RESULTS_DIR}/${idx}.status"
                 else
                     echo "build-failed" > "${_BUILD_RESULTS_DIR}/${idx}.status"
                     echo "${label} (build)" > "${_BUILD_RESULTS_DIR}/${idx}.reason"
@@ -4908,7 +4958,6 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
             _status="$(cat "${_BUILD_RESULTS_DIR}/${_i}.status" 2>/dev/null || echo "")"
             case "${_status}" in
                 built)  ok "  Built ${_tag}  (${_label})" ;;
-                pushed) ok "  Built + pushed ${_tag}  (${_label})" ;;
                 *)
                     _reason="$(cat "${_BUILD_RESULTS_DIR}/${_i}.reason" 2>/dev/null || echo "${_label}")"
                     warn "  Failed: ${_tag}  (${_label}) — log: ${_BUILD_LOG_DIR}/${_i}.log"
@@ -4922,41 +4971,71 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         unset -f _build_one_entry
         echo
         if [[ ${#BUILD_FAILED[@]} -eq 0 ]]; then
-            if [[ "${DO_BUILD}" -eq 1 ]]; then
-                ok "All selected images built and pushed successfully."
-            else
-                ok "All selected images built locally (${#LOCAL_BUILT_IMAGES[@]} images ready for KinD load)."
-            fi
+            ok "All selected images built locally (${#LOCAL_BUILT_IMAGES[@]} images ready for KinD load)."
         else
             warn "Selected image builds failed: ${BUILD_FAILED[*]}"
             warn "Setup cannot deploy those images; check the build logs above, then retry."
-            abort_after_build_failure
+            abort_setup 1
         fi
     else
         warn "Image build authentication failed; setup stopped before deployment."
-        abort_after_build_failure
+        abort_setup 1
     fi
     unset _build_ready _FP_FILE _fp_sha _fp_dirty _BUILD_PARALLELISM _BUILD_LOG_DIR _BUILD_RESULTS_DIR _idx _i _status _reason _build_pids _still_running _pid
     echo -e "${CYAN}=======================================================${NC}"
     echo
 fi
 
-# --- Cloud: publish this checkout's images ------------------------------------
-# A cloud cluster pulls ACE's own images from the registry, so "build and push"
-# must publish all of them, including the hub bundle and the ITBench runner
-# that the build loop above does not cover. scripts/build-and-push.sh is the
-# canonical publisher (docs/setup/setup-and-image-releases.md §3.1): it builds
-# every "build" row of deploy/images.txt and pushes it under ACE_IMAGE_TAG
-# (or :latest) plus a revision tag.
-if [[ "${CLOUD_PUBLISH}" -eq 1 ]]; then
-    echo -e "${CYAN}  Publishing every ACE image from this checkout to $(cur IMAGE_REGISTRY)${NC}"
+# --- Publish this checkout's images (--push) ----------------------------------
+# scripts/build-and-push.sh is the one publisher (docs/setup/setup-and-image-
+# releases.md §3.1): it builds each "build" row of deploy/images.txt, stamps
+# its revision label, refuses to replace an existing ACE_IMAGE_TAG release
+# with different content, and pushes it under ACE_IMAGE_TAG (or its own tag)
+# plus a revision tag.
+#   CLOUD_PUBLISH     a cloud cluster pulls every ACE image from the registry,
+#                     so all of them are published, the hub bundle and the
+#                     ITBench runner included.
+#   PUBLISH_SELECTED  a KinD / local cluster: the images chosen in the wizard
+#                     (or every ALL_BUILD_IMAGES entry for a saved "push").
+# The publisher reads IMAGE_REGISTRY / ACE_IMAGE_TAG from .env, like the
+# deploy that follows; credentials typed this run win over .env (same order
+# as the local build above), and travel in the environment, not the argv.
+if [[ "${CLOUD_PUBLISH}" -eq 1 || "${PUBLISH_SELECTED}" -eq 1 ]]; then
+    refuse_publish_without_push   # defensive: the wizard prompts already stop this
     _publish_args=(--push --env-file "${ENV_FILE}")
     [[ "${ALLOW_BUILD_CACHE:-0}" -eq 1 ]] && _publish_args+=(--allow-build-cache)
-    if ! "${SCRIPT_DIR}/build-and-push.sh" "${_publish_args[@]}"; then
-        warn "Publishing the ACE images failed; setup stopped before deployment."
-        abort_after_build_failure
+    _publish_entries=("${ALL_BUILD_IMAGES[@]}")
+    if [[ "${CLOUD_PUBLISH}" -eq 1 ]]; then
+        echo -e "${CYAN}  Publishing every ACE image from this checkout to $(cur IMAGE_REGISTRY)${NC}"
+    else
+        _publish_entries=("${SELECTED_BUILD_IMAGES[@]}")
+        _publish_images=()
+        for _entry in "${_publish_entries[@]}"; do
+            IFS='|' read -r _ _ _img _ <<< "${_entry}"
+            _publish_images+=("${_img}")
+        done
+        _publish_args+=(--only "$(image_only_regex "${_publish_images[@]}")")
+        _publish_reg="$(cur IMAGE_REGISTRY)"
+        echo -e "${CYAN}  Publishing ${#_publish_images[@]} selected ACE image(s) to ${_publish_reg:-Docker Hub}${NC}"
+        unset _publish_images _publish_reg _img
     fi
-    unset _publish_args
+    if ! (
+        unset IMAGE_REGISTRY IMAGE_MIRROR_NAMESPACE ACE_IMAGE_TAG
+        if [[ -n "${_REGISTRY_USER:-}" && -n "${_REGISTRY_PASS:-}" ]]; then
+            export REGISTRY_USERNAME="${_REGISTRY_USER}" REGISTRY_PASSWORD="${_REGISTRY_PASS}"
+        elif [[ -n "${DH_USER:-}" && -n "${DH_TOKEN:-}" ]]; then
+            export REGISTRY_USERNAME="${DH_USER}" REGISTRY_PASSWORD="${DH_TOKEN}"
+        fi
+        exec "${SCRIPT_DIR}/build-and-push.sh" "${_publish_args[@]}"
+    ); then
+        warn "Publishing the ACE images failed; setup stopped before deployment."
+        abort_setup 1
+    fi
+    # Record what was published for the --restart staleness check.
+    mkdir -p "${REPO_ROOT}/.tmp"
+    for _entry in "${_publish_entries[@]}"; do build_fingerprint "${_entry}"; done \
+        > "${REPO_ROOT}/.tmp/ace-build-fingerprints.env"
+    unset _publish_args _publish_entries _entry
     echo
 fi
 
@@ -5019,7 +5098,7 @@ fi
 case "${deploy_choice,,}" in
     k) k8s_deploy ;;
     h) helm_deploy ;;
-    *) echo -e "${DIM}Skipped — run './scripts/setup.sh' again and choose k or h to deploy.${NC}" ;;
+    *) echo -e "${DIM}Skipped — run './scripts/setup.sh --restart' and choose k or h to deploy with these settings.${NC}" ;;
 esac
 
 # Offer to restore a shut_down.sh MongoDB backup — only in the interactive,

@@ -1,29 +1,40 @@
 #!/usr/bin/env bash
-# Sets up sre-agent-qwen harness.
-# The Docker image is shared with sre-agent (ace-harness/sre-agent:local).
-# Run agents/harness/sre-agent/setup.sh first to build the image.
-# This script only verifies that the image exists and that Ollama has the model.
+# Sets up the sre-agent-qwen harness. Its Docker image is shared with sre-agent
+# (ace-harness/sre-agent:local).
+# Default (what scripts/ace-bench.py runs): build that image locally through
+#   agents/harness/sre-agent/setup.sh if it is not present yet.
+# --install      also install sre-agent's host development dependencies (runs
+#                sre-agent/setup.sh --install, which rebuilds the image too).
+# --check-model  also check that the Ollama service on localhost:11434 has
+#                qwen2.5:7b-instruct.
 set -euo pipefail
 
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRE_HARNESS_DIR="$(cd "${HARNESS_DIR}/../sre-agent" && pwd)"
 
+INSTALL=false
 CHECK_MODEL=false
 for arg in "$@"; do
   case "$arg" in
+    --install) INSTALL=true ;;
     --check-model) CHECK_MODEL=true ;;
     --local) ;;
-    -h|--help) echo 'Default: prepare the local SRE image. --check-model also checks the running Ollama service.'; exit 0 ;;
+    -h|--help) echo 'Default: build the shared SRE harness Docker image locally if missing. --install also installs host development dependencies. --check-model also checks the running Ollama service.'; exit 0 ;;
     *) echo "ERROR: unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
-echo "[sre-agent-qwen setup] checking Docker image ace-harness/sre-agent:local ..."
-if ! docker image inspect ace-harness/sre-agent:local &>/dev/null; then
-  echo "[sre-agent-qwen setup] image not found — building via sre-agent/setup.sh ..."
-  bash "${SRE_HARNESS_DIR}/setup.sh"
+if [[ "${INSTALL}" == true ]]; then
+  echo "[sre-agent-qwen setup] installing via sre-agent/setup.sh --install ..."
+  bash "${SRE_HARNESS_DIR}/setup.sh" --install
 else
-  echo "[sre-agent-qwen setup] image already present."
+  echo "[sre-agent-qwen setup] checking Docker image ace-harness/sre-agent:local ..."
+  if ! docker image inspect ace-harness/sre-agent:local &>/dev/null; then
+    echo "[sre-agent-qwen setup] image not found — building via sre-agent/setup.sh ..."
+    bash "${SRE_HARNESS_DIR}/setup.sh"
+  else
+    echo "[sre-agent-qwen setup] image already present."
+  fi
 fi
 
 if [[ "${CHECK_MODEL}" == false ]]; then

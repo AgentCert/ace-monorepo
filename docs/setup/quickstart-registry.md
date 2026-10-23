@@ -15,7 +15,9 @@ One setting in `.env` decides where every container image comes from:
 
 Nothing else changes between the two.
 
-**You need:** Docker, git, kind, kubectl, helm and python3. `setup.sh` checks them first and tells you how to install anything missing. You also need an Azure OpenAI key for the agent's LLM calls.
+**You need:** Docker, git, kind, kubectl, helm and python3. `setup.sh --deploy` checks them first and tells you how to install anything missing. You also need an Azure OpenAI key for the agent's LLM calls.
+
+> Always pass `--deploy`. `./scripts/setup.sh` on its own only builds images and exits — it never writes `.env` or touches a cluster. (It still *reads* `.env` for `IMAGE_REGISTRY`, and logs in there so base images resolve.)
 
 ---
 

@@ -140,7 +140,7 @@ kubectl -n <target-ns> get pods -w   # watch the fault take effect
 | What | Where | Notes |
 |---|---|---|
 | **Pass/Fail + score** | Experiment run in UI | Based on your Resilience Probes |
-| **Agent traces** | [Langfuse :4000](http://localhost:4000) → project `agentcert` | Every LLM call the agent made under fault |
+| **Agent traces** | [Langfuse :4002](http://localhost:4002) → project `agentcert` | Every LLM call the agent made under fault |
 | **Certification report** | [Certifier :18000/docs](http://localhost:18000/docs) | POST the Langfuse trace → get a 12-section JSON+PDF report |
 
 The `scripts/run_certification.py` helper wraps the Certifier API calls for you.

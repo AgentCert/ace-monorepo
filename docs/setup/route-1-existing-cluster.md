@@ -30,8 +30,14 @@ kubectl get nodes                  # node(s) should be Ready
 ./scripts/setup.sh --deploy
 ```
 
-When the wizard asks for `CLUSTER_MODE`, enter **`local`** (or press Enter if it
-shows `local` as the default). The wizard:
+<div class="callout callout-warning">
+<span class="callout-title">⚠ Without <code>--deploy</code> nothing is installed</span>
+<code>./scripts/setup.sh</code> alone builds images and exits with
+<code>All images built successfully!</code> — it never touches your cluster.
+</div>
+
+When the wizard asks `CLUSTER_MODE [auto]:`, enter **`local`** (accepted values:
+`auto`, `fresh`, `local`, `cloud`). The wizard:
 
 1. Patches `.env` with Kubernetes service DNS names (`graphql.ace.svc.cluster.local`, etc.)
 2. **Skips** kind cluster creation (cluster already exists)
@@ -39,7 +45,7 @@ shows `local` as the default). The wizard:
 4. Applies all manifests in `deploy/k8s/`
 5. Waits for core services to become ready
 
-At the deploy prompt the wizard also asks how to apply: press **`k`** for `kubectl apply` (default) or **`h`** for `helm upgrade --install`. Choose Helm if you want release tracking (`helm history`, `helm rollback`) or plan to upgrade without re-running the full wizard. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for Helm day-to-day commands.
+At the deploy prompt the wizard asks how to apply: `Choice [k/H/n]:` — **Enter selects `h` (Helm)**, `k` is plain `kubectl apply`, `n` skips deploying. Helm gives you release tracking (`helm history`, `helm rollback`) and upgrades without re-running the full wizard. See [Managing services]({{ "/setup/managing-services.html" | relative_url }}) for Helm day-to-day commands.
 
 <div class="callout callout-tip">
 <code>CLUSTER_MODE=auto</code> also works — it probes your kubeconfig, finds the
@@ -53,14 +59,15 @@ no cluster is reachable rather than silently creating a kind cluster.
 
 ### kind (with ACE port mappings)
 
-If your existing cluster is a kind cluster created with
-`local-personal-workspace/kind-agentcert.yaml`, the ACE `extraPortMappings` are
-already baked in and services are reachable at the usual `localhost` ports:
+If your existing cluster is a kind cluster created from this repo's template
+(`deploy/kind/kind-agentcert.yaml`, rendered by `deploy/kind/render-kind-config.sh`),
+the ACE `extraPortMappings` are already baked in and services are reachable at the
+usual `localhost` ports:
 
 | Service | URL |
 |---|---|
 | AgentCert UI | http://localhost:2001 |
-| Langfuse | http://localhost:4000 |
+| Langfuse | http://localhost:4002 |
 | Certifier | http://localhost:18000/docs |
 | LiteLLM | http://localhost:14000 |
 | MongoDB | localhost:27017 |
@@ -73,7 +80,7 @@ NodePort services are on the cluster node's IP, not `localhost`. Use
 ```bash
 # Run in the background (or use separate terminals):
 kubectl port-forward -n ace svc/web          2001:32001 &
-kubectl port-forward -n ace svc/langfuse-web 4000:3000  &
+kubectl port-forward -n ace svc/langfuse-web 4002:3000  &
 kubectl port-forward -n ace svc/certifier    18000:8000 &
 kubectl port-forward -n ace svc/litellm      14000:14000 &
 kubectl port-forward -n ace svc/mongodb      27017:27017 &
@@ -104,9 +111,10 @@ Setup registers and connects the `ace-local` chaos infrastructure in this cluste
 <span class="callout-title">Images on non-kind clusters</span>
 The default <em>build locally</em> answers side-load images into the cluster, which works for
 kind and k3s only. On any other cluster <code>scripts/prepare-images.sh</code> stops with
-"no local side-load path"; answer <code>d</code> (Docker Hub) to the image-source prompts or
-push the images to a registry the cluster can pull from. Published <code>:latest</code> images
-may lag this checkout.
+"no local side-load path"; answer <code>r</code> (registry) at the experiment image-source
+prompts — <code>[l/r, Enter=l]</code>, where <code>l</code> = build locally and <code>r</code> =
+pull from <code>IMAGE_REGISTRY</code> (Docker Hub when it is empty) — or push the images to a
+registry the cluster can pull from. Published <code>:latest</code> images may lag this checkout.
 </div>
 
 ---

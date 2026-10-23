@@ -23,7 +23,7 @@ These live in the **"Docker Compose one-command bring-up"** block at the bottom 
 | Variable | Default | What it does |
 |---|---|---|
 | `CLUSTER_MODE` | `auto` | How Kubernetes is sourced: `auto`, `local`, `cloud`, `fresh`/`kind`. See the [routes]({{ "/setup/README.html" | relative_url }}#choose-your-kubernetes-route). |
-| `KIND_CLUSTER_NAME` | `agentcert` | Name of the kind cluster created/reused (routes 2 & auto). |
+| `KIND_CLUSTER_NAME` | `agentcert-<ACE_INSTANCE_NAME>` | Name of the kind cluster created/reused (routes 2 & auto). Setup writes a per-user name here so checkouts on a shared host never collide — it is **not** plain `agentcert`. Run `kind get clusters` to see the real name. |
 | `HOST_KUBE_DIR` | `~/.kube` | Host kube directory mounted into the stack. Use an **absolute** path if set. |
 | `HOST_PUBLIC_IP` | _(empty)_ | Only for `CLUSTER_MODE=cloud` — the VM address in-cluster pods call back to. |
 | `MONGO_MODE` | `local` | `local` = run MongoDB in the stack; `external` = reuse an existing mongo via `DB_SERVER`. |
@@ -186,9 +186,48 @@ If `LANGFUSE_MODE=local`, the Langfuse org/project/API keys are **auto-provision
 
 ## Changing Ports (Busy-Port Scenario)
 
-There are **two kinds of services**, and they change differently:
+### A. The Kubernetes (kind) deployment — `KIND_HOSTPORT_*`
 
-### A. Supporting Services — One `.env` Line Each
+This is the path `./scripts/setup.sh --deploy` uses, and the one you want in
+almost every case. Each host port is one `.env` key, substituted into the kind
+config by `deploy/kind/render-kind-config.sh`:
+
+| Service | `.env` key | Default |
+|---|---|---|
+| AgentCert UI | `KIND_HOSTPORT_WEB` | `2001` |
+| GraphQL REST | `KIND_HOSTPORT_GRAPHQL_REST` | `8081` |
+| GraphQL gRPC | `KIND_HOSTPORT_GRAPHQL_GRPC` | `8082` |
+| Auth REST | `KIND_HOSTPORT_AUTH_REST` | `3005` |
+| Auth gRPC | `KIND_HOSTPORT_AUTH_GRPC` | `3030` |
+| Certifier | `KIND_HOSTPORT_CERTIFIER` | `18000` |
+| LiteLLM | `KIND_HOSTPORT_LITELLM` | `14000` |
+| Langfuse | `KIND_HOSTPORT_LANGFUSE` | `4002` |
+| MongoDB | `KIND_HOSTPORT_MONGO` | `27017` |
+| MinIO | `KIND_HOSTPORT_MINIO` | `19090` |
+| Ingress | `KIND_HOSTPORT_INGRESS` | `8088` |
+| Dex | `KIND_HOSTPORT_DEX` | `32000` |
+| Prometheus | `KIND_HOSTPORT_PROMETHEUS` | `31090` |
+| Grafana | `KIND_HOSTPORT_GRAFANA` | `31687` |
+| OTel Prometheus MCP | `KIND_HOSTPORT_OTEL_PROM_MCP` | `31085` |
+| OTel Kubernetes MCP | `KIND_HOSTPORT_OTEL_K8S_MCP` | `31086` |
+
+Setup normally picks these for you with a free-port walk and saves what it chose,
+so on a shared host your `.env` is the authority, not this table. To pin one
+yourself, set the key and re-run `./scripts/setup.sh --restart` — a changed host
+port requires the cluster to be recreated, which setup detects and offers.
+
+<div class="callout callout-info">
+<span class="callout-title">The NodePort side never changes</span>
+Only the host side of each mapping is configurable. The in-cluster NodePorts
+(32001, 32081, 32003, 32400, …) are fixed in <code>deploy/kind/kind-agentcert.yaml</code>
+and are what the rendering script keys on.
+</div>
+
+### B. Host-process / Docker Compose services
+
+The rest of this section applies to the **local-dev path** (`start-local-services.sh`,
+`docker compose`), where services run on the host instead of inside kind. The
+defaults there differ: Langfuse `4000`, certifier `8000`, Ollama `11435`.
 
 `litellm`, `langfuse`, and `certifier` publish their ports the normal Docker way:
 
@@ -200,7 +239,7 @@ There are **two kinds of services**, and they change differently:
 
 Then `docker compose up -d` and you're done.
 
-### B. Control-Plane Services — Host Networking
+### C. Control-Plane Services as host processes — Host Networking
 
 `auth`, `graphql`, and `web` run on the **host network** — you change the port the process **binds**, plus the places that reference it.
 
@@ -241,7 +280,7 @@ Then `docker compose up -d` and you're done.
 
 #### The Classic One: Port 8080
 
-A kind cluster publishes `8080→80` for its ingress, so ACE deliberately uses **8081** for GraphQL. If something else holds 8080 and you need it for kind ingress, edit `hostPort` in `local-personal-workspace/kind-agentcert.yaml`.
+A kind cluster publishes `8080→80` for its ingress, so ACE deliberately uses **8081** for GraphQL. ACE's own ingress mapping defaults to host port **8088** — change it with `KIND_HOSTPORT_INGRESS` in `.env` and re-run `./scripts/setup.sh --restart`, rather than hand-editing the kind template.
 
 ### Check What's Using a Port
 

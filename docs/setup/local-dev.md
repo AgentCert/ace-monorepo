@@ -135,7 +135,7 @@ kubectl config current-context
 kubectl get nodes
 
 # Common ways to wire it up:
-# kind (local):   kind create cluster --name agentcert
+# kind (local):   ./scripts/setup.sh --deploy   (creates agentcert-<ACE_INSTANCE_NAME>)
 # AKS:            az aks get-credentials --resource-group <rg> --name <cluster>
 # GKE:            gcloud container clusters get-credentials <cluster> --zone <zone>
 # EKS:            aws eks update-kubeconfig --name <cluster> --region <region>

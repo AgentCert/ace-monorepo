@@ -78,19 +78,35 @@ missing submodules before it builds the platform.
 ./scripts/setup.sh --deploy
 ```
 
-The wizard asks for your LLM credentials; press **Enter** at every other prompt to take the
-stable defaults. In order, it:
+<div class="callout callout-warning">
+<span class="callout-title">⚠ The <code>--deploy</code> flag is what makes this an install</span>
+<code>./scripts/setup.sh</code> with no flags builds every image and <strong>exits</strong> —
+no <code>.env</code>, no cluster, no questions. It ends with
+<code>All images built successfully!</code> followed by
+<code>Next: ./scripts/setup.sh --deploy</code>. That is a successful build, but nothing is deployed.
+</div>
 
-1. Checks prerequisites, creates `.env` from `.env.example` (or updates yours) and picks
-   collision-free host ports and a per-user instance name (`ACE_INSTANCE_NAME`) — safe on a
-   shared host.
-2. Asks **Express or Guided** (`Enter` = guided) and **Build images?** (`Enter` = *build ALL
-   locally*). All first-party images — control plane, installers, agents, sidecar, ITBench
-   runner — and the **hub bundle** (app/agent/fault catalogs and charts) are built from this
-   checkout, so what runs is exactly what you cloned. Experiment image sources default to
-   **local** for the same reason.
-3. Asks for Azure OpenAI / Gemini / OpenRouter keys and optionally a local Ollama model.
-4. Asks **Deploy?** — `h` Helm (default) or `k` plain `kubectl apply`; `n` skips.
+The wizard asks for your LLM credentials; press **Enter** at every other prompt to take the
+stable defaults. The questions come in this order:
+
+| # | Question | Prompt | Enter gives you |
+|---|---|---|---|
+| 0 | Personal rootless Docker | `Set up and use rootless Docker for this checkout? [y/N]:` | No (skip it) — or pass `--rootless-docker` |
+| 1 | Setup style | `Choice [e/G]:` | **g** guided (section by section); `e` = answer everything up front, then unattended |
+| 2 | Where ACE runs | `CLUSTER_MODE [auto]:` | **auto** — create or reuse a kind cluster on this machine |
+| 3 | Build images | `Choice [p/l/A/n]:` | **a** — build **ALL** locally (the heaviest option, not `n`) |
+| 4 | Experiment image sources | `[l/r, Enter=l]:` | **local** — skipped entirely when you chose `a` above |
+| 5 | Image registry | `IMAGE_REGISTRY [...]:` | keep current (empty = Docker Hub, no login); `-` clears it |
+| 6 | Azure OpenAI | `API key:` | skip — **all other Azure questions are skipped too when the key is empty** |
+| 7–8 | Gemini / OpenRouter | `API key:` | skip |
+| 9 | Ollama | `Set up Ollama? [Y/n]` | defaults to **Y when no other provider key was given** — that pulls a multi-GB model |
+| 10 | Flash-agent model | `Flash-agent model alias [...]:` | the first configured alias, in order Ollama → Azure → Gemini → OpenRouter |
+| 11 | Agent to benchmark | `Agent [flash-agent]:` | `flash-agent`; valid values are the directories under `agents/` |
+| 12 | Corporate CA certificate | `Path to root CA cert file (.pem/.crt, Enter to skip):` | host system bundle |
+| 13 | Deploy method | `Choice [k/H/n]:` | **h** — Helm (`k` = `kubectl apply`, `n` = skip deploying) |
+
+In guided mode questions 3 and 13 are asked around the build; in express mode (`e`)
+every question is asked first and the script then runs unattended.
 
 With a deploy choice it then, unattended:
 
@@ -101,6 +117,41 @@ With a deploy choice it then, unattended:
 - Registers the `ace-local` chaos infrastructure, installs its subscriber into `litmus` and waits
   until it is connected — no UI steps needed
 - Seeds the demo experiments and prints the access URLs
+
+Builds run `nproc / 2` at a time (min 1, max 6; override with `ACE_BUILD_PARALLELISM`),
+without Docker's cache unless you pass `--allow-build-cache`. Per-image logs go to
+`.tmp/build-logs/<n>.log` — **that directory is wiped at the start of every build**.
+
+### Expected output
+
+A successful run ends with:
+
+```text
+=======================================================
+  ✓ ACE stack deployed via Helm
+=======================================================
+  Release       ace  (namespace: ace)
+  AgentCert UI  http://localhost:2001          login: admin / litmus
+  Langfuse      http://localhost:4002          login: admin@agentcert.local / agentcert-admin
+  Certifier     http://localhost:18000/docs
+  LiteLLM       http://localhost:14000
+  MongoDB       localhost:27017
+
+  status:   kubectl get pods -n ace
+  upgrade:  helm upgrade --install ace deploy/helm/ace -n ace --create-namespace ...
+  rollback: helm rollback ace -n ace
+  teardown: helm uninstall ace -n ace
+=======================================================
+```
+
+Things that mean it did **not** fully succeed:
+
+| Ending | Meaning | Next step |
+|---|---|---|
+| `! Chaos infrastructure is NOT connected` inside the banner | Stack is up, experiments cannot run | Fix the warnings above it, then `./scripts/setup.sh --restart` |
+| `! Selected image builds failed: <labels>` | Setup aborted before deploying | Read `.tmp/build-logs/<n>.log`, fix, re-run |
+| `Skipped — run './scripts/setup.sh --restart' and choose k or h to deploy with these settings.` | You answered `n` at the deploy prompt | Re-run with `--restart` and pick `h` |
+| `All images built successfully!` and nothing else | You forgot `--deploy` | `./scripts/setup.sh --deploy` |
 
 Re-running `./scripts/setup.sh --deploy` (or `--restart` to reuse the saved answers) is idempotent.
 
@@ -153,36 +204,48 @@ Quick connectivity check:
 
 ```bash
 curl -s -o /dev/null -w "web      %{http_code}\n" http://localhost:2001/
-curl -s -o /dev/null -w "langfuse %{http_code}\n" http://localhost:4000/
+curl -s -o /dev/null -w "langfuse %{http_code}\n" http://localhost:4002/
 curl -s -o /dev/null -w "litellm  %{http_code}\n" http://localhost:14000/health
 curl -s -o /dev/null -w "cert     %{http_code}\n" http://localhost:18000/docs
 ```
 
 Open **[http://localhost:2001](http://localhost:2001)**, log in (`admin` / `litmus`).  
-Langfuse UI: **[http://localhost:4000](http://localhost:4000)** (`admin@agentcert.local` / `agentcert-admin`).
+Langfuse UI: **[http://localhost:4002](http://localhost:4002)** (`admin@agentcert.local` / `agentcert-admin`).
 
 ---
 
 ## 5. Service Access Reference
 
-All ports are mapped from kind's `extraPortMappings` (defined in
-`deploy/kind/kind-agentcert.yaml`):
+Host ports are rendered into the kind config by `deploy/kind/render-kind-config.sh`,
+which takes the template `deploy/kind/kind-agentcert.yaml` and substitutes each
+`KIND_HOSTPORT_*` value from `.env` (output: `.tmp/kind-agentcert.rendered.yaml`).
+The defaults below are what you get when `.env` does not override them:
 
-| Service | Host port | NodePort | Notes |
-|---|---|---|---|
-| AgentCert UI | 2001 | 32001 | nginx serving the React app |
-| GraphQL REST | 8081 | 32081 | GraphQL + WebSocket |
-| GraphQL gRPC | 8082 | 32082 | — |
-| Auth REST | 3000 | 32003 | — |
-| Auth gRPC | 3030 | 32030 | — |
-| Certifier | **18000** | 32080 | Swagger at `/docs` |
-| LiteLLM | 14000 | 31400 | — |
-| Langfuse | 4000 | 32400 | — |
-| MongoDB | 27017 | 32017 | replica set `rs0` |
-| MinIO S3 | 19090 | 32090 | internal S3 for Langfuse |
+| Service | Host port | `.env` key | NodePort | Notes |
+|---|---|---|---|---|
+| AgentCert UI | 2001 | `KIND_HOSTPORT_WEB` | 32001 | nginx serving the React app |
+| GraphQL REST | 8081 | `KIND_HOSTPORT_GRAPHQL_REST` | 32081 | GraphQL + WebSocket |
+| GraphQL gRPC | 8082 | `KIND_HOSTPORT_GRAPHQL_GRPC` | 32082 | — |
+| Auth REST | **3005** | `KIND_HOSTPORT_AUTH_REST` | 32003 | the container still listens on 3000 |
+| Auth gRPC | 3030 | `KIND_HOSTPORT_AUTH_GRPC` | 32030 | — |
+| Certifier | **18000** | `KIND_HOSTPORT_CERTIFIER` | 32080 | Swagger at `/docs` |
+| LiteLLM | 14000 | `KIND_HOSTPORT_LITELLM` | 31400 | — |
+| Langfuse | **4002** | `KIND_HOSTPORT_LANGFUSE` | 32400 | 4000 is the host-process (non-kind) default |
+| MongoDB | 27017 | `KIND_HOSTPORT_MONGO` | 32017 | replica set `rs0` |
+| MinIO S3 | 19090 | `KIND_HOSTPORT_MINIO` | 32090 | internal S3 for Langfuse |
+| Ingress | 8088 | `KIND_HOSTPORT_INGRESS` | 80 | — |
+| Dex (OIDC) | 32000 | `KIND_HOSTPORT_DEX` | 32000 | — |
+| Prometheus | 31090 | `KIND_HOSTPORT_PROMETHEUS` | 31090 | experiment observability |
+| Grafana | 31687 | `KIND_HOSTPORT_GRAFANA` | 31687 | experiment observability |
+| OTel Prom MCP | 31085 | `KIND_HOSTPORT_OTEL_PROM_MCP` | 31085 | agent tool endpoint |
+| OTel K8s MCP | 31086 | `KIND_HOSTPORT_OTEL_K8S_MCP` | 31086 | agent tool endpoint |
 
 > **Certifier runs on :18000** (not :8000) because port 8000 is often occupied
 > on developer VMs. The container still listens on 8000 internally.
+
+> **Auth is on :3005 and Langfuse on :4002** in the kind deployment. The
+> `.env` values win over this table — on a shared host setup walks to the next
+> free port and saves what it picked, and the final banner prints the real URLs.
 
 ---
 

@@ -12,13 +12,25 @@ This guide covers three things:
 
 `scripts/setup.sh` is one long script. It runs top to bottom; the work is split into functions defined in the middle of the file and called at the end. The default mode builds images locally. Deployment is opt-in:
 
-| Mode | Command | Asks questions? |
-|---|---|---|
-| Local build (default) | `./scripts/setup.sh` | No; no deployment or publication |
-| Install | `./scripts/setup.sh --deploy` | Yes (the wizard) |
-| Restart | `./scripts/setup.sh --restart [--local-build]` | No, it reuses `.env` |
+| Mode | Command | Asks questions? | How it ends |
+|---|---|---|---|
+| Local build (default) | `./scripts/setup.sh` | No; no deployment or publication | `exec`s `build-and-push.sh` (line 176) and is replaced by it — prints `All images built successfully!` then the `Next: ./scripts/setup.sh --deploy` hint, and exits |
+| Install | `./scripts/setup.sh --deploy` | Yes (the wizard) | `✓ ACE stack deployed via Helm` banner with the URLs and credentials |
+| Restart | `./scripts/setup.sh --restart [--local-build]` | No, it reuses `.env` | Same deploy banner; the method is auto-selected when non-interactive |
+| Baseline refresh | `./scripts/setup.sh --record-image-baseline` | No | Rewrites `deploy/image-baseline.tsv`, prints `Done (--record-image-baseline).`, `exit 0` — never deploys |
 
-Publishing images during an install or restart additionally needs `--push` (for example `./scripts/setup.sh --deploy --push`).
+Because the no-flag mode `exec`s the builder, **nothing in `setup.sh` past line 176 runs**: no
+configuration wizard, no `.env` is written, no prerequisite self-heal, no cluster. The builder
+still *reads* the env file for its own settings (`IMAGE_REGISTRY`, `IMAGE_MIRROR_NAMESPACE`,
+`ACE_IMAGE_TAG`, `ACE_BUILD_NETWORK`, `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` via
+`registry_load`) and logs in when a registry is set. This mode is the single most common
+source of "setup finished but nothing is running".
+
+Publishing images during an install or restart additionally needs `--push` (for example `./scripts/setup.sh --deploy --push`). Flag rules enforced at startup:
+
+- `--push` and `--local-build` cannot be combined → `ERROR: --push and --local-build cannot be combined.`
+- `--rootless-docker` and `--agent=` require `--deploy` or `--restart` → `ERROR: --rootless-docker and --agent require --deploy or --restart.`
+- Choosing a publish option in the wizard without `--push` stops with `ERROR: publishing images requires --push.`
 
 ### 1.1 Preparation (runs in both install modes)
 
@@ -42,16 +54,19 @@ Publishing images during an install or restart additionally needs `--push` (for 
 
 The questions are asked in this order. Answers are written to `.env` in the "write values" block.
 
-1. Setup style: **e** (all questions now) or **g** (section by section)
-2. **Build images?** `p` = build and push (needs `--push` on the command line), `l` = build some locally, **`A`/Enter** = build everything locally, `n` = skip and pull from the registry. This sets `PLATFORM_IMAGE_SOURCE`.
-3. Experiment image sources: `l`/`r` for install-app, install-agent and workflow runtime images. Skipped when you chose `A`. This sets `INSTALL_APP_IMAGE_SOURCE`, `INSTALL_AGENT_IMAGE_SOURCE` and `LITMUS_IMAGES_SOURCE`.
-4. **IMAGE_REGISTRY**, plus username and token when it is set (`ask_image_registry`)
-5. LLM providers: Azure OpenAI, Gemini, OpenRouter, Ollama
-6. Flash-agent model alias, then the agent to benchmark
-7. `CLUSTER_MODE` (auto / local / cloud / fresh) and the corporate CA certificate
-8. **Deploy?** `k` = kubectl, **`h`/Enter** = Helm, `n` = skip
+0. **Rootless Docker** — `Set up and use rootless Docker for this checkout? [y/N]` (skipped when `--rootless-docker` was passed). Writes `DOCKER_HOST_SOCK`.
+1. **Setup style**: `Choice [e/G]` — **e** (all questions now, then unattended) or **g**/Enter (section by section)
+2. **`CLUSTER_MODE`**: `auto` / `fresh` / `local` / `cloud`, default `auto` (auto-upgraded to `cloud` when the current kube context is a cloud provider)
+3. **Build images?** `Choice [p/l/A/n]` — `p` = build and push (needs `--push` on the command line), `l` = build some locally, **`a`/Enter** = build everything locally, `n` = skip and pull from the registry. This sets `PLATFORM_IMAGE_SOURCE`. On a cloud cluster the question is instead `Choice [p/N]`, where Enter uses the images already published.
+4. Experiment image sources: `[l/r, Enter=l]` for install-app, install-agent and workflow runtime images. Skipped when you chose `a` (all set to `local`) or when `CLUSTER_MODE=cloud` (all set to `registry`). Sets `INSTALL_APP_IMAGE_SOURCE`, `INSTALL_AGENT_IMAGE_SOURCE` and `LITMUS_IMAGES_SOURCE`.
+5. **IMAGE_REGISTRY**, plus username and token when it is set (`ask_image_registry`); `-` clears it
+6. LLM providers: Azure OpenAI (**every follow-up Azure question is skipped when the API key is left empty**), Gemini, OpenRouter, Ollama (`Set up Ollama?` defaults to **Y** when no other provider key was given)
+7. Flash-agent model alias — the default is the first *configured* alias in the order Ollama → Azure → Gemini → OpenRouter, deliberately **not** the value saved in `.env`
+8. The agent to benchmark (`BENCHMARK_AGENT`) — skipped when `--agent=<name>` was passed
+9. The corporate CA certificate (`CUSTOM_CA_CERT_PATH`)
+10. **Deploy?** `Choice [k/H/n]` — `k` = kubectl, **`h`/Enter** = Helm, `n` = skip. A `cloud` cluster forces `h`.
 
-In restart mode none of these are asked. `CLUSTER_MODE`, `PLATFORM_IMAGE_SOURCE` and the other values come from `.env` (block `if [[ "$SETUP_MODE" == "restart" ]]`).
+In express mode (`e`) the deploy question is asked up front with the others; in guided mode it comes after the build. In restart mode none of these are asked. `CLUSTER_MODE`, `PLATFORM_IMAGE_SOURCE` and the other values come from `.env` (block `if [[ "$SETUP_MODE" == "restart" ]]`), and an interactive restart offers one prompt: `r Reconfigure all choices  |  Enter = Continue with policy above`.
 
 ### 1.3 After the wizard
 
@@ -60,7 +75,7 @@ In restart mode none of these are asked. `CLUSTER_MODE`, `PLATFORM_IMAGE_SOURCE`
 | LiteLLM config | Adds the chosen Ollama model to `litellm_config.yaml` | "patch litellm_config.yaml" |
 | Ollama | Starts this checkout's Ollama container and pulls the model in the background | `start-local-services.sh --deploy --only-ollama` |
 | kind pre-warm | Express mode only: creates the kind cluster in the background while images build | "Pre-warm KinD cluster" → `ensure_kind_cluster` |
-| Build | Builds the selected images in parallel, at most half the CPUs at once. Logs go to `.tmp/build-logs/<n>.log`. Base images come from the registry (`docker_build_resolved`). With `p` (and `--push`) it also pushes them. Any failure stops setup. | "build (push to the image registry or local)" |
+| Build | Builds the selected images in parallel, at most half the CPUs at once (min 1, max 6; override with `ACE_BUILD_PARALLELISM`). Logs go to `.tmp/build-logs/<n>.log` — the directory is wiped at the start of every build. Docker's cache is off unless `--allow-build-cache` is passed. Base images come from the registry (`docker_build_resolved`). With `p` (and `--push`) it also pushes them. Any failure stops setup. | "build (push to the image registry or local)" |
 | Deploy | `helm_deploy` (default) or `k8s_deploy` | `case "${deploy_choice,,}"` |
 | MongoDB restore | Wizard only: offers a `shut_down.sh` backup (the default is an empty database) | `offer_mongodb_restore` |
 | Experiment images | Builds or loads the experiment images whose source is `local` | `scripts/prepare-images.sh --deploy` (run in the background during deploy) |

@@ -18,6 +18,17 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 **Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh --deploy` checks them all first and prints the exact install command for anything missing.
 
+<div class="callout callout-warning">
+<span class="callout-title">⚠ <code>--deploy</code> is required — plain <code>./scripts/setup.sh</code> only builds images</span>
+Without <code>--deploy</code> (or <code>--restart</code>) the script builds every image and <strong>exits</strong>; it never writes <code>.env</code>, never creates a cluster and never asks a question. A build-only run ends with:
+<pre><code>======================================
+  All images built successfully!
+======================================
+  Build-only run: nothing was deployed and no cluster was changed.
+  Next: ./scripts/setup.sh --deploy    (configure .env, create the cluster and install ACE)</code></pre>
+That is a successful build, not a failure — but the platform is not running yet. Run <code>./scripts/setup.sh --deploy</code> to install it.
+</div>
+
 <div class="qs-steps">
   <div class="qs-step">
     <div class="qs-num">1</div>
@@ -35,11 +46,31 @@ cd ace-monorepo</code></pre>
       <pre><code>./scripts/setup.sh --deploy</code></pre>
       <p>Enter your LLM credentials when asked and press <strong>Enter</strong> at every other prompt. The defaults are the stable, reproducible configuration:</p>
       <ul>
-        <li><strong>Build ALL locally</strong> — every first-party image (control plane, installers, agents, sidecar, ITBench runner) and the immutable <em>hub bundle</em> (app/agent/fault catalogs + charts) is built from <em>this checkout</em> and side-loaded into kind, so what runs is exactly what you cloned. Nothing is cloned from GitHub at runtime.</li>
-        <li><strong>Helm</strong> deploy (<code>h</code>); <code>k</code> = plain <code>kubectl apply</code> of the same stack.</li>
+        <li><strong>Build ALL locally</strong> — Enter at <code>Choice [p/l/A/n]</code> selects <em>build ALL locally</em>: every first-party image (control plane, installers, agents, sidecar, ITBench runner) and the immutable <em>hub bundle</em> (app/agent/fault catalogs + charts) is built from <em>this checkout</em> and side-loaded into kind, so what runs is exactly what you cloned. Nothing is cloned from GitHub at runtime.</li>
+        <li><strong>Helm</strong> deploy — Enter at <code>Choice [k/H/n]</code> selects <code>h</code> (Helm); <code>k</code> = plain <code>kubectl apply</code> of the same stack, <code>n</code> = skip deploying.</li>
         <li>After the stack is up, setup registers the <code>ace-local</code> chaos infrastructure and waits until it is connected, then seeds the demo experiments.</li>
       </ul>
       <p>Setup stops with an explicit error if a required image fails to build or the hub bundle cannot be prepared, rather than deploying something that fails later with <code>ImagePullBackOff</code>. See <a href="{{ "/setup/managing-services.html" | relative_url }}">Managing services</a> for day-to-day commands.</p>
+    </div>
+  </div>
+  <div class="qs-step">
+    <div class="qs-num">3</div>
+    <div class="qs-body">
+      <strong>Confirm it finished</strong>
+      <p>A successful install ends with this banner — the ports are read from your <code>.env</code>, so they may differ on a shared host:</p>
+      <pre><code>=======================================================
+  ✓ ACE stack deployed via Helm
+=======================================================
+  Release       ace  (namespace: ace)
+  AgentCert UI  http://localhost:2001          login: admin / litmus
+  Langfuse      http://localhost:4002          login: admin@agentcert.local / agentcert-admin
+  Certifier     http://localhost:18000/docs
+  LiteLLM       http://localhost:14000
+  MongoDB       localhost:27017
+
+  status:   kubectl get pods -n ace
+=======================================================</code></pre>
+      <p>If the banner instead carries <code>! Chaos infrastructure is NOT connected</code>, the stack is up but experiments cannot run yet — fix the warnings above it and re-run <code>./scripts/setup.sh --restart</code>.</p>
     </div>
   </div>
 </div>
@@ -66,7 +97,13 @@ without prompts with <code>./scripts/setup.sh --restart</code>.<br>
 | kubectl | v1.27+ | `kubectl version --client` | `sudo snap install kubectl --classic` or [kubernetes.io ↗](https://kubernetes.io/docs/tasks/tools/) |
 | git | any | `git --version` | `sudo apt-get install git` |
 | helm | v3.12+ | `helm version --short` | [helm.sh ↗](https://helm.sh/docs/intro/install/) — used by the default (Helm) deploy |
-| python3 | 3.8+ | `python3 --version` | `sudo apt-get install python3` — setup's own helpers (stdlib only) |
+| python3 | 3.8+ | `python3 --version` | `sudo apt-get install python3` — setup's own helpers (stdlib only). Python **3.12** is needed only to run the certifier as a host process (local dev); `check-prerequisites.sh` can install it with `uv` when `ACE_PREREQ_BOOTSTRAP_PYTHON=1`. |
+
+Only **Docker, `docker compose` v2 and git** are hard requirements — missing any of
+them stops the run with `✗ docker, docker compose, and git are required for any setup
+path.` kind, kubectl, helm, Node and Go are reported as warnings with the install
+command, and a Docker version below 28 only warns (`Continuing anyway.`). A clean
+check ends with `✓ All required prerequisites satisfied.`
 
 **LLM credentials** — you need at least one of:
 
@@ -110,7 +147,7 @@ The 4-phase certification pipeline calls Azure OpenAI directly (standard model, 
   <div class="svc-card">
     <div class="svc-card-name">Auth</div>
     <div class="svc-card-desc">JWT issuance + OIDC via Dex</div>
-    <span class="svc-card-port">:3000 / :3030</span>
+    <span class="svc-card-port">:3005 / :3030</span>
   </div>
   <div class="svc-card">
     <div class="svc-card-name">MongoDB</div>
@@ -125,7 +162,7 @@ The 4-phase certification pipeline calls Azure OpenAI directly (standard model, 
   <div class="svc-card">
     <div class="svc-card-name">Langfuse</div>
     <div class="svc-card-desc">Trace store — every agent decision recorded here</div>
-    <a href="http://localhost:4000" class="svc-card-port">:4000</a>
+    <a href="http://localhost:4002" class="svc-card-port">:4002</a>
   </div>
   <div class="svc-card">
     <div class="svc-card-name">Certifier</div>
@@ -153,7 +190,7 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
       <span class="arch-arrow-h">⟷</span>
       <div class="arch-svc">GraphQL API <span class="arch-svc-port">:8081</span></div>
       <span class="arch-arrow-h">⟷</span>
-      <div class="arch-svc">Auth <span class="arch-svc-port">:3000 / :3030</span></div>
+      <div class="arch-svc">Auth <span class="arch-svc-port">:3005 / :3030</span></div>
     </div>
     <div class="arch-services" style="margin-top:.4rem;">
       <div class="arch-svc">MongoDB <span class="arch-svc-port">:27017</span></div>
@@ -203,7 +240,7 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
   <div class="arch-single">
     <div class="arch-pill arch-pill-blue">
       Langfuse
-      <span class="arch-pill-port">:4000</span>
+      <span class="arch-pill-port">:4002</span>
       <span class="arch-pill-note">trace store · every agent decision recorded</span>
     </div>
   </div>
@@ -274,7 +311,7 @@ ACE composes four subsystems. Understanding how they connect makes debugging and
   <div class="route-card">
     <div class="route-label">Local Dev</div>
     <div class="route-card-title">Host processes</div>
-    <div class="route-card-env">start-agentcert-v2.sh</div>
+    <div class="route-card-env">scripts/azure_build/start-agentcert-v2.sh</div>
     <div class="route-card-when">Actively developing the Go backend or React frontend. Auth, GraphQL, and the UI run directly on the host with hot-reload; MongoDB, Langfuse, LiteLLM, and the Certifier run in Docker.</div>
     <a href="{{ "/setup/local-dev.html" | relative_url }}" class="route-card-link">Setup guide →</a>
   </div>
@@ -296,12 +333,16 @@ kubectl get pods -n ace                                    # health check
 kubectl logs -n ace deploy/graphql -f                      # control plane logs
 kubectl logs -n ace deploy/certifier -f                    # pipeline logs
 kubectl rollout restart -n ace deploy/auth deploy/graphql deploy/web deploy/certifier  # reload config
-kind delete cluster --name agentcert                       # tear down everything
+./scripts/shut_down.sh                                     # tear down this checkout (dumps MongoDB first)
 ```
+
+The cluster is named `agentcert-<ACE_INSTANCE_NAME>`, not `agentcert` — use
+`./scripts/shut_down.sh` rather than a hand-written `kind delete cluster`, so the
+MongoDB dump and the ownership marker are handled for you.
 
 <div class="callout callout-warning">
 <span class="callout-title">⚠ Applying .env changes</span>
-After editing <code>.env</code>, re-run <code>./scripts/setup.sh --deploy</code> and answer Y to deploy. It recreates the <code>ace-env</code> Secret and rolls out affected deployments.
+After editing <code>.env</code>, re-run <code>./scripts/setup.sh --restart</code> (no prompts) or <code>./scripts/setup.sh --deploy</code> and pick <code>h</code>/<code>k</code> at the <code>Choice [k/H/n]</code> prompt. It recreates the <code>ace-env</code> Secret and rolls out affected deployments.
 </div>
 
 ---

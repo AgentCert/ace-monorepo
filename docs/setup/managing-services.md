@@ -17,20 +17,23 @@ repo root against the `ace` namespace.
 All ACE services are Kubernetes Deployments (or StatefulSets) in the `ace`
 namespace:
 
-| Kubernetes name | What it is | Host port |
+| Kubernetes name | What it is | Host port (default) |
 |---|---|---|
-| `deploy/auth` | Authentication backend (REST :3000, gRPC :3030) | 3000 / 3030 |
+| `deploy/auth` | Authentication backend (REST :3000, gRPC :3030 in-cluster) | 3005 / 3030 |
 | `deploy/graphql` | Core backend / GraphQL API (:8081) | 8081 |
 | `deploy/web` | AgentCert UI (nginx) | 2001 |
 | `deploy/certifier` | Certifier pipeline (FastAPI) | 18000 |
 | `deploy/litellm` | LiteLLM proxy | 14000 |
-| `deploy/langfuse-web` | Langfuse UI/API | 4000 |
+| `deploy/langfuse-web` | Langfuse UI/API | 4002 |
 | `deploy/langfuse-worker` | Langfuse background processor | — |
 | `statefulset/mongodb` | MongoDB replica set | 27017 |
 | `deploy/postgres` | PostgreSQL (Langfuse) | — |
 | `deploy/clickhouse` | ClickHouse (Langfuse traces) | — |
 | `deploy/redis` | Redis (Langfuse queue) | — |
 | `deploy/minio` | MinIO S3 storage (Langfuse blobs) | 19090 |
+
+Host ports come from the `KIND_HOSTPORT_*` keys in `.env`; setup picks free ones on a
+shared host, so check `.env` (or the banner setup printed) if a URL does not answer.
 
 ```bash
 kubectl get pods -n ace          # list everything with current state
@@ -51,7 +54,7 @@ Quick HTTP check:
 ```bash
 curl -s -o /dev/null -w "UI      %{http_code}\n" http://localhost:2001/
 curl -s -o /dev/null -w "graphql %{http_code}\n" http://localhost:8081/
-curl -s -o /dev/null -w "langfuse %{http_code}\n" http://localhost:4000/
+curl -s -o /dev/null -w "langfuse %{http_code}\n" http://localhost:4002/
 curl -s -o /dev/null -w "litellm %{http_code}\n" http://localhost:14000/health
 curl -s -o /dev/null -w "cert    %{http_code}\n" http://localhost:18000/docs
 ```
@@ -93,13 +96,21 @@ kubectl logs -n ace deploy/graphql --previous
 
 ## Applying `.env` Changes
 
-After editing `.env`, re-run the setup wizard. It recreates the `ace-env` Secret
-and restarts all affected deployments:
+After editing `.env`, re-apply it. `--restart` reuses every saved answer and asks
+nothing:
+
+```bash
+./scripts/setup.sh --restart
+```
+
+Use the full wizard only when you want to change the answers themselves:
 
 ```bash
 ./scripts/setup.sh --deploy
-# … answer Y to deploy at the end
+# … at the final prompt, `Choice [k/H/n]:` — Enter (or `h`) deploys with Helm
 ```
+
+Both recreate the `ace-env` Secret and roll out the affected deployments.
 
 To update only the Secret without rerunning the full wizard:
 
@@ -146,13 +157,20 @@ kubectl delete pod -n ace -l app=graphql
 # To force: temporarily edit imagePullPolicy to Always, apply, then revert.
 ```
 
-For a full image refresh (all services):
+For a full image refresh (all services), rebuild from this checkout and let setup
+side-load and restart everything:
 
 ```bash
-# Pull into kind node first:
+./scripts/setup.sh --restart --local-build
+```
+
+To refresh a single published image by hand, note that the cluster name is the
+`KIND_CLUSTER_NAME` value in `.env` (`agentcert-<ACE_INSTANCE_NAME>`), not `agentcert`:
+
+```bash
 docker pull agentcert/agentcert-graphql:latest
-kind load docker-image agentcert/agentcert-graphql:latest --name agentcert
-# Then restart the pod:
+kind load docker-image agentcert/agentcert-graphql:latest \
+  --name "$(grep -m1 '^KIND_CLUSTER_NAME=' .env | cut -d= -f2-)"
 kubectl rollout restart -n ace deploy/graphql
 ```
 
@@ -160,13 +178,39 @@ kubectl rollout restart -n ace deploy/graphql
 
 ## Tear Down and Recreate
 
-```bash
-# Stop everything and delete the kind cluster (removes all data):
-kind delete cluster --name agentcert
+Use the script — it dumps MongoDB first, then removes this checkout's containers,
+volumes and kind cluster:
 
-# Recreate from scratch:
-kind create cluster --config local-personal-workspace/kind-agentcert.yaml
-./scripts/setup.sh --deploy   # answer Y to deploy
+```bash
+./scripts/shut_down.sh          # add -y to skip the confirmation prompts
+```
+
+What it does:
+
+| Action | Detail |
+|---|---|
+| Dumps MongoDB | `.tmp/mongodb-backups/<instance>/mongodb-<UTC>.archive.gz`, 10 newest kept. Skip with `--no-mongo-backup` |
+| Deletes the kind cluster | `kind delete cluster --name "$KIND_CLUSTER_NAME"` plus its ownership-marker volume |
+| Deletes this instance's containers and volumes | Everything scoped to `ACE_INSTANCE_NAME` |
+| **Keeps** Docker images | `docker image prune` / `docker rmi` them yourself |
+| **Keeps** `.env` | Read-only to the script |
+| Keeps the Ollama model volume | Default; override with `--delete-ollama-model` |
+| Deletes Langfuse trace volumes | Default; keep them with `--keep-langfuse-traces` |
+
+Recreate afterwards — setup rebuilds the cluster from the saved `.env` and offers
+to restore the dump it took:
+
+```bash
+./scripts/setup.sh --restart
+```
+
+Deleting the cluster by hand needs the real name, which is
+`agentcert-<ACE_INSTANCE_NAME>` (e.g. `agentcert-sachin-mourya`) and is stored in
+`KIND_CLUSTER_NAME` in `.env` — it is never plain `agentcert`:
+
+```bash
+kind get clusters                                   # shows the real name
+kind delete cluster --name "$(grep -m1 '^KIND_CLUSTER_NAME=' .env | cut -d= -f2-)"
 ```
 
 To keep the cluster but wipe all ACE data:
@@ -176,7 +220,7 @@ To keep the cluster but wipe all ACE data:
 kubectl delete namespace ace
 
 # Redeploy:
-./scripts/setup.sh --deploy   # answer Y to deploy
+./scripts/setup.sh --restart
 ```
 
 ---
@@ -209,8 +253,8 @@ helm uninstall ace -n ace
 ```
 
 Helm vs kubectl — after `.env` changes the workflow is the same: re-run
-`./scripts/setup.sh --deploy` and choose `h`. The script recreates the `ace-env` Secret
-before running `helm upgrade`.
+`./scripts/setup.sh --restart` (or `--deploy` and press Enter at `Choice [k/H/n]`).
+The script recreates the `ace-env` Secret before running `helm upgrade`.
 
 ---
 

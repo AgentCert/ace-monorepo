@@ -598,6 +598,18 @@ else
 fi
 echo -e "${CYAN}======================================${NC}"
 
+# A plain local build is the end of the run: nothing was deployed and no
+# cluster was touched. Users who reach this banner by running ./scripts/setup.sh
+# with no flags otherwise have no way to tell a successful build-only run from a
+# setup that stopped early, so spell out the next command. Callers that exec
+# this script for their own build-only mode (prepare-images.sh,
+# start-local-services.sh) override the hint with their own next step.
+if [[ ${#FAILED[@]} -eq 0 && "${LOCAL_ONLY}" == true && "${KIND_LOAD}" == false ]]; then
+    echo -e "${CYAN}  Build-only run: nothing was deployed and no cluster was changed.${NC}"
+    echo -e "${CYAN}  Next: ${ACE_BUILD_NEXT_STEP_HINT:-./scripts/setup.sh --deploy    (configure .env, create the cluster and install ACE)}${NC}"
+    echo ""
+fi
+
 # Point deployments at the release just pushed.
 if [[ -n "${RELEASE_TAG}" && -n "${ONLY}" ]]; then
     log_warn "--only: not every ACE image has :${RELEASE_TAG}, so ACE_IMAGE_TAG in ${ENV_FILE} was left unchanged."

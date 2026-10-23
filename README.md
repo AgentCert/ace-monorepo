@@ -190,6 +190,11 @@ cd ace-monorepo
 ./scripts/setup.sh --deploy          # wizard: creates .env, creates kind cluster, deploys to K8s
 ```
 
+> **`--deploy` is required.** `./scripts/setup.sh` with no flags builds every image
+> and **exits** — it writes no `.env`, creates no cluster and asks nothing. It ends with
+> `All images built successfully!` followed by `Next: ./scripts/setup.sh --deploy`.
+> That is a successful build, not an install.
+
 The wizard asks for your LLM credentials; press **Enter** at every other prompt. The defaults
 build every first-party image and the immutable hub bundle (app/agent/fault catalogs + charts)
 from this checkout, deploy with Helm into a per-user kind cluster, register and connect the
@@ -240,10 +245,10 @@ for your first experiment.
 |---|---|---|
 | AgentCert UI | http://localhost:2001 | `admin` / `litmus` |
 | GraphQL (REST/WS) | http://localhost:8081 | — |
-| Auth (REST) | http://localhost:3000 | — |
+| Auth (REST) | http://localhost:3005 | — |
 | Certifier (Swagger) | http://localhost:18000/docs | — |
 | LiteLLM proxy | http://localhost:14000 | — |
-| Langfuse | http://localhost:4000 | `admin@agentcert.local` / `agentcert-admin` |
+| Langfuse | http://localhost:4002 | `admin@agentcert.local` / `agentcert-admin` |
 | MongoDB | `mongodb://admin:1234@localhost:27017/?replicaSet=rs0&authSource=admin` | — |
 
 ### 4. Day-to-day operations
@@ -291,7 +296,7 @@ kubectl logs -n ace deploy/certifier -f
 kubectl rollout restart -n ace deploy/certifier
 ```
 
-All credentials are injected from the `ace-env` Secret (created from `.env` by `scripts/setup.sh`). On a new host: clone, run `./scripts/setup.sh --deploy`, answer Y to deploy — the certifier comes up alongside every other service.
+All credentials are injected from the `ace-env` Secret (created from `.env` by `scripts/setup.sh`). On a new host: clone, run `./scripts/setup.sh --deploy` and press Enter at the `Choice [k/H/n]` deploy prompt — the certifier comes up alongside every other service.
 
 ### Quick command reference
 
@@ -430,12 +435,21 @@ Build every project-owned image in `deploy/images.txt`:
 ```bash
 make build
 # equivalent: ./scripts/build-and-push.sh
-# equivalent: ./scripts/setup.sh
+# equivalent: ./scripts/setup.sh     ← builds and EXITS; it does not install anything
 ```
 
 These defaults build locally without login, push, image pruning, cluster loading,
-or deployment. For a faster rebuild, use
-`make build BUILD_ARGS="--allow-build-cache"`.
+or deployment. The run ends with:
+
+```text
+======================================
+  All images built successfully!
+======================================
+  Build-only run: nothing was deployed and no cluster was changed.
+  Next: ./scripts/setup.sh --deploy    (configure .env, create the cluster and install ACE)
+```
+
+For a faster rebuild, use `make build BUILD_ARGS="--allow-build-cache"`.
 
 Publish explicitly with `./scripts/build-and-push.sh --push --tag RELEASE-N`
 using a new release tag, or install explicitly with `./scripts/setup.sh --deploy`.

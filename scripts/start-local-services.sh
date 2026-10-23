@@ -131,6 +131,9 @@ if [[ "${DEPLOY}" == false ]]; then
     # shellcheck source=lib/registry.sh
     source "${REPO_ROOT}/scripts/lib/registry.sh"
     build_args+=(--only "$(inventory_only_regex "${REPO_ROOT}/deploy/images.txt" context certifier)")
+    # The builder prints a "Next:" hint after its success banner; point it at
+    # this script's own deploy mode instead of setup.sh's.
+    export ACE_BUILD_NEXT_STEP_HINT="./scripts/start-local-services.sh --deploy    (start the supporting services)"
     exec bash "${SCRIPT_DIR}/build-and-push.sh" "${build_args[@]}"
 fi
 

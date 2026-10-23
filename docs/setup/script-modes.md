@@ -1,5 +1,32 @@
 # Build, publish and install script modes
 
+## The one distinction that catches people out
+
+`scripts/setup.sh` has two completely different jobs, chosen by a flag:
+
+| Command | What it does | Does it deploy? |
+|---|---|---|
+| `./scripts/setup.sh` | **Builds images and exits.** It `exec`s `build-and-push.sh` on line 176 and is replaced by it, so no `.env` is written, no cluster is created and no wizard is shown. | **No** |
+| `./scripts/setup.sh --deploy` | The installation wizard: writes `.env`, builds, creates/reuses the cluster, installs ACE, connects the chaos infrastructure. | Yes |
+| `./scripts/setup.sh --restart` | Re-applies the saved `.env` with no prompts. | Yes |
+
+A successful build-only run ends exactly like this, and then stops:
+
+```text
+======================================
+  All images built successfully!
+======================================
+  Build-only run: nothing was deployed and no cluster was changed.
+  Next: ./scripts/setup.sh --deploy    (configure .env, create the cluster and install ACE)
+```
+
+That banner is a **success**, not an early exit. If you wanted a running platform,
+the build was only the first half — run `./scripts/setup.sh --deploy` next.
+
+---
+
+## Building
+
 Build locally from the monorepo root:
 
 ```bash
@@ -9,9 +36,9 @@ make build
 ./scripts/setup.sh
 ```
 
-All three build **every `build` row in `deploy/images.txt`**. They do not push,
-prune images, load a cluster, restart workloads, or change `.env`. When
-`IMAGE_REGISTRY` is set they log in to it first, because base images resolve
+All three build **every `build` row in `deploy/images.txt`** (14 first-party images).
+They do not push, prune images, load a cluster, restart workloads, or change `.env`.
+When `IMAGE_REGISTRY` is set they log in to it first, because base images resolve
 there (a failed login only warns).
 Base images and package dependencies can still be downloaded during a build.
 The default rebuilds without Docker's build cache. For a development rebuild:
@@ -22,7 +49,17 @@ make build BUILD_ARGS="--allow-build-cache"
 
 `BUILD_ARGS` goes to `build-and-push.sh` (`make build`, `make push`);
 `SETUP_ARGS` goes to `setup.sh` (`make install`, e.g. `SETUP_ARGS="--restart"`).
-Only `make push` publishes.
+Only `make push` publishes. `make install` refuses a `--push` smuggled into
+`SETUP_ARGS` — publish with `make push` instead.
+
+A build that fails ends with this instead, and exits non-zero:
+
+```text
+======================================
+  Completed with failures:
+    ✗ certifier (build)
+======================================
+```
 
 ## Explicit operations
 
@@ -30,9 +67,9 @@ Only `make push` publishes.
 |---|---|---|
 | `make`, `make all`, `make build` | Build every inventory image locally | `make push` publishes; `make install` opens the deployment wizard |
 | `scripts/build-and-push.sh` | Build every inventory image locally | `--push` publishes; `--kind-load` loads KinD images and restarts mapped deployments |
-| `scripts/setup.sh` | Build every inventory image locally | `--deploy` or `--setup` installs; `--restart` reapplies the saved installation; publication additionally requires `--push` |
-| `scripts/prepare-images.sh` | Build every inventory image locally; `--hub-only` builds just the bundle | `--deploy` prepares images and registry configuration in the active cluster |
-| `scripts/start-local-services.sh` | Build certifier locally | `--deploy` starts the selected supporting services; `--restart` explicitly recreates them |
+| `scripts/setup.sh` | Build every inventory image locally, then **exit** (it `exec`s `build-and-push.sh`) | `--deploy` or `--setup` installs; `--restart` reapplies the saved installation; publication additionally requires `--push` |
+| `scripts/prepare-images.sh` | Build every inventory image locally, then exit; `--hub-only` builds just the bundle | `--deploy` prepares images and registry configuration in the active cluster |
+| `scripts/start-local-services.sh` | Build certifier locally, then exit — **no service is started** | `--deploy` starts the selected supporting services; `--restart` explicitly recreates them |
 | Component `build-*.sh` wrappers | Build their one inventory image through the common builder | Same `--push` and `--kind-load` options as the common builder |
 | Both `build-and-deploy-app-chart.sh` wrappers | Build install-app locally | `--push` publishes; `--deploy` loads Minikube and updates the selected `.env` |
 | `scripts/mirror-images.sh` | Pull the upstream third-party images into the local cache (no retagging) | `--push` publishes the copies and then removes only the copies that run created; `--dry-run` previews the operation |

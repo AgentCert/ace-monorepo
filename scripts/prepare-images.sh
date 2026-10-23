@@ -84,6 +84,9 @@ if [[ "${DEPLOY}" -eq 0 ]]; then
         source "${REPO_ROOT}/scripts/lib/registry.sh"
         build_args+=(--only "$(inventory_only_regex "${REPO_ROOT}/deploy/images.txt" recipe hub-bundle)")
     fi
+    # The builder prints a "Next:" hint after its success banner; point it at
+    # this script's own deploy mode instead of setup.sh's.
+    export ACE_BUILD_NEXT_STEP_HINT="./scripts/prepare-images.sh --deploy    (load/configure these images in the active cluster)"
     exec bash "${REPO_ROOT}/scripts/build-and-push.sh" "${build_args[@]}"
 fi
 

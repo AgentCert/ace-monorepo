@@ -136,9 +136,22 @@ def main():
                      ('--local','--push'), ('--push','--local'), ('--kind-load','--push')]:
             run('reject '+str(args), shell(builder, *args), expected=1, builds=0, pushes=0)
         run('explicit local mode', shell(builder, '--local', *flash), builds=1, pushes=0)
-        calls=run('committed-only uses the exported Dockerfile',shell(builder,'--committed-only',*flash),builds=1,pushes=0)
-        built=next(c for c in calls if c[:2]==['docker','build'])
-        assert '/.tmp/build-src/' in built[built.index('-f')+1]
+        # --committed-only only exports a context when that context is dirty (a
+        # clean checkout already *is* its committed content), so the scratch
+        # file below is what makes this assertion deterministic rather than
+        # dependent on whatever the developer happens to have uncommitted.
+        scratch = ROOT / 'agents/flash-agent/.ace-script-modes-scratch'
+        scratch.write_text('transient fixture\n')
+        try:
+            calls = run('committed-only uses the exported Dockerfile',
+                        shell(builder, '--committed-only', *flash), builds=1, pushes=0)
+            built = next(c for c in calls if c[:2] == ['docker', 'build'])
+            assert '/.tmp/build-src/' in built[built.index('-f')+1], built
+            # The export must come from HEAD, so the scratch file must not be in it.
+            exported = Path(built[built.index('-f')+1]).parent
+            assert not (exported / scratch.name).exists(), 'export leaked uncommitted content'
+        finally:
+            scratch.unlink(missing_ok=True)
         calls = run('local tag', shell(builder, '--tag','local-test', *flash), builds=1, pushes=0)
         assert any(c[:2] == ['docker','tag'] and c[-1].endswith(':local-test') for c in calls)
         run('explicit push', shell(builder, '--push', *flash), builds=1, pushes=2)

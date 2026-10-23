@@ -1,9 +1,10 @@
+ACE_REPO_ROOT := $(abspath ../..)
 # Makefile for flash-agent Docker image
 # ITOps Kubernetes Log Metrics Agent
 
 # Configuration
 IMAGE_REGISTRY ?= agentcert
-IMAGE_NAME ?= flash-agent
+IMAGE_NAME ?= agentcert-flash-agent
 IMAGE_TAG ?= latest
 
 # Full image reference
@@ -22,12 +23,12 @@ help: ## Show this help message
 .PHONY: build
 build: ## Build the Docker image
 	@echo "Building Docker image: $(IMAGE)"
-	docker build -t $(IMAGE) -f Dockerfile $(BUILD_CONTEXT)
+	bash -c 'unset IMAGE_REGISTRY; source "$$1"; registry_load "$$2" || exit; shift 2; docker_build_resolved "$$@"' _ "$(ACE_REPO_ROOT)/scripts/lib/registry.sh" "$(ACE_REPO_ROOT)/.env" Dockerfile -t "$(IMAGE)" "$(BUILD_CONTEXT)"
 
 .PHONY: build-no-cache
 build-no-cache: ## Build the Docker image without cache
 	@echo "Building Docker image (no cache): $(IMAGE)"
-	docker build --no-cache -t $(IMAGE) -f Dockerfile $(BUILD_CONTEXT)
+	bash -c 'unset IMAGE_REGISTRY; source "$$1"; registry_load "$$2" || exit; shift 2; docker_build_resolved "$$@"' _ "$(ACE_REPO_ROOT)/scripts/lib/registry.sh" "$(ACE_REPO_ROOT)/.env" Dockerfile --no-cache -t "$(IMAGE)" "$(BUILD_CONTEXT)"
 
 .PHONY: push
 push: ## Push the Docker image to registry
@@ -35,7 +36,8 @@ push: ## Push the Docker image to registry
 	docker push $(IMAGE)
 
 .PHONY: build-push
-build-push: build push ## Build and push the Docker image
+build-push: build ## Build successfully before publishing, including under make -j
+	$(MAKE) push
 
 .PHONY: run
 run: ## Run the container (requires K8S access)

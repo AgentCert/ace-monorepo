@@ -9,7 +9,7 @@ nav_order: 4
 <div class="callout callout-success">
 <span class="callout-title">Use this route when…</span>
 Your Kubernetes cluster lives in the cloud and the VM you run setup on can reach it with
-<code>kubectl</code>. <code>scripts/setup.sh</code> deploys the whole ACE stack (control plane,
+<code>kubectl</code>. <code>scripts/setup.sh --deploy</code> deploys the whole ACE stack (control plane,
 MongoDB, Langfuse, LiteLLM, Certifier) <strong>into</strong> that cluster with Helm, and the chaos
 experiments run in the same cluster.
 </div>
@@ -50,9 +50,9 @@ Use one of these:
 
 - **A published release** (simplest). Ask for the current tag, e.g. `RELEASE-2`, and give it to
   the wizard as `ACE_IMAGE_TAG`. Third-party images (mongo, litmuschaos/*, the demo apps, …)
-  must also be mirrored there: `./scripts/mirror-images.sh` once per registry.
+  must also be mirrored there: `./scripts/mirror-images.sh --push` once per registry.
 - **This checkout.** Answer `p` at the wizard's *Images* question: setup runs
-  `scripts/build-and-push.sh`, which builds and pushes all 14 ACE images (including the hub
+  `scripts/build-and-push.sh`, which builds and pushes every ACE image (including the hub
   bundle and the ITBench runner). You need push rights to the registry.
 
 Check at any time: `./scripts/check-registry-images.sh` (setup also runs this check before it
@@ -80,7 +80,7 @@ Set these in `.env` before running setup (all are documented in `.env.example`, 
 ## 4. Run setup
 
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 1. **Where will ACE run?** — setup reads your kube context; for an AKS/EKS/GKE cluster it
@@ -153,7 +153,7 @@ helm uninstall ace -n ace
 kubectl delete namespace ace litmus sock-shop book-info otel-demo --ignore-not-found --wait=false
 ./scripts/apply_cluster_prereqs.sh --uninstall  # removes registry-secret-sync from kube-system
 kubectl get namespaces                          # wait until those are gone
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 `helm uninstall` keeps PVCs; deleting the `ace` namespace removes them (and their disks).

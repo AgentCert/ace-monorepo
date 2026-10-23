@@ -17,7 +17,7 @@ The control plane is based on **Litmus ChaosCenter 3.x**, so the UI uses Litmus 
 <div class="qs-steps">
   <div class="qs-step">
     <div class="qs-num">1</div>
-    <div class="qs-body"><strong>Already done by <code>./scripts/setup.sh</code></strong> — it creates the <code>ace-local</code> environment, registers the <code>ace-local</code> chaos infrastructure (cluster scope, namespace <code>litmus</code>), installs its subscriber, and waits until it is CONNECTED.</div>
+    <div class="qs-body"><strong>Already done by <code>./scripts/setup.sh --deploy</code></strong> — it creates the <code>ace-local</code> environment, registers the <code>ace-local</code> chaos infrastructure (cluster scope, namespace <code>litmus</code>), installs its subscriber, and waits until it is CONNECTED.</div>
   </div>
   <div class="qs-step">
     <div class="qs-num">2</div>
@@ -77,7 +77,7 @@ If the subscriber still can't connect:
 <strong>1. Graphql pod not running.</strong> <code>kubectl get pods -n ace -l app=graphql</code> — must show Running.<br><br>
 <strong>2. Wrong SERVER_ADDR in .env.</strong> Check <code>grep SERVER_ADDR .env</code> — should be
 <code>http://graphql.ace.svc.cluster.local:8081/query</code>, not a host IP.<br>
-Re-run <code>./scripts/setup.sh</code> to patch and redeploy.<br><br>
+Re-run <code>./scripts/setup.sh --deploy</code> to patch and redeploy.<br><br>
 <strong>3. Subscriber in wrong namespace.</strong> Cross-namespace DNS works fine (<code>service.namespace.svc.cluster.local</code>). The subscriber in <code>litmus</code> can reach <code>graphql.ace.svc.cluster.local</code> without any extra config.
 </div>
 

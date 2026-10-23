@@ -18,7 +18,8 @@ RUN microdnf update --nodocs \
     && microdnf install --nodocs nginx \
     && microdnf clean all
 COPY --from=builder /web/dist /opt/chaos
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
 RUN chown 65534:0 -R /opt/chaos /var/log/nginx /etc/nginx
 USER 65534
-EXPOSE 2001
+EXPOSE 8185
 ENTRYPOINT ["sh", "-c", "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'"]

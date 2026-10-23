@@ -2,12 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# ACE first-time setup wizard
+# ACE local image build and explicit installation wizard
 # =============================================================================
 # Creates and fills the monorepo-root .env for a brand-new user, prompting ONLY
 # for what actually matters (Azure OpenAI) and defaulting everything else.
 #
-#   ./scripts/setup.sh
+#   ./scripts/setup.sh                  # build all images locally
+#   ./scripts/setup.sh --deploy         # configure and deploy
 #
 # Idempotent: re-run any time. It reads your current .env (or .env.example) for
 # defaults, so pressing Enter keeps the existing value. Nothing is committed —
@@ -86,12 +87,15 @@ usage() {
     cat <<'EOF'
 Usage: ./scripts/setup.sh [options]
 
-Create or re-apply a local ACE installation.
+Build all ACE images locally by default. Installation requires --deploy,
+--setup or --restart; publishing requires --push.
 
 Options:
-  --setup                  Run the interactive setup wizard (default).
+  --deploy, --setup        Run the interactive installation wizard.
   --restart                Re-apply the saved .env without wizard prompts.
+  --push                   Publish images (also required for publishing during deployment).
   --local-build            Build first-party images locally.
+  --env-file PATH          Configuration file (default: <repo-root>/.env).
   --rootless-docker        Use a private rootless Docker daemon for this checkout.
   --agent=<name>           Set BENCHMARK_AGENT to a directory under agents/.
   --allow-build-cache      Allow Docker build cache for local image builds.
@@ -106,10 +110,18 @@ ROOTLESS_DOCKER_ACTION=0
 ALLOW_BUILD_CACHE=0
 AGENT_FLAG=""
 RECORD_IMAGE_BASELINE=0   # --record-image-baseline: refresh deploy/image-baseline.tsv from what this host resolves now
-for _arg in "$@"; do
+DEPLOY=0
+PUSH_IMAGES=0
+while [[ $# -gt 0 ]]; do
+    _arg="$1"
     case "$_arg" in
-        --restart)               SETUP_MODE="restart" ;;
-        --setup)                 SETUP_MODE="setup" ;;
+        --restart)               SETUP_MODE="restart"; DEPLOY=1 ;;
+        --setup|--deploy)        SETUP_MODE="setup"; DEPLOY=1 ;;
+        --push)                  PUSH_IMAGES=1 ;;
+        --env-file)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "ERROR: --env-file requires a path" >&2; exit 2; }
+            ENV_FILE="$2"; shift
+            ;;
         --local-build)           BUILD_MODE="local" ;;
         --rootless-docker)       ROOTLESS_DOCKER_ACTION=1 ;;
         --allow-build-cache)     ALLOW_BUILD_CACHE=1 ;;
@@ -126,8 +138,24 @@ for _arg in "$@"; do
             exit 2
             ;;
     esac
+    shift
 done
 unset _arg
+
+if [[ "${PUSH_IMAGES}" -eq 1 && "${BUILD_MODE}" == local ]]; then
+    echo "ERROR: --push and --local-build cannot be combined." >&2
+    exit 2
+fi
+if [[ "${DEPLOY}" -eq 0 && "${RECORD_IMAGE_BASELINE}" -eq 0 ]]; then
+    if [[ "${ROOTLESS_DOCKER_ACTION}" -eq 1 || -n "${AGENT_FLAG}" ]]; then
+        echo "ERROR: --rootless-docker and --agent require --deploy or --restart." >&2
+        exit 2
+    fi
+    _build_args=(--env-file "${ENV_FILE}")
+    [[ "${PUSH_IMAGES}" -eq 1 ]] && _build_args+=(--push)
+    [[ "${ALLOW_BUILD_CACHE}" -eq 1 ]] && _build_args+=(--allow-build-cache)
+    exec "${SCRIPT_DIR}/build-and-push.sh" "${_build_args[@]}"
+fi
 
 # --- Pin KUBECONFIG so kubectl and helm cannot target different clusters -----
 # On any host where k3s is installed, /usr/local/bin/kubectl is a symlink to the
@@ -1248,20 +1276,18 @@ _SUBSCRIBER_IMAGE_TAG="$(cur SUBSCRIBER_IMAGE)"
 _SUBSCRIBER_IMAGE_TAG="${_SUBSCRIBER_IMAGE_TAG:-agentcert/litmusportal-subscriber:3.0.0}"
 
 # Image build definitions — available to both --setup (interactive) and --restart --local-build
-declare -a ALL_BUILD_IMAGES=(
-    "1|flash-agent|agentcert/agentcert-flash-agent|${REPO_ROOT}/agents/flash-agent|Dockerfile|direct"
-    "2|agent-sidecar|agentcert/agent-sidecar|${REPO_ROOT}/agent-sidecar|Dockerfile|direct"
-    "3|install-agent|agentcert/agentcert-install-agent|${REPO_ROOT}/agent-charts|install-agent/Dockerfile|direct"
-    "4|install-app|agentcert/agentcert-install-app|${REPO_ROOT}/app-charts|install-app/Dockerfile|direct"
-    "5|certifier|agentcert/certifier|${REPO_ROOT}/certifier|Dockerfile|direct"
-    "6|auth|agentcert/agentcert-auth|${REPO_ROOT}/AgentCert/chaoscenter/authentication|Dockerfile|direct"
-    "7|graphql|agentcert/agentcert-graphql|${REPO_ROOT}/AgentCert/chaoscenter/graphql|server/Dockerfile|direct"
-    "8|web|agentcert/agentcert-web|${REPO_ROOT}/AgentCert/chaoscenter/web|../../../compose/web/Dockerfile|direct"
-    "9|cluster-init|agentcert/cluster-init|${REPO_ROOT}/compose/cluster-init|Dockerfile|direct"
-    "10|subscriber|${_SUBSCRIBER_IMAGE_TAG}|${REPO_ROOT}/AgentCert/chaoscenter/subscriber|Dockerfile|direct"
-    "11|sre-agent-comprehensive|agentcert/sre-agent-comprehensive|${REPO_ROOT}/agents/sre-agent-comprehensive|Dockerfile|direct"
-    "12|sre-agent-crewai|agentcert/sre-agent-crewai|${REPO_ROOT}/agents/sre-agent-crewai|Dockerfile|direct"
-)
+declare -a ALL_BUILD_IMAGES=()
+_build_num=0
+while IFS='|' read -r _kind _group _image _ctx _recipe _flags; do
+    _build_num=$(( _build_num + 1 ))
+    _label="${_image#agentcert/}"; _label="${_label%:*}"; _label="${_label#agentcert-}"
+    _method=direct
+    [[ "${_recipe}" == hub-bundle ]] && _method=hub-bundle
+    [[ "${_label}" == litmusportal-subscriber ]] && _image="${_SUBSCRIBER_IMAGE_TAG}"
+    ALL_BUILD_IMAGES+=("${_build_num}|${_label}|${_image}|${REPO_ROOT}/${_ctx}|${_recipe}|${_method}")
+done < <(inventory_rows "${REPO_ROOT}/deploy/images.txt" build)
+unset _build_num _kind _group _image _ctx _recipe _flags _label _method
+
 
 if [[ "$SETUP_MODE" == "restart" ]]; then
     EXPRESS_MODE=0   # restart never runs the interactive express/guided wizard
@@ -1325,7 +1351,9 @@ if [[ "$SETUP_MODE" == "restart" ]]; then
                 for _entry in "${ALL_BUILD_IMAGES[@]}"; do
                     IFS='|' read -r _fnum _flabel _fimg _fctx _fdf _fmethod <<< "$_entry"
                     [[ -z "${_fctx}" || ! -d "${_fctx}" ]] && continue
-                    _frecorded="$(grep -m1 "^IMG_${_fnum}=" "${_fp_file}" 2>/dev/null | cut -d= -f2- || true)"
+                    # Exact key match (awk, not grep): labels contain "-" and
+                    # "." which would otherwise be read as regex metacharacters.
+                    _frecorded="$(awk -F= -v k="IMG_${_flabel}" '$1==k{sub(/^[^=]*=/,""); print; exit}' "${_fp_file}" 2>/dev/null || true)"
                     [[ -z "${_frecorded}" ]] && continue
                     _fsha="$(git -C "${_fctx}" rev-parse HEAD 2>/dev/null || echo unknown)"
                     _fdirty="$(git -C "${_fctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')"
@@ -2260,7 +2288,7 @@ if [[ -n "${_ollama_tag_final}" ]]; then
     _ollama_container="ollama-$(cur ACE_INSTANCE_NAME)"
     echo
     echo -e "${DIM}Ensuring this checkout's Ollama container ('${_ollama_container}') is up …${NC}"
-    if "${SCRIPT_DIR}/start-local-services.sh" --only-ollama --env-file "${ENV_FILE}"; then
+    if "${SCRIPT_DIR}/start-local-services.sh" --deploy --only-ollama --env-file "${ENV_FILE}"; then
         # Container is up — pull the model in the background so the rest of
         # setup (K8s deploy, image builds) can proceed concurrently. The pull
         # has no data dependency on anything that follows: K8s/Helm only needs
@@ -2417,10 +2445,10 @@ create_ca_configmap() {
 apply_registry_prereqs() {
     if [[ -n "$(cur IMAGE_REGISTRY)" ]]; then
         echo -e "${DIM}Applying registry pull credentials (IMAGE_REGISTRY=$(cur IMAGE_REGISTRY))…${NC}"
-        ACE_NAMESPACE="${1:-ace}" "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --env-file "${ENV_FILE}" </dev/null \
+        ACE_NAMESPACE="${1:-ace}" "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --deploy --env-file "${ENV_FILE}" </dev/null \
             || { warn "Registry prerequisites failed — pods pulling from $(cur IMAGE_REGISTRY) would get 401."; return 1; }
     elif kubectl get deployment registry-secret-sync -n kube-system >/dev/null 2>&1; then
-        "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --env-file "${ENV_FILE}" --uninstall
+        "${REPO_ROOT}/scripts/apply_cluster_prereqs.sh" --deploy --env-file "${ENV_FILE}" --uninstall
     fi
 }
 
@@ -2536,6 +2564,10 @@ enforce_registry_images() {
         set_env PLATFORM_IMAGE_SOURCE skip
     fi
     if [[ "${DO_BUILD:-0}" -eq 1 ]]; then
+        if [[ "${PUSH_IMAGES:-0}" -ne 1 ]]; then
+            echo "ERROR: publishing during setup requires --push." >&2
+            exit 2
+        fi
         CLOUD_PUBLISH=1
         DO_BUILD=0
     fi
@@ -3884,7 +3916,7 @@ maybe_launch_prepare_images_bg() {
         _PREPARE_IMAGES_LOG="${REPO_ROOT}/.tmp/prepare-images.log"
         echo -e "${DIM}Preparing experiment images in the background while the cluster comes up ...${NC}"
         echo -e "${DIM}  Progress: tail -f ${_PREPARE_IMAGES_LOG}${NC}"
-        "${REPO_ROOT}/scripts/prepare-images.sh" >"${_PREPARE_IMAGES_LOG}" 2>&1 &
+        "${REPO_ROOT}/scripts/prepare-images.sh" --deploy --env-file "${ENV_FILE}" >"${_PREPARE_IMAGES_LOG}" 2>&1 &
         _PREPARE_IMAGES_PID=$!
     fi
 }
@@ -3904,7 +3936,7 @@ wait_for_prepare_images_bg() {
 }
 prepare_hub_bundle_for_deploy() {
     echo -e "${DIM}Preparing the immutable local hub bundle before GraphQL starts...${NC}"
-    if ! "${REPO_ROOT}/scripts/prepare-images.sh" --hub-only; then
+    if ! "${REPO_ROOT}/scripts/prepare-images.sh" --deploy --hub-only --env-file "${ENV_FILE}"; then
         warn "Hub bundle preparation failed; refusing to deploy a control plane with no deterministic catalog."
         return 1
     fi
@@ -4642,6 +4674,10 @@ if [[ ${EXPRESS_MODE} -eq 1 && ( "${_DEPLOY_CHOICE,,}" == "h" || "${_DEPLOY_CHOI
 fi
 
 # --- build (push to the image registry or local) ----------------------------
+if [[ "${DO_BUILD:-0}" -eq 1 && "${PUSH_IMAGES:-0}" -ne 1 ]]; then
+    echo "ERROR: publishing during setup requires --push. Use --local-build for local images." >&2
+    exit 2
+fi
 abort_after_build_failure() {
     # Express setup may already be creating KinD in the background. Reap that
     # job before exiting so a retry cannot race an orphaned cluster creation.
@@ -4694,8 +4730,12 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
         BUILD_FAILED=()
         # Fingerprint file consumed by the --restart staleness check above
         # (git SHA + dirty-file-count per image's source dir, keyed by the
-        # ALL_BUILD_IMAGES entry number). Reset on every real build attempt so
-        # it only ever reflects sources actually rebuilt just now.
+        # image's LABEL). Keyed by label rather than by the ALL_BUILD_IMAGES
+        # entry number because that list is now generated from
+        # deploy/images.txt: inserting or reordering a row would otherwise
+        # shift every number and silently compare each image's fingerprint
+        # against a different image's recorded one. Reset on every real build
+        # attempt so it only ever reflects sources actually rebuilt just now.
         _FP_FILE="${REPO_ROOT}/.tmp/ace-build-fingerprints.env"
         mkdir -p "${REPO_ROOT}/.tmp"
         : > "${_FP_FILE}"
@@ -4781,6 +4821,8 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                 if [[ "${method}" == compose:* ]]; then
                     svc="${method#compose:}"
                     ( cd "${REPO_ROOT}" && docker compose build ${_no_cache_flag} "${svc}" ) && build_ok=1
+                elif [[ "${method}" == hub-bundle ]]; then
+                    hub_bundle_build "${REPO_ROOT}" "${tag}" ${_no_cache_flag} && build_ok=1
                 elif [[ ! -f "${ctx}/${df}" ]]; then
                     echo "Dockerfile not found: ${ctx}/${df}"
                 else
@@ -4794,7 +4836,7 @@ if [[ "${DO_BUILD}" -eq 1 || "${DO_LOCAL_BUILD}" -eq 1 ]]; then
                     # via docker-compose.yml, not a single source dir), so
                     # there's nothing meaningful to fingerprint there.
                     if [[ -n "${ctx}" && -d "${ctx}" ]]; then
-                        echo "IMG_${num}=$(git -C "${ctx}" rev-parse HEAD 2>/dev/null || echo unknown):$(git -C "${ctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')" \
+                        echo "IMG_${label}=$(git -C "${ctx}" rev-parse HEAD 2>/dev/null || echo unknown):$(git -C "${ctx}" status --porcelain -- . 2>/dev/null | wc -l | tr -d ' ')" \
                             > "${_BUILD_RESULTS_DIR}/${idx}.fp"
                     fi
                     if [[ "${DO_BUILD}" -eq 1 ]]; then
@@ -4908,7 +4950,7 @@ fi
 # (or :latest) plus a revision tag.
 if [[ "${CLOUD_PUBLISH}" -eq 1 ]]; then
     echo -e "${CYAN}  Publishing every ACE image from this checkout to $(cur IMAGE_REGISTRY)${NC}"
-    _publish_args=(--env-file "${ENV_FILE}")
+    _publish_args=(--push --env-file "${ENV_FILE}")
     [[ "${ALLOW_BUILD_CACHE:-0}" -eq 1 ]] && _publish_args+=(--allow-build-cache)
     if ! "${SCRIPT_DIR}/build-and-push.sh" "${_publish_args[@]}"; then
         warn "Publishing the ACE images failed; setup stopped before deployment."
@@ -4924,7 +4966,8 @@ fi
 # rebuild + reload images the loop above just built. Confirmed redundancy:
 # choosing "a" (build ALL locally) sets INSTALL_APP_IMAGE_SOURCE=local and
 # INSTALL_AGENT_IMAGE_SOURCE=local *and* includes those same two images in
-# ALL_BUILD_IMAGES (entries 3/4) — without this, agentcert-install-app and
+# ALL_BUILD_IMAGES (now generated from deploy/images.txt) — without this,
+# agentcert-install-app and
 # agentcert-install-agent were `docker build`+`kind load`ed once here and
 # then a second time, from scratch, inside prepare-images.sh, on every "build
 # ALL locally" run. Empty when nothing was built this run (e.g. plain

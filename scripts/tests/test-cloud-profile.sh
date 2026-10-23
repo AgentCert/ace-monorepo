@@ -236,7 +236,9 @@ for k in INSTALL_APP_IMAGE_SOURCE INSTALL_AGENT_IMAGE_SOURCE LITMUS_IMAGES_SOURC
 eq "every image source switched to registry" "${srcs}" "registry registry registry registry registry registry "
 eq "Never pull policies become Always" "$(cur INSTALL_APPLICATION_IMAGE_PULL_POLICY)/$(cur INSTALL_AGENT_IMAGE_PULL_POLICY)" "Always/Always"
 eq "hub bundle points at the published tag" "$(cur HUB_BUNDLE_IMAGE)" "agentcert/ace-hub-bundle:latest"
-CLUSTER_MODE=cloud; DO_BUILD=1; CLOUD_PUBLISH=0
+check "cloud publishing without --push is rejected" \
+    bash -c '! bash -c "$1"' _ "$(declare -f cur set_env enforce_registry_images cluster_provider_label image_source_normalize); ENV_FILE='${ENV_FILE}'; CLUSTER_PROVIDER=aks; BUILD_MODE=prompt; DO_BUILD=1; PUSH_IMAGES=0; enforce_registry_images 2>/dev/null"
+CLUSTER_MODE=cloud; DO_BUILD=1; CLOUD_PUBLISH=0; PUSH_IMAGES=1
 apply_cluster_profile 2>/dev/null
 eq "build and push on cloud publishes every ACE image" "${DO_BUILD}/${CLOUD_PUBLISH}" "0/1"
 check "--local-build on cloud exits non-zero" \

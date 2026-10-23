@@ -238,7 +238,7 @@ description: >-
 <p style="color:#6b7280;margin:0 0 1.1rem 0;font-size:.95rem;">Clone the repo, run the wizard, bring up the stack. Everything — Kubernetes, Langfuse, LiteLLM, certifier — starts with one command.</p>
 <pre style="background:#1e1b4b;color:#e2e8f0;border-radius:10px;padding:1.2rem 1.4rem;font-size:.85rem;line-height:1.7;overflow-x:auto;margin:0 0 1rem;"><code>git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
 cd ace-monorepo
-./scripts/setup.sh          # asks only for your Azure OpenAI key
+./scripts/setup.sh --deploy # asks only for your Azure OpenAI key
 docker compose up -d        # entire platform comes up</code></pre>
 <p style="color:#6b7280;font-size:.9rem;margin:0 0 1.4rem 0;">Open <strong style="color:#374151;">http://localhost:2001</strong> — log in with <code style="background:#f1f5f9;padding:.1rem .4rem;border-radius:4px;">admin / litmus</code>, connect your agent, run your first experiment. First certification report in under an hour.</p>
 <div style="display:flex;gap:.75rem;flex-wrap:wrap;">

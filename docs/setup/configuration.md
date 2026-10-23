@@ -73,7 +73,7 @@ The control-plane services (<code>auth</code>, <code>graphql</code>, <code>web</
 
 ## LLM Providers
 
-The wizard (`./scripts/setup.sh`) walks through three providers in order. Configure as many as you need:
+The wizard (`./scripts/setup.sh --deploy`) walks through three providers in order. Configure as many as you need:
 
 ### a) Azure OpenAI
 

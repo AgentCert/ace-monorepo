@@ -83,6 +83,13 @@ registry_load() {
         ACE_IMAGE_TAG="$(env_file_value ACE_IMAGE_TAG "${env_file}")"
     fi
     ACE_IMAGE_TAG="$(printf '%s' "${ACE_IMAGE_TAG}" | tr -d '[:space:]')"
+    ACE_BUILD_NETWORK="${ACE_BUILD_NETWORK-$(env_file_value ACE_BUILD_NETWORK "${env_file}")}"
+    ACE_BUILD_NETWORK="${ACE_BUILD_NETWORK:-default}"
+    case "${ACE_BUILD_NETWORK}" in
+        default|host|none) ;;
+        *) echo "ACE_BUILD_NETWORK must be default, host or none" >&2; return 1 ;;
+    esac
+    export ACE_BUILD_NETWORK
 
     # REGISTRY_* in .env belong to the IMAGE_REGISTRY written in .env. When the
     # caller overrides IMAGE_REGISTRY to empty (`IMAGE_REGISTRY= ./script`) on a
@@ -291,6 +298,34 @@ inventory_rows() {
     done < "${file}"
 }
 
+# Count the build rows in an inventory, so callers never hardcode "N images".
+# $1 = inventory file
+inventory_build_count() {
+    inventory_rows "$1" build | grep -c . || true
+}
+
+# Print an anchored --only regex selecting exactly the build rows whose context
+# or recipe matches, so callers never hardcode an image name. Matching is on the
+# inventory's own fields, which keeps the selection correct when an image is
+# renamed, retagged or moved to a different namespace.
+# $1 = inventory file, $2 = field (context|recipe), $3 = exact field value
+inventory_only_regex() {
+    local file="$1" field="$2" want="$3" kind group image context recipe flags names=()
+    while IFS='|' read -r kind group image context recipe flags; do
+        case "${field}" in
+            context) [[ "${context}" == "${want}" ]] || continue ;;
+            recipe)  [[ "${recipe}"  == "${want}" ]] || continue ;;
+            *) echo "inventory_only_regex: field must be context or recipe" >&2; return 1 ;;
+        esac
+        # Anchor on the repository, so ":tag" cannot match a different image
+        # that merely shares a name prefix.
+        names+=("^$(printf '%s' "${image%%:*}" | sed 's/[.[\*^$()+?{|]/\\&/g'):")
+    done < <(inventory_rows "${file}" build)
+    [[ ${#names[@]} -gt 0 ]] || { echo "inventory_only_regex: no build row with ${field}=${want}" >&2; return 1; }
+    local IFS='|'
+    printf '%s\n' "${names[*]}"
+}
+
 # Does this exact image reference exist in its registry? Uses the registry API
 # directly (works for any registry, needs only `docker login`), no pull.
 # Retries twice so a transient registry/API error is not reported as missing.
@@ -346,7 +381,7 @@ docker_build_resolved() {
     local dockerfile="$1" base_args=()
     shift
     mapfile -t base_args < <(dockerfile_base_image_args "${dockerfile}")
-    docker build "${base_args[@]}" -f "${dockerfile}" "$@"
+    docker build --network "${ACE_BUILD_NETWORK:-default}" "${base_args[@]}" -f "${dockerfile}" "$@"
 }
 
 # Build the hub bundle image from the checked-out chart/fault trees — the one
@@ -394,7 +429,7 @@ source_revision() {
     fi
     dir="${repo_root}/${ctx}"
     sha="$(git -C "${dir}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-    dirty="$(git -C "${dir}" status --porcelain -- . 2>/dev/null | head -1)"
+    dirty="$(git -C "${dir}" status --porcelain -- . 2>/dev/null | sed -n '1p')"
     if [[ -n "${dirty}" ]]; then printf '%s-dirty' "${sha}"; else printf '%s' "${sha}"; fi
 }
 

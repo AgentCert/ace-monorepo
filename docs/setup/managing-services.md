@@ -97,7 +97,7 @@ After editing `.env`, re-run the setup wizard. It recreates the `ace-env` Secret
 and restarts all affected deployments:
 
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 # … answer Y to deploy at the end
 ```
 
@@ -166,7 +166,7 @@ kind delete cluster --name agentcert
 
 # Recreate from scratch:
 kind create cluster --config local-personal-workspace/kind-agentcert.yaml
-./scripts/setup.sh   # answer Y to deploy
+./scripts/setup.sh --deploy   # answer Y to deploy
 ```
 
 To keep the cluster but wipe all ACE data:
@@ -176,7 +176,7 @@ To keep the cluster but wipe all ACE data:
 kubectl delete namespace ace
 
 # Redeploy:
-./scripts/setup.sh   # answer Y to deploy
+./scripts/setup.sh --deploy   # answer Y to deploy
 ```
 
 ---
@@ -209,7 +209,7 @@ helm uninstall ace -n ace
 ```
 
 Helm vs kubectl — after `.env` changes the workflow is the same: re-run
-`./scripts/setup.sh` and choose `h`. The script recreates the `ace-env` Secret
+`./scripts/setup.sh --deploy` and choose `h`. The script recreates the `ace-env` Secret
 before running `helm upgrade`.
 
 ---

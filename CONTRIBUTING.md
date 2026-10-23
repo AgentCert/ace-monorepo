@@ -80,7 +80,7 @@ The [README](./README.md) is the source of truth for environment setup. The shor
    Replace every `CHANGE_ME` / `REPLACE_ME`. **`.env` is gitignored — never commit secrets.**
 3. **Bring up local services** (MongoDB + Langfuse + LiteLLM + Certifier) with the recommended one-command path:
    ```bash
-   ./scripts/start-local-services.sh
+   ./scripts/start-local-services.sh --deploy
    ```
 4. **Start AgentCert** once `kubectl` access is configured:
    ```bash

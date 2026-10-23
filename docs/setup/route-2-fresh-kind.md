@@ -8,7 +8,7 @@ nav_order: 3
 
 <div class="callout callout-success">
 <span class="callout-title">Use this route when…</span>
-You have a clean VM with no existing Kubernetes cluster. <code>scripts/setup.sh</code>
+You have a clean VM with no existing Kubernetes cluster. <code>scripts/setup.sh --deploy</code>
 creates a local <a href="https://kind.sigs.k8s.io">kind</a> cluster with the correct
 port mappings, deploys all ACE services to it, and prints access URLs — one command
 from zero to running platform.
@@ -49,7 +49,7 @@ kubectl version --client
 helm version --short  # v3.12+
 ```
 
-`./scripts/setup.sh` re-checks all of these (via `scripts/check-prerequisites.sh`) and prints
+`./scripts/setup.sh --deploy` re-checks all of these (via `scripts/check-prerequisites.sh`) and prints
 the exact fix for anything missing.
 
 ---
@@ -67,7 +67,7 @@ If you already cloned without submodules:
 git submodule update --init --recursive
 ```
 
-This manual command is optional: `./scripts/setup.sh` detects and initializes
+This manual command is optional: `./scripts/setup.sh --deploy` detects and initializes
 missing submodules before it builds the platform.
 
 ---
@@ -75,7 +75,7 @@ missing submodules before it builds the platform.
 ## 3. Run the Setup Wizard
 
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 The wizard asks for your LLM credentials; press **Enter** at every other prompt to take the
@@ -102,7 +102,7 @@ With a deploy choice it then, unattended:
   until it is connected — no UI steps needed
 - Seeds the demo experiments and prints the access URLs
 
-Re-running `./scripts/setup.sh` (or `--restart` to reuse the saved answers) is idempotent.
+Re-running `./scripts/setup.sh --deploy` (or `--restart` to reuse the saved answers) is idempotent.
 
 #### If you chose Helm
 
@@ -225,6 +225,6 @@ is <strong>not</strong> backed by an external volume — deleting the container 
 </div>
 
 - **Ports** — every host port is chosen by `setup.sh` (free-port walk) and saved in `.env` as `KIND_HOSTPORT_*`; the table above shows the defaults. See [configuration.md]({{ "/setup/configuration.html" | relative_url }}) to change them.
-- **Idempotent setup** — re-running `./scripts/setup.sh` is safe: it detects existing port mappings, skips cluster recreation, updates the `ace-env` Secret, re-applies all manifests and reuses the registered chaos infrastructure.
+- **Idempotent setup** — re-running `./scripts/setup.sh --deploy` is safe: it detects existing port mappings, skips cluster recreation, updates the `ace-env` Secret, re-applies all manifests and reuses the registered chaos infrastructure.
 - **UFW** — if your host firewall is active, in-cluster pods need ports open from the kind subnet. See [running-an-experiment.md]({{ "/setup/running-an-experiment.html" | relative_url }}#networking-checklist-pods--host).
 - **Submodule pointer issues** — if `agent-charts/` or `app-charts/` is empty, run `git submodule update --init --recursive` from the repo root.

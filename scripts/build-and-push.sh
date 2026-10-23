@@ -4,8 +4,8 @@ set -euo pipefail
 # =============================================================================
 # Build & Push ACE's own Docker images
 # =============================================================================
-# Builds every "build" row in deploy/images.txt from this checkout and pushes it
-# to IMAGE_REGISTRY (naming rule: scripts/lib/registry.sh).
+# Builds every "build" row in deploy/images.txt locally by default. --push
+# explicitly publishes to IMAGE_REGISTRY (scripts/lib/registry.sh).
 #
 #   IMAGE_REGISTRY set    -> push to <IMAGE_REGISTRY>/agentcert/<image>
 #   IMAGE_REGISTRY empty  -> push to Docker Hub as agentcert/<image> (unchanged
@@ -20,13 +20,14 @@ set -euo pipefail
 # to spot registry copies that are older than the checkout.
 #
 # Usage:
-#   ./scripts/build-and-push.sh [--env-file PATH] [--local] [--kind-load]
+#   ./scripts/build-and-push.sh [--env-file PATH] [--local | --push | --kind-load]
 #                               [--only REGEX] [--allow-build-cache]
 #                               [--tag RELEASE-N]
 #
 # Options:
 #   --env-file PATH       Path to env file (default: <repo-root>/.env)
-#   --local               Build only — skip login and push
+#   --local               Build only — skip login and push (default)
+#   --push                Build and push; requires registry credentials
 #   --kind-load           After building, load each image into the local KinD
 #                         cluster (reads KIND_CLUSTER_NAME / ACE_INSTANCE_NAME
 #                         from .env; implies --local)
@@ -63,7 +64,8 @@ source "${SCRIPT_DIR}/lib/registry.sh"
 
 ENV_FILE="${REPO_ROOT}/.env"
 IMAGES_FILE="${REPO_ROOT}/deploy/images.txt"
-LOCAL_ONLY=false
+LOCAL_ONLY=true
+ACTION=""
 KIND_LOAD=false
 ONLY=""
 NO_CACHE_FLAG="--no-cache"
@@ -83,25 +85,47 @@ log_success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
 
+require_value() {
+    [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || {
+        log_error "$1 requires a value"; exit 2;
+    }
+}
+
+select_action() {
+    [[ -z "${ACTION}" || "${ACTION}" == "$1" ]] || {
+        log_error "--local, --push and --kind-load cannot be combined"; exit 2;
+    }
+    ACTION="$1"
+}
+
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env-file)
+            require_value "$@"
             ENV_FILE="${2:-}"
             shift 2
             ;;
         --local)
+            select_action local
             LOCAL_ONLY=true
             shift
             ;;
+        --push)
+            select_action push
+            LOCAL_ONLY=false
+            shift
+            ;;
         --kind-load)
+            select_action kind-load
             KIND_LOAD=true
             LOCAL_ONLY=true
             shift
             ;;
         --only)
+            require_value "$@"
             ONLY="${2:-}"
             shift 2
             ;;
@@ -118,6 +142,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --tag)
+            require_value "$@"
             RELEASE_TAG="${2:-}"
             [[ "${RELEASE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] \
                 || { log_error "--tag needs a valid Docker tag, e.g. RELEASE-3 (got '${RELEASE_TAG}')"; exit 1; }
@@ -125,7 +150,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
-            sed -n '4,45p' "$0"
+            sed -n '/^# Usage:/,/^# The revision tag/{ /^# The revision tag/d; s/^# \{0,1\}//; p; }' "$0"
             exit 0
             ;;
         *)
@@ -137,7 +162,7 @@ done
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
-if [[ ! -f "${ENV_FILE}" ]]; then
+if [[ ! -f "${ENV_FILE}" && ( "${LOCAL_ONLY}" == false || "${KIND_LOAD}" == true ) ]]; then
     log_error "Env file not found: ${ENV_FILE}"
     exit 1
 fi
@@ -153,6 +178,20 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 registry_load "${ENV_FILE}" || exit 1
+
+# Reject invalid/empty selections before login or build side effects.
+if [[ -n "${ONLY}" ]]; then
+    regex_status=0
+    [[ "" =~ ${ONLY} ]] || regex_status=$?
+    [[ "${regex_status}" -ne 2 ]] || { log_error "Invalid --only regex: ${ONLY}"; exit 2; }
+fi
+BUILD_ROWS=()
+while IFS= read -r row; do
+    IFS='|' read -r _ _ selected_image _ <<< "${row}"
+    [[ -n "${ONLY}" && ! "${selected_image}" =~ ${ONLY} ]] && continue
+    BUILD_ROWS+=("${row}")
+done < <(inventory_rows "${IMAGES_FILE}" build)
+[[ ${#BUILD_ROWS[@]} -gt 0 ]] || { log_error "No images match --only '${ONLY}'"; exit 2; }
 
 # ---------------------------------------------------------------------------
 # KinD cluster name (used with --kind-load)
@@ -359,6 +398,9 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
                 # The Dockerfile path is relative to the checkout's context
                 # (not an exported --committed-only copy), as it may sit outside it.
                 dockerfile_path="$(realpath -m "${REPO_ROOT}/${ctx}/${recipe}")"
+                if [[ "${COMMITTED_ONLY}" == true && "${context_dir}" != "${REPO_ROOT}/${ctx}" && -f "${context_dir}/${recipe}" ]]; then
+                    dockerfile_path="${context_dir}/${recipe}"
+                fi
                 if [[ ! -f "${dockerfile_path}" ]]; then
                     log_warn "Dockerfile not found: ${dockerfile_path} — skipping ${img_name}"
                     FAILED+=("${img_name} (no Dockerfile)")
@@ -374,6 +416,11 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
         continue
     fi
     if [[ "${reused}" == false ]]; then log_success "Built: ${image}"; fi
+    if [[ "${LOCAL_ONLY}" == true && -n "${RELEASE_TAG}" ]]; then
+        docker tag "${image}" "${img_name}:${RELEASE_TAG}" || {
+            FAILED+=("${img_name} (tag)"); continue;
+        }
+    fi
 
     if [[ "${KIND_LOAD}" == true ]]; then
         log_info "Loading ${image} into KinD cluster ${KIND_CLUSTER} ..."
@@ -390,6 +437,21 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
     elif [[ "${LOCAL_ONLY}" == false ]]; then
         dst="$(registry_ref "${image}")"
         dst_rev="${dst%:*}:${revision}"
+        # A named release must never replace different image content, even on
+        # registries whose account permissions allow overwriting tags.
+        # Compared via the revision LABEL, not a digest: `docker image inspect
+        # .Id` is the config digest on the classic (overlay2) image store and
+        # the manifest digest only under the containerd store, so a digest
+        # comparison against the registry's manifest spuriously fails on most
+        # hosts. The label travels inside the image and is stamped by this
+        # script on every build, so it means the same thing on either store.
+        if [[ -n "${ACE_IMAGE_TAG:-}" ]] && image_exists "${dst}"; then
+            if [[ "$(remote_revision "${dst}")" != "${revision}" ]]; then
+                log_error "${dst} already exists with different or unverifiable content. Choose a new --tag."
+                FAILED+=("${img_name} (release tag already exists)")
+                continue
+            fi
+        fi
         # Revision tag first: it is new on every source change, so it lands
         # even on registries that refuse to overwrite an existing tag (JFrog
         # without Delete/Overwrite permission). The moving tag (:latest etc.)
@@ -425,7 +487,7 @@ while IFS='|' read -r _kind _group image ctx recipe _flags; do
     fi
 
     echo ""
-done < <(inventory_rows "${IMAGES_FILE}" build)
+done < <(printf '%s\n' "${BUILD_ROWS[@]}")
 
 # ---------------------------------------------------------------------------
 # Wait for restarted deployments to finish rolling out

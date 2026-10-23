@@ -8,12 +8,26 @@ set -euo pipefail
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRE_HARNESS_DIR="$(cd "${HARNESS_DIR}/../sre-agent" && pwd)"
 
+CHECK_MODEL=false
+for arg in "$@"; do
+  case "$arg" in
+    --check-model) CHECK_MODEL=true ;;
+    --local) ;;
+    -h|--help) echo 'Default: prepare the local SRE image. --check-model also checks the running Ollama service.'; exit 0 ;;
+    *) echo "ERROR: unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
 echo "[sre-agent-qwen setup] checking Docker image ace-harness/sre-agent:local ..."
 if ! docker image inspect ace-harness/sre-agent:local &>/dev/null; then
   echo "[sre-agent-qwen setup] image not found — building via sre-agent/setup.sh ..."
   bash "${SRE_HARNESS_DIR}/setup.sh"
 else
   echo "[sre-agent-qwen setup] image already present."
+fi
+
+if [[ "${CHECK_MODEL}" == false ]]; then
+  exit 0
 fi
 
 echo "[sre-agent-qwen setup] checking Ollama model qwen2.5:7b-instruct (used via LiteLLM proxy) ..."

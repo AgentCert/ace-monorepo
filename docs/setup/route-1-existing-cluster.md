@@ -9,7 +9,7 @@ nav_order: 2
 <div class="callout callout-success">
 <span class="callout-title">Use this route when…</span>
 You already have a working local Kubernetes cluster (kind / minikube / k3s) and
-<code>kubectl</code> is already pointed at it. <code>scripts/setup.sh</code> deploys
+<code>kubectl</code> is already pointed at it. <code>scripts/setup.sh --deploy</code> deploys
 the full ACE stack into that cluster — no new cluster is created.
 </div>
 
@@ -27,7 +27,7 @@ kubectl get nodes                  # node(s) should be Ready
 ## 2. Run the Setup Wizard
 
 ```bash
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 When the wizard asks for `CLUSTER_MODE`, enter **`local`** (or press Enter if it
@@ -113,5 +113,5 @@ may lag this checkout.
 
 ## Notes
 
-- **Re-running setup** — `./scripts/setup.sh` is idempotent. Running it again updates the `ace-env` Secret and re-applies all manifests (no-op if nothing changed).
+- **Re-running setup** — `./scripts/setup.sh --deploy` is idempotent. Running it again updates the `ace-env` Secret and re-applies all manifests (no-op if nothing changed).
 - **Port conflicts** — if you have existing NodePort services on the same NodePorts (32001, 32400, etc.), edit `deploy/k8s/` service manifests to use different NodePorts before applying.

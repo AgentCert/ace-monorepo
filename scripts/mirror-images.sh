@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# mirror-images.sh — copy every third-party image in deploy/images.txt from its
+# mirror-images.sh — cache third-party images locally by default; --push copies
+# every selected third-party image from its
 # upstream home into the registry ACE pulls from (naming rule:
 # scripts/lib/registry.sh):
 #   IMAGE_REGISTRY set   -> <IMAGE_REGISTRY>/<public name>      (e.g. JFrog)
@@ -17,7 +18,7 @@
 # Usage:
 #   ./scripts/mirror-images.sh [--env-file PATH] [--images PATH]
 #                              [--include-optional] [--force] [--dry-run]
-#                              [--platform linux/amd64] [--jobs N] [--only REGEX]
+#                              [--local | --push] [--platform linux/amd64] [--jobs N] [--only REGEX]
 #
 #   --force      re-copy even when the image already exists in the registry
 #   --dry-run    print what would be copied, change nothing
@@ -27,8 +28,7 @@
 #   --only RE    only images whose public name matches the regex
 #
 # Images already in the registry are skipped, so re-running is cheap and safe.
-# Local copies pulled by this script are removed after a successful push;
-# images that were already in the local Docker cache are left alone.
+# Local copies remain cached after both local preparation and explicit push.
 # =============================================================================
 set -uo pipefail
 
@@ -42,12 +42,20 @@ IMAGES_FILE="${REPO_ROOT}/deploy/images.txt"
 INCLUDE_OPTIONAL=0
 FORCE=0
 DRY_RUN=0
+PUSH=0
+LOCAL_REQUESTED=0
 PLATFORM="linux/amd64"
 JOBS=3
 ONLY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --env-file|--images|--platform|--jobs|--only)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "$1 requires a value" >&2; exit 2; } ;;
+    esac
+    case "$1" in
+        --push)            PUSH=1; shift ;;
+        --local)           LOCAL_REQUESTED=1; shift ;;
         --env-file)         ENV_FILE="$2"; shift 2 ;;
         --images)           IMAGES_FILE="$2"; shift 2 ;;
         --include-optional) INCLUDE_OPTIONAL=1; shift ;;
@@ -60,11 +68,28 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+if [[ "${LOCAL_REQUESTED}" -eq 1 ]] && [[ "${PUSH}" -eq 1 ]]; then
+    echo 'ERROR: --local cannot be combined with --push.' >&2
+    exit 2
+fi
+
 export INCLUDE_OPTIONAL
 [[ "${JOBS}" =~ ^[1-9][0-9]*$ ]] || { echo "--jobs must be a positive integer" >&2; exit 2; }
 
 [[ -f "${IMAGES_FILE}" ]] || { echo "Inventory not found: ${IMAGES_FILE}" >&2; exit 2; }
 registry_load "${ENV_FILE}" || exit 2
+if [[ -n "${ONLY}" ]]; then
+    regex_status=0
+    [[ "" =~ ${ONLY} ]] || regex_status=$?
+    [[ "${regex_status}" -ne 2 ]] || { echo "Invalid --only regex: ${ONLY}" >&2; exit 2; }
+fi
+MIRROR_ROWS=()
+while IFS= read -r row; do
+    IFS='|' read -r _ _ selected_image _ <<< "${row}"
+    [[ -n "${ONLY}" && ! "${selected_image}" =~ ${ONLY} ]] && continue
+    MIRROR_ROWS+=("${row}")
+done < <(inventory_rows "${IMAGES_FILE}" mirror)
+[[ ${#MIRROR_ROWS[@]} -gt 0 ]] || { echo 'No images match the mirror selection' >&2; exit 2; }
 if [[ -z "${IMAGE_REGISTRY}" && "${IMAGE_MIRROR_NAMESPACE}" == none ]]; then
     echo "IMAGE_REGISTRY is empty and IMAGE_MIRROR_NAMESPACE=none — ACE pulls upstream images directly, nothing to mirror."
     exit 0
@@ -72,7 +97,7 @@ fi
 TARGET="${IMAGE_REGISTRY:-docker.io/${IMAGE_MIRROR_NAMESPACE}}"
 
 echo "Mirroring third-party images into ${TARGET} (platform ${PLATFORM}, ${JOBS} at a time)"
-if [[ "${DRY_RUN}" -eq 0 ]]; then
+if [[ "${DRY_RUN}" -eq 0 && "${PUSH}" -eq 1 ]]; then
     registry_login || exit 1
 fi
 echo
@@ -94,23 +119,26 @@ push_platform() {
 
 # Copy one image. Writes "<status> <src> -> <dst>" to the result dir.
 mirror_one() {
-    local src dst log had_local=0 status idx="$2"
+    local src dst log status idx="$2"
     src="$(upstream_ref "$1")"
     dst="$(registry_ref "$1")"
     log="${LOG_DIR}/$(printf '%s' "${src}" | tr '/:@' '___').log"
 
-    if [[ "${FORCE}" -eq 0 ]] && image_exists "${dst}"; then
+    if [[ "${FORCE}" -eq 0 ]] && {
+        if [[ "${PUSH}" -eq 1 ]]; then image_exists "${dst}"
+        else docker image inspect "${dst}" >/dev/null 2>&1; fi
+    }; then
         status="SKIP"
     elif [[ "${DRY_RUN}" -eq 1 ]]; then
         status="WOULD-COPY"
     else
-        docker image inspect "${src}" >/dev/null 2>&1 && had_local=1
         if docker pull --platform "${PLATFORM}" "${src}" >"${log}" 2>&1 \
-            && docker tag "${src}" "${dst}" >>"${log}" 2>&1 \
-            && push_platform "${dst}" >>"${log}" 2>&1; then
-            status="COPIED"
-            docker rmi "${dst}" >/dev/null 2>&1 || true
-            [[ "${had_local}" -eq 0 ]] && docker rmi "${src}" >/dev/null 2>&1
+            && docker tag "${src}" "${dst}" >>"${log}" 2>&1; then
+            status="CACHED"
+            if [[ "${PUSH}" -eq 1 ]]; then
+                if push_platform "${dst}" >>"${log}" 2>&1; then status="COPIED"
+                else status="FAILED"; fi
+            fi
         else
             status="FAILED"
         fi
@@ -133,15 +161,16 @@ while IFS='|' read -r _kind _group image _ctx _recipe _flags; do
         wait -n
         running=$((running - 1))
     fi
-done < <(inventory_rows "${IMAGES_FILE}" mirror)
+done < <(printf '%s\n' "${MIRROR_ROWS[@]}")
 wait
 
 echo
 copied=$(cat "${RESULT_DIR}"/* 2>/dev/null | grep -c '^COPIED' || true)
+cached=$(cat "${RESULT_DIR}"/* 2>/dev/null | grep -c '^CACHED' || true)
 skipped=$(cat "${RESULT_DIR}"/* 2>/dev/null | grep -c '^SKIP' || true)
 would=$(cat "${RESULT_DIR}"/* 2>/dev/null | grep -c '^WOULD-COPY' || true)
 failed=$(cat "${RESULT_DIR}"/* 2>/dev/null | grep '^FAILED' || true)
-echo "Summary: ${copied} copied, ${skipped} already present, ${would} would copy, $(printf '%s' "${failed}" | grep -c . || true) failed"
+echo "Summary: ${cached} cached locally, ${copied} pushed, ${skipped} already present, ${would} would copy, $(printf '%s' "${failed}" | grep -c . || true) failed"
 if [[ -n "${failed}" ]]; then
     echo "Failures (logs in ${LOG_DIR}):"
     printf '  %s\n' "${failed}"

@@ -17,6 +17,31 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A legacy startup path is only entered with an explicit deployment request.
+_deploy=false
+_local_requested=false
+_forward=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --deploy) _deploy=true ;;
+        --local) _local_requested=true; _forward+=(--local) ;;
+        -h|--help)
+            echo 'Default: build all ACE images locally.'
+            echo 'Use --deploy to enter this legacy host-startup flow; prefer scripts/setup.sh --deploy.'
+            echo 'Build-only options are those of scripts/build-and-push.sh.'
+            exit 0 ;;
+        *) _forward+=("$_arg") ;;
+    esac
+done
+set -- "${_forward[@]}"
+if [[ "${_deploy}" == true && "${_local_requested}" == true ]]; then
+    echo 'ERROR: --local cannot be combined with --deploy.' >&2
+    exit 2
+fi
+if [[ "${_deploy}" == false ]]; then
+    exec bash "${SCRIPT_DIR}/../build-and-push.sh" "$@"
+fi
 PID_DIR="$SCRIPT_DIR"
 SKIP_MONGO=false
 SKIP_FRONTEND=false
@@ -55,25 +80,11 @@ for port in 3030 3000 8080 8082 2001; do
     fi
 done
 
-if [ "$conflict" = true ]; then
-    echo ""
-    read -rp "Kill conflicting processes? (Y/n) " response
-    if [[ -z "$response" || "$response" =~ ^[Yy] ]]; then
-        for port in 3030 3000 8080 8082 2001; do
-            pid=$(lsof -ti :"$port" 2>/dev/null || true)
-            if [ -n "$pid" ]; then
-                kill -9 "$pid" 2>/dev/null || true
-                ok "Killed process on port $port"
-            fi
-        done
-        sleep 2
-    else
-        fail "Cannot continue with ports in use. Exiting."
-        exit 1
-    fi
-else
-    ok "No port conflicts detected"
+if [[ "$conflict" == true ]]; then
+    fail "Resolve port conflicts before startup; existing processes were left running."
+    exit 1
 fi
+ok "No port conflicts detected"
 
 # ============================================================================
 # Step 2: Check MongoDB

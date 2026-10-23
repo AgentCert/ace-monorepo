@@ -11,6 +11,7 @@ set -uo pipefail
 #   ./scripts/start-local-services.sh [options]
 #
 # Options:
+#   --deploy                      Start services (default: build images only)
 #   --skip-mongo                  Skip MongoDB
 #   --skip-langfuse               Skip Langfuse
 #   --skip-litellm                Skip LiteLLM
@@ -65,6 +66,8 @@ RUN_OLLAMA=true
 RESTART=false
 PULL_CERTIFIER=false
 CHECK_LOCAL_MODS=false
+DEPLOY=false
+LOCAL_REQUESTED=0
 CERTIFIER_PULL_IMAGE_DEFAULT="agentcert/certifier:latest"
 # Set by run_local_mod_check() when the user opts to build Langfuse from
 # source; consumed by start_langfuse().
@@ -80,6 +83,8 @@ usage() { awk '/^# ====/{c++; next} c>0 && c<3 {sub(/^# ?/,""); print}' "$0"; ex
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --deploy)        DEPLOY=true; shift ;;
+        --local)         LOCAL_REQUESTED=1; shift ;;
         --skip-mongo)     RUN_MONGO=false; shift ;;
         --skip-langfuse)  RUN_LANGFUSE=false; shift ;;
         --skip-litellm)   RUN_LITELLM=false; shift ;;
@@ -92,13 +97,34 @@ while [[ $# -gt 0 ]]; do
         --only-ollama)    RUN_MONGO=false; RUN_LANGFUSE=false; RUN_LITELLM=false; RUN_CERTIFIER=false; RUN_OLLAMA=true;  shift ;;
         --pull-certifier) PULL_CERTIFIER=true; shift ;;
         --check-local-mods) CHECK_LOCAL_MODS=true; shift ;;
-        --env-file)       ENV_FILE="${2:-}"; shift 2 ;;
-        --langfuse-dir)   LANGFUSE_DIR="${2:-}"; shift 2 ;;
-        --restart)        RESTART=true; shift ;;
+        --env-file|--langfuse-dir)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { log_error "$1 requires a path"; exit 2; }
+            if [[ "$1" == --env-file ]]; then ENV_FILE="$2"; else LANGFUSE_DIR="$2"; fi
+            shift 2 ;;
+        --restart)        RESTART=true; DEPLOY=true; shift ;;
         -h|--help)        usage ;;
         *)                log_error "Unknown argument: $1"; exit 1 ;;
     esac
 done
+if [[ "${LOCAL_REQUESTED}" -eq 1 ]] && [[ "${DEPLOY}" == true ]]; then
+    echo 'ERROR: --local cannot be combined with --deploy.' >&2
+    exit 2
+fi
+
+if [[ "${DEPLOY}" == false ]]; then
+    build_args=(--env-file "${ENV_FILE}")
+    if [[ "${RUN_CERTIFIER}" == false ]]; then
+        echo 'Selected services use upstream images. Use --deploy to start them.'
+        exit 0
+    fi
+    # Derived from deploy/images.txt (the build row whose context is the
+    # certifier checkout) rather than hardcoded, so renaming or retagging the
+    # certifier image cannot silently turn this into "no images match".
+    # shellcheck source=lib/registry.sh
+    source "${REPO_ROOT}/scripts/lib/registry.sh"
+    build_args+=(--only "$(inventory_only_regex "${REPO_ROOT}/deploy/images.txt" context certifier)")
+    exec bash "${SCRIPT_DIR}/build-and-push.sh" "${build_args[@]}"
+fi
 
 command -v docker >/dev/null 2>&1 || { log_error "docker not found"; exit 1; }
 docker compose version >/dev/null 2>&1 || { log_error "'docker compose' plugin not available"; exit 1; }

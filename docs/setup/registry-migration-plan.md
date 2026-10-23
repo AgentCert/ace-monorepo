@@ -243,7 +243,7 @@ The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to
 ### Test 2: Inside Infosys, the real proof (fresh AKS or VM cluster)
 
 1. **Use a brand-new cluster.** Kubernetes caches images on its nodes. On an old cluster, a pod could start from a cached public image, and the test would pass while the real setup is broken.
-2. Set `IMAGE_REGISTRY` and the credentials, then run `./scripts/setup.sh`.
+2. Set `IMAGE_REGISTRY` and the credentials, then run `./scripts/setup.sh --deploy`.
 3. Run **one experiment of each kind**:
    - sock-shop + flash-agent + pod-delete
    - bookinfo + an sre-agent + network latency
@@ -263,7 +263,7 @@ The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to
 
 ### Test 3: Outside Infosys (open-source path)
 
-1. On a machine outside the network (a personal laptop or a GitHub Actions runner), clone, leave `IMAGE_REGISTRY` empty and run `./scripts/setup.sh` on a fresh kind cluster.
+1. On a machine outside the network (a personal laptop or a GitHub Actions runner), clone, leave `IMAGE_REGISTRY` empty and run `./scripts/setup.sh --deploy` on a fresh kind cluster.
 2. Run the same experiments.
 3. **Pass:**
    - No JFrog prompt.

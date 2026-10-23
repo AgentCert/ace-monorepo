@@ -314,6 +314,37 @@ section "installers share graphql's imageref code"
 check "install-app/install-agent imageref.go copies are up to date" scripts/lib/sync-imageref.sh --check
 check "install-app and install-agent registry.go are identical" cmp app-charts/install-app/registry.go agent-charts/install-agent/registry.go
 
+section "build networking"
+printf 'ACE_BUILD_NETWORK=host\n' > "${WORK}/build.env"
+eq "build network defaults to default" "$(
+    unset ACE_BUILD_NETWORK
+    registry_load /dev/null && printf '%s' "${ACE_BUILD_NETWORK}"
+)" default
+eq "build network loaded from env file" "$(
+    unset ACE_BUILD_NETWORK
+    registry_load "${WORK}/build.env" && printf '%s' "${ACE_BUILD_NETWORK}"
+)" host
+eq "build network environment overrides file" "$(
+    ACE_BUILD_NETWORK=none
+    registry_load "${WORK}/build.env" && printf '%s' "${ACE_BUILD_NETWORK}"
+)" none
+check "invalid build network rejected" bash -c '
+    source scripts/lib/registry.sh
+    ACE_BUILD_NETWORK=invalid
+    ! registry_load /dev/null
+'
+eq "shared Docker builder forwards network and preserves spaced paths" "$(
+    ACE_BUILD_NETWORK=host
+    docker() { printf '%s\n' "$@"; }
+    docker_build_resolved /dev/null -t example:latest 'context with spaces'
+)" "$(printf '%s\n' build --network host -f /dev/null -t example:latest 'context with spaces')"
+check "shared Docker builder propagates failure" bash -c '
+    source scripts/lib/registry.sh
+    docker() { return 42; }
+    docker_build_resolved /dev/null .
+    [[ $? == 42 ]]
+'
+
 section "Phase 6: Dockerfile base images"
 inv_resolved() { INCLUDE_OPTIONAL=1 inventory_rows deploy/images.txt all | cut -d'|' -f3 | while read -r i; do registry_ref "$i"; echo; done | sort -u; }
 dockerfiles="$(INCLUDE_OPTIONAL=1 inventory_rows deploy/images.txt build | while IFS='|' read -r _k _g _i c r _f; do

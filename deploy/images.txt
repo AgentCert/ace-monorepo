@@ -83,6 +83,9 @@ mirror|workflow|litmuschaos/k8s:latest
 mirror|workflow|litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest
 mirror|workflow|litmuschaos/go-runner:latest
 mirror|workflow|litmuschaos/litmus-checker:latest
+# 2.11.0 is pinned in the workflow YAML the web UI generates
+# (AgentCert/chaoscenter/web/src/services/experiment/KubernetesYamlService.ts).
+mirror|workflow|litmuschaos/litmus-checker:2.11.0
 mirror|workflow|litmuschaos/litmus-app-deployer:latest
 # alpine/k8s:1.29.2 is also the image of deploy/registry-secret-sync.yaml (kube-system).
 mirror|workflow|alpine/k8s:1.29.2

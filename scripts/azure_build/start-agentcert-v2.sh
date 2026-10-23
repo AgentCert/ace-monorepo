@@ -29,6 +29,31 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A legacy startup path is only entered with an explicit deployment request.
+_deploy=false
+_local_requested=false
+_forward=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --deploy) _deploy=true ;;
+        --local) _local_requested=true; _forward+=(--local) ;;
+        -h|--help)
+            echo 'Default: build all ACE images locally.'
+            echo 'Use --deploy to enter this legacy host-startup flow; prefer scripts/setup.sh --deploy.'
+            echo 'Build-only options are those of scripts/build-and-push.sh.'
+            exit 0 ;;
+        *) _forward+=("$_arg") ;;
+    esac
+done
+set -- "${_forward[@]}"
+if [[ "${_deploy}" == true && "${_local_requested}" == true ]]; then
+    echo 'ERROR: --local cannot be combined with --deploy.' >&2
+    exit 2
+fi
+if [[ "${_deploy}" == false ]]; then
+    exec bash "${SCRIPT_DIR}/../build-and-push.sh" "$@"
+fi
 ENV_FILE=""
 PATHS_FILE="${SCRIPT_DIR}/build-paths.env"
 SKIP_MONGO=false
@@ -139,49 +164,10 @@ for port in "${CHECK_PORTS[@]}"; do
 done
 
 if [[ "$conflict" == true ]]; then
-    echo ""
-    if [[ ${#own_pids[@]} -gt 0 ]]; then
-        echo "  Will kill (host PIDs): ${own_pids[*]}"
-    fi
-    if [[ ${#foreign_containers[@]} -gt 0 ]]; then
-        echo "  Will 'docker stop'   : ${foreign_containers[*]}"
-        echo "  (kind/control-plane stop will make in-cluster LiteLLM unreachable until restarted)"
-    fi
-    if [[ ${#foreign_unknown[@]} -gt 0 ]]; then
-        echo "  Cannot free (manual): port(s) ${foreign_unknown[*]} — non-docker root-owned listener"
-    fi
-    read -rp "Free these ports? (Y/n) " response
-    if [[ -z "$response" || "$response" =~ ^[Yy] ]]; then
-        for entry in "${own_pids[@]}"; do
-            pid="${entry%%:*}"; p="${entry##*:}"
-            kill -9 "$pid" 2>/dev/null && ok "Killed PID $pid on port $p" || fail "Could not kill PID $pid"
-        done
-        if [[ ${#foreign_containers[@]} -gt 0 ]]; then
-            declare -A _seen=()
-            for entry in "${foreign_containers[@]}"; do
-                c="${entry%%:*}"; p="${entry##*:}"
-                [[ -n "${_seen[$c]:-}" ]] && continue
-                _seen[$c]=1
-                if docker stop "$c" >/dev/null 2>&1; then
-                    ok "Stopped docker container '$c' (held port $p)"
-                    [[ "$c" == *control-plane* || "$c" == *kind* ]] && SKIP_LITELLM=true && \
-                        wait_msg "Auto-enabling --skip-litellm (cluster '$c' is stopped)"
-                else
-                    fail "Could not stop docker container '$c'"
-                fi
-            done
-        fi
-        if [[ ${#foreign_unknown[@]} -gt 0 ]]; then
-            fail "Cannot free port(s) ${foreign_unknown[*]} from this user. Run: sudo ss -tlnp '( sport = :${foreign_unknown[0]} )'"
-            exit 1
-        fi
-        sleep 2
-    else
-        fail "Cannot continue with ports in use. Exiting."; exit 1
-    fi
-else
-    ok "No port conflicts detected"
+    fail "Resolve port conflicts before startup; existing processes were left running."
+    exit 1
 fi
+ok "No port conflicts detected"
 
 # ============================================================================
 # Step 2: MongoDB

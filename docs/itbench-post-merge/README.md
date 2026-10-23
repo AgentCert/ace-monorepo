@@ -111,7 +111,7 @@ git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
 cd ace-monorepo
 cp .env.example .env
 # Edit .env with your credentials
-./scripts/setup.sh          # interactive first run
+./scripts/setup.sh --deploy # interactive first run
 ```
 
 The `setup.sh` wizard will:

@@ -41,7 +41,7 @@
   - [Run the full certification end-to-end](#run-the-full-certification-end-to-end)
   - [Render a certification report to PDF](#render-a-certification-report-to-pdf)
 - [Admin Actions](#admin-actions)
-  - [Build & push all Docker images to Docker Hub](#build--push-all-docker-images-to-docker-hub)
+  - [Build Docker images locally](#build-docker-images-locally)
 - [Community & Contributing](#community--contributing)
 - [License](#license)
 
@@ -166,7 +166,7 @@ git clone --recurse-submodules <repo-url>
 git submodule update --init --recursive
 ```
 
-`./scripts/setup.sh` also detects an ordinary clone with missing submodules and
+`./scripts/setup.sh --deploy` also detects an ordinary clone with missing submodules and
 initializes them before it builds anything, so this is safe to omit when you use
 the setup wizard.
 
@@ -187,7 +187,7 @@ Kubernetes cluster managed by `scripts/setup.sh`:
 ```bash
 git clone --recurse-submodules <repo-url>
 cd ace-monorepo
-./scripts/setup.sh          # wizard: creates .env, creates kind cluster, deploys to K8s
+./scripts/setup.sh --deploy          # wizard: creates .env, creates kind cluster, deploys to K8s
 ```
 
 The wizard asks for your LLM credentials; press **Enter** at every other prompt. The defaults
@@ -215,12 +215,12 @@ that would fail later (missing image, unbuildable hub bundle).
 | helm | v3.12+ | [helm install](https://helm.sh/docs/intro/install/) |
 | git, python3 | any / 3.8+ | `sudo apt-get install git python3` |
 
-`./scripts/setup.sh` checks all of them first (`scripts/check-prerequisites.sh`).
+`./scripts/setup.sh --deploy` checks all of them first (`scripts/check-prerequisites.sh`).
 
 ### 2. Run the setup wizard
 
 ```bash
-./scripts/setup.sh              # first time (interactive)
+./scripts/setup.sh --deploy              # first time (interactive)
 ./scripts/setup.sh --restart    # later: re-apply saved answers, no prompts
 ```
 
@@ -270,7 +270,7 @@ host-process flow is fully documented at
 ```bash
 cp .env.example .env
 cp build-paths.env.example build-paths.env
-./scripts/start-local-services.sh          # MongoDB + Langfuse + LiteLLM + Certifier (Docker)
+./scripts/start-local-services.sh --deploy          # MongoDB + Langfuse + LiteLLM + Certifier (Docker)
 bash scripts/azure_build/start-agentcert-v2.sh \
     --env-file   $(pwd)/.env \
     --paths-file $(pwd)/build-paths.env     # auth + GraphQL + frontend on the host
@@ -292,7 +292,7 @@ kubectl logs -n ace deploy/certifier -f
 kubectl rollout restart -n ace deploy/certifier
 ```
 
-All credentials are injected from the `ace-env` Secret (created from `.env` by `scripts/setup.sh`). On a new host: clone, run `./scripts/setup.sh`, answer Y to deploy — the certifier comes up alongside every other service.
+All credentials are injected from the `ace-env` Secret (created from `.env` by `scripts/setup.sh`). On a new host: clone, run `./scripts/setup.sh --deploy`, answer Y to deploy — the certifier comes up alongside every other service.
 
 ### Quick command reference
 
@@ -424,27 +424,26 @@ pip install --user reportlab    # one-time, only needed for PDF output
 
 ## Admin Actions
 
-### Build & push all Docker images
+### Build Docker images locally
 
-Builds all component images (`build` rows in `deploy/images.txt`) and pushes them to `IMAGE_REGISTRY` — `docker.io/agentcert/*` when it is empty. Requires `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` in the root `.env`. Verify with `./scripts/check-registry-images.sh`.
-
-```bash
-./scripts/build-and-push.sh
-```
-
-**Images pushed**
-
-- `agentcert/agentcert-flash-agent:latest`
-- `agentcert/agent-sidecar:latest`
-- `agentcert/agentcert-install-agent:latest`
-- `agentcert/agentcert-install-app:latest`
-- `agentcert/certifier:latest`
-
-To use a different env file:
+Build every project-owned image in `deploy/images.txt`:
 
 ```bash
-./scripts/build-and-push.sh --env-file /path/to/.env
+make build
+# equivalent: ./scripts/build-and-push.sh
+# equivalent: ./scripts/setup.sh
 ```
+
+These defaults build locally without login, push, image pruning, cluster loading,
+or deployment. For a faster rebuild, use
+`make build BUILD_ARGS="--allow-build-cache"`.
+
+Publish explicitly with `./scripts/build-and-push.sh --push --tag RELEASE-N`
+using a new release tag, or install explicitly with `./scripts/setup.sh --deploy`.
+`--kind-load` explicitly loads locally built images into KinD.
+Component build wrappers use the same options and local-only default.
+
+See [the script mode guide](docs/setup/script-modes.md) for every entry point and validation.
 
 ---
 

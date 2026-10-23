@@ -43,6 +43,7 @@ ENV_FILE="${REPO_ROOT}/.env"
 SYNC_MANIFEST="${REPO_ROOT}/deploy/registry-secret-sync.yaml"
 INSTALL_SYNC=1
 UNINSTALL=0
+DEPLOY=0
 
 BOLD='\033[1m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; DIM='\033[2m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
@@ -51,13 +52,21 @@ fail() { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env-file)  ENV_FILE="$2"; shift 2 ;;
+        --deploy) DEPLOY=1; shift ;;
+        --env-file)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail '--env-file requires a path'
+            ENV_FILE="$2"; shift 2 ;;
         --no-sync)   INSTALL_SYNC=0; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         -h|--help)   sed -n '2,33p' "$0"; exit 0 ;;
         *) fail "Unknown argument: $1" ;;
     esac
 done
+
+if [[ "${DEPLOY}" -eq 0 ]]; then
+    echo 'Cluster prerequisites require --deploy. No cluster resources changed.'
+    exit 0
+fi
 
 registry_load "${ENV_FILE}" || exit 1
 

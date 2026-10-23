@@ -24,7 +24,7 @@ Nothing else changes between the two.
 ```bash
 git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
 cd ace-monorepo
-./scripts/setup.sh
+./scripts/setup.sh --deploy
 ```
 
 At the **Image registry** question, press **Enter** to leave it empty. Answer the Azure OpenAI questions. That's it.
@@ -47,7 +47,7 @@ At the **Image registry** question, press **Enter** to leave it empty. Answer th
    ```
 3. **Run setup.**
    ```bash
-   ./scripts/setup.sh
+   ./scripts/setup.sh --deploy
    ```
    At **Image registry**, enter `infyartifactory.jfrog.io/docker-local`, then your JFrog username and access token. If your machine sits behind the corporate proxy (Zscaler), give the path of the corporate CA certificate when asked.
 
@@ -82,7 +82,7 @@ Edit `IMAGE_REGISTRY` in `.env`, then run `./scripts/setup.sh --restart`. Set it
 
 | Symptom | Fix |
 |---|---|
-| `401` / `unauthorized` when pulling | Token expired or wrong: update `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` in `.env`, then run `./scripts/apply_cluster_prereqs.sh` |
+| `401` / `unauthorized` when pulling | Token expired or wrong: update `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` in `.env`, then run `./scripts/apply_cluster_prereqs.sh --deploy` |
 | `ImagePullBackOff`, `not found` | The image is missing from the registry: `./scripts/check-registry-images.sh` lists what's missing. Ask a maintainer to publish it (below) |
 | `x509: certificate signed by unknown authority` | Corporate proxy: set `CUSTOM_CA_CERT_PATH=<corporate CA .crt>` in `.env`, then run `./scripts/setup.sh --restart` |
 
@@ -94,12 +94,12 @@ All images are listed once, in `deploy/images.txt`.
 
 ```bash
 # third-party images (copied as-is, skips what is already there)
-./scripts/mirror-images.sh                 # into JFrog (IMAGE_REGISTRY from .env)
-IMAGE_REGISTRY= ./scripts/mirror-images.sh # into the frozen Docker Hub copies (agentcert/)
+./scripts/mirror-images.sh --push                 # into JFrog (IMAGE_REGISTRY from .env)
+IMAGE_REGISTRY= ./scripts/mirror-images.sh --push # into the frozen Docker Hub copies (agentcert/)
 
 # ACE's own images, built from the committed code
-./scripts/build-and-push.sh --committed-only --reuse-local                 # JFrog
-IMAGE_REGISTRY= ./scripts/build-and-push.sh --committed-only --reuse-local # Docker Hub
+./scripts/build-and-push.sh --push --committed-only --reuse-local                 # JFrog
+IMAGE_REGISTRY= ./scripts/build-and-push.sh --push --committed-only --reuse-local # Docker Hub
 
 # verify both, and refresh the link lists
 ./scripts/check-registry-images.sh --markdown docs/setup/registry-images.md

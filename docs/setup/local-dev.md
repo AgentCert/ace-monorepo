@@ -54,7 +54,7 @@ cp build-paths.env.example build-paths.env
 Once `.env` is filled in, bring up MongoDB, Langfuse, LiteLLM, and the Certifier API with a single script:
 
 ```bash
-./scripts/start-local-services.sh
+./scripts/start-local-services.sh --deploy
 ```
 
 Idempotent — re-run anytime. Scope it with `--only-mongo` / `--only-langfuse` /
@@ -118,7 +118,7 @@ Set `LITELLM_HOST=http://<docker-bridge-ip>:14000` in `.env`.
 kubectl apply -f agent-charts/litellm/namespace.yaml
 kubectl apply -f agent-charts/litellm/secret.yaml      # edit first with your keys
 kubectl apply -f agent-charts/litellm/configmap.yaml
-./scripts/kubectl-apply-images.sh -f agent-charts/litellm/deployment.yaml   # image from IMAGE_REGISTRY
+./scripts/kubectl-apply-images.sh --deploy -f agent-charts/litellm/deployment.yaml   # image from IMAGE_REGISTRY
 kubectl port-forward -n litellm svc/litellm-proxy 14000:4000
 ```
 
@@ -188,14 +188,14 @@ In this path the certifier runs at **`http://localhost:8000/docs`** (not `:18000
 ### Build locally
 
 ```bash
-./scripts/start-local-services.sh --only-certifier            # builds if no image yet
-./scripts/start-local-services.sh --only-certifier --restart  # force-recreate after a rebuild
+./scripts/start-local-services.sh --deploy --only-certifier            # builds if no image yet
+./scripts/start-local-services.sh --deploy --only-certifier --restart  # force-recreate after a rebuild
 ```
 
 ### Pull from Docker Hub (no build toolchain)
 
 ```bash
-./scripts/start-local-services.sh --only-certifier --pull-certifier
+./scripts/start-local-services.sh --deploy --only-certifier --pull-certifier
 ```
 
 Override the image tag via `CERTIFIER_IMAGE` in `.env`:

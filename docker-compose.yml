@@ -68,7 +68,9 @@ services:
 
   # ── Kubernetes provisioner (runs first; everything k8s-dependent waits) ─────
   cluster-init:
-    build: ./compose/cluster-init
+    build:
+      context: ./compose/cluster-init
+      network: ${ACE_BUILD_NETWORK:-default}
     image: ${ACE_IMG_CLUSTER_INIT:-agentcert/cluster-init:latest}
     container_name: ace-cluster-init-${ACE_INSTANCE_NAME:-unconfigured}
     network_mode: host
@@ -204,6 +206,7 @@ services:
     build:
       context: AgentCert/chaoscenter/authentication
       dockerfile: Dockerfile
+      network: ${ACE_BUILD_NETWORK:-default}
     image: ${ACE_IMG_AUTH:-agentcert/agentcert-auth:latest}
     container_name: agentcert-auth-${ACE_INSTANCE_NAME:-unconfigured}
     # Bridge networking (NOT host) + explicit ports: — same pattern as mongo/
@@ -238,6 +241,7 @@ services:
     build:
       context: AgentCert/chaoscenter/graphql
       dockerfile: server/Dockerfile
+      network: ${ACE_BUILD_NETWORK:-default}
     image: ${ACE_IMG_GRAPHQL:-agentcert/agentcert-graphql:latest}
     container_name: agentcert-graphql-${ACE_INSTANCE_NAME:-unconfigured}
     # Bridge networking (NOT host) + explicit ports:, same reasoning as auth
@@ -359,6 +363,7 @@ services:
       # Self-build dist (the repo ships no dist/); the Dockerfile lives outside
       # the AgentCert submodule.
       dockerfile: ../../../compose/web/Dockerfile
+      network: ${ACE_BUILD_NETWORK:-default}
       args:
         NODE_IMAGE: ${ACE_IMG_NODE:-node:20}
         UBI_MINIMAL_IMAGE: ${ACE_IMG_UBI8_MINIMAL:-registry.access.redhat.com/ubi8/ubi-minimal:8.10}
@@ -473,6 +478,7 @@ services:
     build:
       context: ./certifier
       dockerfile: Dockerfile
+      network: ${ACE_BUILD_NETWORK:-default}
       target: runtime
     image: ${CERTIFIER_IMAGE:-agentcert/certifier:latest}
     container_name: certifier_app_${ACE_INSTANCE_NAME:-unconfigured}

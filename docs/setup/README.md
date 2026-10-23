@@ -16,7 +16,7 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 > **Inside the Infosys network (JFrog) or outside it?** See [quickstart-registry.md](quickstart-registry.md): one `.env` setting, `IMAGE_REGISTRY`, switches every image between JFrog and Docker Hub.
 
-**Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh` checks them all first and prints the exact install command for anything missing.
+**Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh --deploy` checks them all first and prints the exact install command for anything missing.
 
 <div class="qs-steps">
   <div class="qs-step">
@@ -32,7 +32,7 @@ cd ace-monorepo</code></pre>
     <div class="qs-num">2</div>
     <div class="qs-body">
       <strong>Run the setup wizard — configures .env, builds images, creates the kind cluster, deploys, connects chaos infrastructure</strong>
-      <pre><code>./scripts/setup.sh</code></pre>
+      <pre><code>./scripts/setup.sh --deploy</code></pre>
       <p>Enter your LLM credentials when asked and press <strong>Enter</strong> at every other prompt. The defaults are the stable, reproducible configuration:</p>
       <ul>
         <li><strong>Build ALL locally</strong> — every first-party image (control plane, installers, agents, sidecar, ITBench runner) and the immutable <em>hub bundle</em> (app/agent/fault catalogs + charts) is built from <em>this checkout</em> and side-loaded into kind, so what runs is exactly what you cloned. Nothing is cloned from GitHub at runtime.</li>
@@ -94,7 +94,7 @@ The 4-phase certification pipeline calls Azure OpenAI directly (standard model, 
 
 ## What Comes Up
 
-`./scripts/setup.sh` deploys the full platform into a kind cluster:
+`./scripts/setup.sh --deploy` deploys the full platform into a kind cluster:
 
 <div class="svc-grid">
   <div class="svc-card">
@@ -301,7 +301,7 @@ kind delete cluster --name agentcert                       # tear down everythin
 
 <div class="callout callout-warning">
 <span class="callout-title">⚠ Applying .env changes</span>
-After editing <code>.env</code>, re-run <code>./scripts/setup.sh</code> and answer Y to deploy. It recreates the <code>ace-env</code> Secret and rolls out affected deployments.
+After editing <code>.env</code>, re-run <code>./scripts/setup.sh --deploy</code> and answer Y to deploy. It recreates the <code>ace-env</code> Secret and rolls out affected deployments.
 </div>
 
 ---
@@ -313,7 +313,7 @@ After editing <code>.env</code>, re-run <code>./scripts/setup.sh</code> and answ
 | Pods stuck in `Pending` | `kubectl describe pod -n ace <pod>` — usually a PVC or image pull issue |
 | UI at :2001 shows blank | GraphQL not ready — `kubectl logs -n ace deploy/graphql` |
 | Langfuse key errors | Delete and recreate the langfuse-web pod: `kubectl rollout restart -n ace deploy/langfuse-web` |
-| LiteLLM 401 errors | Check `AZURE_OPENAI_API_KEY` in `.env`, re-run `./scripts/setup.sh` |
-| `kind` cluster missing port mappings | Run `./scripts/setup.sh` — it detects missing port bindings and offers to recreate the cluster |
+| LiteLLM 401 errors | Check `AZURE_OPENAI_API_KEY` in `.env`, re-run `./scripts/setup.sh --deploy` |
+| `kind` cluster missing port mappings | Run `./scripts/setup.sh --deploy` — it detects missing port bindings and offers to recreate the cluster |
 
 Still stuck? **[Join Slack ↗](https://join.slack.com/t/agentcertific-evj3152/shared_invite/zt-4066ekqer-uIT~K_URfwiC15KlwT5Pjw)** or [open a GitHub issue ↗](https://github.com/AgentCert/ace-monorepo/issues).

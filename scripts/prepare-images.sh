@@ -42,7 +42,30 @@
 
 set -euo pipefail
 
-HUB_ONLY="${1:-}"
+HUB_ONLY=""
+DEPLOY=0
+LOCAL_REQUESTED=0
+ENV_FILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --deploy) DEPLOY=1; shift ;;
+        --local) LOCAL_REQUESTED=1; shift ;;
+        --hub-only) HUB_ONLY=--hub-only; shift ;;
+        --env-file)
+            [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "ERROR: --env-file requires a path" >&2; exit 2; }
+            ENV_FILE="$2"; shift 2 ;;
+        -h|--help)
+            echo 'Usage: prepare-images.sh [--local | --deploy] [--hub-only] [--env-file PATH]'
+            echo 'Default: build ACE images locally. --deploy loads/configures images in the active cluster.'
+            exit 0 ;;
+        *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+if [[ "${LOCAL_REQUESTED}" -eq 1 ]] && [[ "${DEPLOY}" -eq 1 ]]; then
+    echo 'ERROR: --local cannot be combined with --deploy.' >&2
+    exit 2
+fi
+
 
 BOLD='\033[1m'; CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}✓${NC} $*"; }
@@ -50,7 +73,19 @@ warn() { echo -e "${YELLOW}⚠${NC}  $*"; }
 info() { echo -e "${CYAN}▸${NC} $*"; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${REPO_ROOT}/.env"
+ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
+if [[ "${DEPLOY}" -eq 0 ]]; then
+    build_args=(--env-file "${ENV_FILE}")
+    if [[ -n "${HUB_ONLY}" ]]; then
+        # Derived from deploy/images.txt (the row built by the hub-bundle
+        # recipe) rather than hardcoded, so renaming or retagging the bundle
+        # image cannot silently turn --hub-only into "no images match".
+        # shellcheck source=lib/registry.sh
+        source "${REPO_ROOT}/scripts/lib/registry.sh"
+        build_args+=(--only "$(inventory_only_regex "${REPO_ROOT}/deploy/images.txt" recipe hub-bundle)")
+    fi
+    exec bash "${REPO_ROOT}/scripts/build-and-push.sh" "${build_args[@]}"
+fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
     echo "ERROR: ${ENV_FILE} not found — run scripts/setup.sh first." >&2

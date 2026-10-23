@@ -131,7 +131,7 @@ services:
       start_period: 1s
 
   minio:
-    image: ${ACE_IMG_MINIO:-cgr.dev/chainguard/minio}
+    image: ${ACE_IMG_MINIO:-cgr.dev/chainguard/minio:latest}
     restart: always
     profiles: ["langfuse"]
     entrypoint: sh

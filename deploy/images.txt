@@ -97,7 +97,7 @@ mirror|workflow|ubuntu:16.04
 mirror|workflow|curlimages/curl:8.10.1
 mirror|workflow|registry.k8s.io/pause:3.9
 mirror|workflow|registry.access.redhat.com/ubi10-minimal:10.2-1782798957
-mirror|workflow|devth/alpine-bench:latest|||optional
+mirror|workflow|devth/alpine-bench:latest
 
 # ── Applications under test (app-charts: sock-shop, bookinfo, otel-demo) ─────
 mirror|apps|weaveworksdemos/front-end:0.3.12

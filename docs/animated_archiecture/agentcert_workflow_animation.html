@@ -8,8 +8,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',sans-serif;background:#e8ecf2;overflow:hidden;height:100vh;display:flex;align-items:center;justify-content:center}
+.slide-wrap{width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden}
 
-.slide{width:1480px;height:830px;background:#f8fafc;border-radius:20px;position:relative;overflow:hidden;box-shadow:0 8px 60px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.04)}
+.slide{width:1480px;height:830px;background:#f8fafc;border-radius:20px;position:relative;overflow:hidden;box-shadow:0 8px 60px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.04);transform-origin:top center;flex-shrink:0}
 .slide::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;background:linear-gradient(90deg,#3b82f6,#8b5cf6,#ec4899,#f59e0b);z-index:20}
 
 /* ── HEADER ── */
@@ -660,6 +661,9 @@ async function main(){
   for(let t=5;t>=1;t--){setS(-1,`<strong>Restarting</strong> in <strong>${t}s</strong>`);await W(1000)}
   main();
 }
+
+function scaleSlide(){const s=document.querySelector('.slide');const sc=Math.min(window.innerWidth/1480,window.innerHeight/830);s.style.transform=`scale(${sc})`;document.body.style.height=(830*sc)+'px'}
+window.addEventListener('resize',scaleSlide);scaleSlide();
 
 setTimeout(main,500);
 </script>

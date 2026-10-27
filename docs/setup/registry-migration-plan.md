@@ -1,24 +1,24 @@
-# Running ACE inside and outside the Infosys network: image registry plan
+# Running ACE in an enterprise environment or open setup: image registry plan
 
 ## 1. problem
 
 ACE runs about 90 container images: our own, Litmus, Langfuse, Mongo, the demo apps and the build base images. Today they are pulled from public registries such as Docker Hub, quay.io, ghcr.io and registry.k8s.io.
 
 - **Inside the Infosys network**, public registries are blocked. Every image has to come from **JFrog Artifactory** (`infyartifactory.jfrog.io/docker-local`), and pulling needs a login.
-- **Outside the network** (open source), people have no JFrog access. Everything has to come from the public registries, with no login.
+- **Outside the network** (open source), people have no enterprise registry access. Everything has to come from the public registries, with no login.
 
 ## 2. The goal : let .ENV be the Single Source of Truth
 
 > One setting in `.env` decides where every image comes from.
 
 ```bash
-# Outside Infosys (default): leave it empty → images come from their normal public home
+# Open / local setup (default): leave it empty → images come from their normal public home
 IMAGE_REGISTRY=
 
-# Inside Infosys: set it → every image comes from JFrog
+# Enterprise environment: set it → every image comes from the enterprise registry
 IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local
 REGISTRY_USERNAME=<your id>
-REGISTRY_PASSWORD=<JFrog token>
+REGISTRY_PASSWORD=<registry access token>
 IMAGE_PULL_SECRET_NAME=registry-pull
 ```
 Nothing else should have to change between the two setups.
@@ -32,7 +32,7 @@ Nothing else should have to change between the two setups.
 
 In other words: if the setting is set, put it **in front of the normal name**. If it is empty, use ACE's **frozen copy on Docker Hub** (`IMAGE_MIRROR_NAMESPACE`, default `agentcert`). Docker Hub repos can't nest, so the copy's name drops the registry host and turns `/` into `-`. ACE's own `agentcert/*` images keep their names. `IMAGE_MIRROR_NAMESPACE=none` pulls straight from upstream.
 
-**Why frozen copies for open source too:** third-party tags such as `grafana/grafana:latest` or `prometheus-mcp-server:latest` move, and upstream images get archived or deleted. Copying each image once into `agentcert/` pins exactly the version ACE was tested with, for both networks (JFrog copies are frozen the same way).
+**Why frozen copies for open source too:** third-party tags such as `grafana/grafana:latest` or `prometheus-mcp-server:latest` move, and upstream images get archived or deleted. Copying each image once into `agentcert/` pins exactly the version ACE was tested with, for both environments (enterprise registry copies are frozen the same way).
 
 **Why this rule:**
 - **Empty, not `docker.io`.** If the default were `docker.io`, images that live elsewhere would break for open-source users. For example, `docker.io/containers/kubernetes_mcp_server` does not exist.
@@ -80,26 +80,26 @@ Gaps in the code today:
 
 Each phase lists **what** changes and **why** it is done that way.
 
-### Phase 0: Fill JFrog with every image
+### Phase 0: Populate the enterprise registry with every image
 
 **What**
 1. **`deploy/images.txt`:** one list of every image ACE needs, grouped by platform, infra, workflow, agents, apps and build.
 2. **`scripts/check-registry-images.sh`:** reports OK / wrong tag / missing for every image in the list. This is the script used for section 4.
 3. **`scripts/mirror-images.sh`:** for **third-party** images (mongo, litmus, langfuse, bookinfo, …).
    - Runs on a machine that can reach the internet.
-   - Pulls each image from its public home, renames it with the rule from section 2, and pushes it to JFrog.
+   - Pulls each image from its public home, renames it with the rule from section 2, and pushes it to the enterprise registry.
    - Skips images that are already there.
 4. **`scripts/build-and-push.sh` (improved):** for **our own** images (`agentcert/*`).
    - Builds them from this branch and pushes them to `IMAGE_REGISTRY` instead of always to Docker Hub.
    - Pushes `latest` **and** a fixed tag such as the git commit.
    - Covers images that were never pushed: `ace-hub-bundle`, `itbench-experiment`, `sre-agent*`, `ciso-agent`.
 
-   > **what pushes future changes?** Yes. After this phase, running `build-and-push.sh --push` with `IMAGE_REGISTRY` set pushes new builds to JFrog. With it empty, they go to Docker Hub as today.
+   > **what pushes future changes?** Yes. After this phase, running `build-and-push.sh --push` with `IMAGE_REGISTRY` set pushes new builds to the enterprise registry. With it empty, they go to Docker Hub.
 
 **Why**
-- **Every later phase only switches image names to JFrog.** If an image isn't there, the pod fails with `ImagePullBackOff`. Filling JFrog first means later failures point at the code, not at missing images.
+- **Every later phase only switches image names to the enterprise registry.** If an image isn't there, the pod fails with `ImagePullBackOff`. Populating the enterprise registry first means later failures point at the code, not at missing images.
 - **Two scripts, not one.** Our images are *built* from source; third-party images are *copied*. Mixing them would rebuild things we don't own, or copy stale copies of things we do.
-- **For wrong-tag images, choose per image:** push the tag we use, or change our files to a tag JFrog already has. Pushing is preferred so the open-source and Infosys setups run the same versions.
+- **For wrong-tag images, choose per image:** push the tag we use, or change our files to a tag the enterprise registry already has. Pushing is preferred so the open and enterprise setups run the same versions.
 
 ### Phase 1: `.env` becomes the single source
 
@@ -111,7 +111,7 @@ Each phase lists **what** changes and **why** it is done that way.
   - `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX`
 
   These are all replaced by the settings above.
-- Every `*_IMAGE` value holds the **normal public name** (e.g. `litmuschaos/chaos-operator:3.0.0`), never a JFrog name. The prefix is added later, automatically.
+- Every `*_IMAGE` value holds the **normal public name** (e.g. `litmuschaos/chaos-operator:3.0.0`), never an enterprise registry-prefixed name. The prefix is added later, automatically.
 - `*_IMAGE_SOURCE` drops `jfrog | dockerhub | local` and becomes `local | registry`. `registry` means "pull from wherever `IMAGE_REGISTRY` points".
 
 **Why**
@@ -120,7 +120,7 @@ Each phase lists **what** changes and **why** it is done that way.
 ### Phase 2: Cluster preparation (`apply_cluster_prereqs.sh`)
 
 **What it does.** It doesn't fetch images. It gives the cluster the **login** and the **corporate certificate**:
-1. Creates the pull secret, holding the JFrog username and token, in every namespace that runs our pods: `ace`, `litmus`, `kube-system`, `sock-shop`, `book-info`, `otel-demo`, `itbench`, `litellm`.
+1. Creates the pull secret, holding the registry username and token, in every namespace that runs our pods: `ace`, `litmus`, `kube-system`, `sock-shop`, `book-info`, `otel-demo`, `itbench`, `litellm`.
 2. Attaches the secret to the service accounts in those namespaces, so pods use it automatically.
 3. The corporate (Zscaler) root certificate is **not** handled here: `setup.sh`'s `create_ca_configmap` already creates the `ace-ca-certs` ConfigMap graphql mounts, so a second ConfigMap would duplicate it.
 4. Installs `deploy/registry-secret-sync.yaml`, which copies the secret into **any new namespace** within seconds and attaches it to every ServiceAccount. Experiments create namespaces on the fly. Namespaces labelled `ace.registry-sync=disabled` are left alone.
@@ -128,13 +128,13 @@ Each phase lists **what** changes and **why** it is done that way.
 **Changes**
 - `setup.sh` runs it **only when `IMAGE_REGISTRY` is set**.
 - One secret name everywhere (`IMAGE_PULL_SECRET_NAME`), including in `prepare-images.sh`.
-- Remove its built-in JFrog default, and stop it from editing `.env`.
+- Remove its built-in registry default, and stop it from editing `.env`.
 - Add the missing sync manifest (`deploy/registry-secret-sync.yaml`, vendor-neutral name). Its kubectl image is `alpine/k8s:1.29.2`, already in `images.txt`.
 - Switching `IMAGE_REGISTRY` back to empty removes the sync (`apply_cluster_prereqs.sh --deploy --uninstall`).
 
 **Why**
-- Pointing an image name at JFrog is only half the job. Without the login, JFrog refuses the pull with `401`.
-- Running it only when the setting is set means open-source users never see a JFrog prompt.
+- Pointing an image name at the enterprise registry is only half the job. Without the login, the enterprise registry refuses the pull with `401`.
+- Running it only when the setting is set means open / local users never see a registry prompt.
 - One secret name: today one script creates `jfrog-registry` and another creates `jfrog-pull-secret`, so pods look for a secret that isn't there.
 - The sync is needed because experiment namespaces don't exist at setup time, so a one-off script can't cover them.
 
@@ -153,7 +153,7 @@ Each phase lists **what** changes and **why** it is done that way.
 
 **Why**
 - The image names stay readable in `values.yaml`, the prefix is decided in one place, and an empty value gives exactly today's behaviour.
-- This replaces main's approach of writing JFrog names into `values.yaml`.
+- This replaces the approach of writing enterprise registry names into `values.yaml`.
 
 ### Phase 4: The graphql server (Go, experiment time)
 
@@ -176,7 +176,7 @@ This is the largest phase, because **most pods are created by graphql while an e
 **Why**
 - **Rewrite at run time instead of editing 64 fault files.**
   - The fault files are packed into one "hub bundle" image built from this branch.
-  - If they contained JFrog names, there would need to be a separate bundle for each network, and open-source users would get JFrog names. That is what happened on main, where `fault.yaml` files were rewritten with `sed`.
+  - If they contained enterprise registry names, there would need to be a separate bundle for each environment, and open / local users would get enterprise registry names. That is what happened on main, where `fault.yaml` files were rewritten with `sed`.
   - With the rewrite, the files stay public and graphql adds the prefix only when it is set.
 - **Reusing the existing function** extends tested code instead of adding a second mechanism.
 
@@ -200,7 +200,7 @@ Both are installed **inside the cluster during an experiment**, by the `install-
 **As built (deviation):** image rewriting is done by a Helm **post-renderer** built into `install-app`, `install-agent` and graphql (direct agent installs and uploaded charts), not by template helpers in each app chart. The otel-demo upstream subchart takes images from five settings and hardcodes `busybox:latest` init containers inside value lists, which no chart setting can reach. The post-renderer rewrites every rendered `image:`, adds `imagePullSecrets` to every pod, and needs no new Go dependency. The agent charts additionally got the empty-registry guard and an `imagePullSecrets` value. `agent-charts/litellm/deployment.yaml` is only a manual local-dev manifest (the platform LiteLLM comes from the Helm chart), so it moves to Phase 6. The installers carry a generated copy of `pkg/imageref` (`scripts/lib/sync-imageref.sh`; the test suite fails if a copy drifts).
 
 **Why**
-- These charts start about 30 images: the sock-shop services, bookinfo, Prometheus, Grafana and the agents. If they keep public names, experiments fail inside Infosys even when the platform is healthy.
+- These charts start about 30 images: the sock-shop services, bookinfo, Prometheus, Grafana and the agents. If they keep public names, experiments fail in enterprise environments even when the platform is healthy.
 - Copying the secret just before install closes a timing gap: the namespace is brand new, and the sync from Phase 2 may not have reached it yet.
 
 ### Phase 6: Builds, compose and the rest
@@ -212,7 +212,7 @@ Both are installed **inside the cluster during an experiment**, by the `install-
 - Delete the old flat manifests in `deploy/k8s/*.yaml` (Helm replaces them), or render them with `envsubst`.
 
 **Why**
-- Building **inside** Infosys also pulls base images (`golang`, `python`, `node`, `ubi`), which are blocked.
+- Building **inside** an enterprise environment also pulls base images (`golang`, `python`, `node`, `ubi`), which are blocked.
 - An **empty** default keeps every Dockerfile working on its own for open-source users.
 - Plain `${IMAGE_REGISTRY}/mongo:5` breaks when the setting is empty, because it becomes `/mongo:5`. Hence the `:+` form.
 
@@ -221,14 +221,14 @@ Both are installed **inside the cluster during an experiment**, by the `install-
 **What**
 1. Merge each submodule first (AgentCert, app-charts, agent-charts, chaos-charts, certifier, litmus-go, agent-sidecar), each on its own branch.
 2. Then merge the monorepo, updating the submodule pointers.
-3. **Do not** bring over main's JFrog-hardcoded values or its `sed`-edited `fault.yaml` files.
+3. **Do not** bring over hardcoded enterprise registry values or its `sed`-edited `fault.yaml` files.
 
 
 ---
 
 ## 6. Proof ->
 
-The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to pull from outside JFrog?** And with it empty: **does anything mention JFrog?**
+The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to pull from outside the enterprise registry?** And with it empty: **does anything reference the enterprise registry URL?**
 
 ### Test 1: Before deploying (fast, no cluster)
 
@@ -240,7 +240,7 @@ The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to
 | Go rewrite | Unit tests on the rewrite function, fed real workflow and fault YAML | Every image prefixed except `INVALID_IMAGE` and `INVALID_ARCH_IMAGE` |
 | app/agent charts | `helm template` each chart with and without the registry setting | As for the Helm checks above; no `//` or leading `/` in any image |
 
-### Test 2: Inside Infosys, the real proof (fresh AKS or VM cluster)
+### Test 2: Enterprise environment, the real proof (fresh AKS or VM cluster)
 
 1. **Use a brand-new cluster.** Kubernetes caches images on its nodes. On an old cluster, a pod could start from a cached public image, and the test would pass while the real setup is broken.
 2. Set `IMAGE_REGISTRY` and the credentials, then run `./scripts/setup.sh --deploy`.
@@ -261,18 +261,18 @@ The test that matters is: **with `IMAGE_REGISTRY` set, does any pod still try to
    ```
    **Pass:** none.
 
-### Test 3: Outside Infosys (open-source path)
+### Test 3: Open / local environment
 
 1. On a machine outside the network (a personal laptop or a GitHub Actions runner), clone, leave `IMAGE_REGISTRY` empty and run `./scripts/setup.sh --deploy` on a fresh kind cluster.
 2. Run the same experiments.
 3. **Pass:**
-   - No JFrog prompt.
+   - No enterprise registry prompt.
    - `grep -ri jfrog` over the rendered values and the running pod specs finds nothing.
    - Every experiment completes.
 
 ### Test 4: Switching back and forth
 
-On the Infosys cluster, switch `IMAGE_REGISTRY` from set to empty, re-run `setup.sh --restart`, then switch it back.
+On the enterprise cluster, switch `IMAGE_REGISTRY` from set to empty, re-run `setup.sh --restart`, then switch it back.
 
 **Pass:**
 - Each switch changes only image names and pull secrets, with no manual edits.

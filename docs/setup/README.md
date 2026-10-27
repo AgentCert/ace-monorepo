@@ -14,7 +14,7 @@ control plane (auth + GraphQL + UI), LiteLLM, Langfuse, and the Certifier.
 
 ## Quick Start
 
-> **Inside the Infosys network (JFrog) or outside it?** See [quickstart-registry.md](quickstart-registry.md): one `.env` setting, `IMAGE_REGISTRY`, switches every image between JFrog and Docker Hub.
+> **Enterprise environment or open / local setup?** See [quickstart-registry.md](quickstart-registry.md): one `.env` setting, `IMAGE_REGISTRY`, switches every image between the enterprise registry and Docker Hub.
 
 **Prerequisites: Docker 28+ (with Compose v2), git, kind, kubectl, helm, python3.** `./scripts/setup.sh --deploy` checks them all first and prints the exact install command for anything missing.
 
@@ -125,6 +125,19 @@ check ends with `✓ All required prerequisites satisfied.`
 <div class="callout callout-warning">
 <span class="callout-title">Certifier always needs Azure OpenAI</span>
 The 4-phase certification pipeline calls Azure OpenAI directly (standard model, reasoning model, embedding model). If you skip Azure credentials the flash-agent can still run experiments via Gemini or OpenRouter, but the certifier will not produce reports.
+</div>
+
+---
+
+## Pipeline in action
+
+<div style="width:100%;height:480px;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 4px 24px rgba(0,0,0,.08);margin:1rem 0 1.5rem">
+  <iframe
+    src="../animated_archiecture/agentcert_workflow_animation.html"
+    style="width:100%;height:100%;border:none"
+    scrolling="no"
+    title="AgentCert workflow animation — fault injection → MCP trace → certification">
+  </iframe>
 </div>
 
 ---

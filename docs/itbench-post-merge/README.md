@@ -32,7 +32,7 @@ grep -c "tool_owner" agents/flash-agent/flash_agent.py
 
 **Files:** `AgentCert/chaoscenter/graphql/server/pkg/chaos_experiment/ops/service.go` and `.../chaos_experiment_run/handler/handler.go`
 
-**Problem:** `applyLitmusHelperImageOverrides` (previously unexported) was only called at *save time* (`processExperimentManifest`). Experiments already stored in MongoDB with JFrog registry URLs were submitted to Argo unchanged — the image pull failed mid-run.
+**Problem:** `applyLitmusHelperImageOverrides` (previously unexported) was only called at *save time* (`processExperimentManifest`). Experiments already stored in MongoDB with enterprise registry URLs were submitted to Argo unchanged — the image pull failed mid-run.
 
 **Fix summary:**
 - Renamed to `ApplyLitmusHelperImageOverrides` (exported).
@@ -41,9 +41,9 @@ grep -c "tool_owner" agents/flash-agent/flash_agent.py
 
 **New env vars in the `ace-env` Kubernetes Secret** (set by `setup.sh` → `values-env.yaml`):
 
-| Env Var | What it does | KinD / local value | JFrog value |
+| Env Var | What it does | KinD / local value | Enterprise registry value |
 |---|---|---|---|
-| `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX` | Prefix prepended to all litmus helper image refs | `docker.io/` or empty | `infyartifactory.jfrog.io/docker-local/` |
+| `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX` | Prefix prepended to all litmus helper image refs | `docker.io/` or empty | enterprise registry prefix (e.g. `infyartifactory.jfrog.io/docker-local/`) |
 | `LITMUS_HELPER_IMAGES_PULL_POLICY` | `imagePullPolicy` injected into all litmus helper templates | `IfNotPresent` (pre-loaded) or `Always` | `Always` |
 
 If both vars are empty, the function is a no-op — images are left exactly as stored in MongoDB.
@@ -117,7 +117,7 @@ cp .env.example .env
 The `setup.sh` wizard will:
 - Auto-assign `ACE_INSTANCE_NAME` (from your Unix username) — this scopes all container names, volumes, Compose projects, and KinD cluster names to your checkout.
 - Auto-assign `OLLAMA_PORT` (derived from your UID) — avoids collision with system Ollama on :11434.
-- Prompt for image sources (`dockerhub` / `jfrog` / `local`) per workflow step image.
+- Prompt for image sources (`dockerhub` / `registry` / `local`) per workflow step image.
 - Prompt for `LITMUS_HELPER_IMAGES_REGISTRY_PREFIX` and `LITMUS_HELPER_IMAGES_PULL_POLICY` — see Section 1.2 for the right values per environment.
 
 ### 3.2 KinD Cluster: Load Locally Built Images

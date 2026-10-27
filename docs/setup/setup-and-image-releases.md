@@ -3,7 +3,7 @@
 This guide covers three things:
 
 1. What `./scripts/setup.sh --deploy` does, step by step, and which files it uses.
-2. How to publish images to JFrog (`infyartifactory.jfrog.io/docker-local/agentcert/…`) and Docker Hub (`agentcert/…`) after a code change or a third-party image change.
+2. How to publish images to the enterprise registry (`infyartifactory.jfrog.io/docker-local/agentcert/…`) and Docker Hub (`agentcert/…`) after a code change or a third-party image change.
 3. How a release tag (`RELEASE-1`, `RELEASE-2`, …) gets from `.env` to every pod, so the platform runs that release and not `:latest`.
 
 ---
@@ -172,21 +172,21 @@ They are written to `pkg/imageref/mirrored.go`, the two installer copies, and `d
 
 ## 3. Publishing images
 
-Run these on a machine that can reach both the public registries and JFrog. Credentials come from `.env`:
+Run these on a machine that can reach both the public registries and (enterprise registry). Credentials come from `.env`:
 
 | Target | Credentials |
 |---|---|
-| JFrog | `IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` (JFrog identity token) |
-| Docker Hub | `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in the same `.env`. When a command overrides `IMAGE_REGISTRY` to empty (`IMAGE_REGISTRY= ./scripts/…`), `registry_load` uses these instead of the JFrog credentials. |
+| (enterprise registry) | `IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` ((enterprise registry) identity token) |
+| Docker Hub | `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in the same `.env`. When a command overrides `IMAGE_REGISTRY` to empty (`IMAGE_REGISTRY= ./scripts/…`), `registry_load` uses these instead of the (enterprise registry) credentials. |
 
 ### 3.1 ACE code changed → publish a new release
 
 1. **Commit and push the code first.** Images are labelled with the git revision, and `--committed-only` builds exactly what is committed.
-2. **Pick the next release number.** A release number is never reused (JFrog refuses to overwrite a tag, and the script will not either).
+2. **Pick the next release number.** A release number is never reused (enterprise registry refuses to overwrite a tag, and the script will not either).
 3. Run:
 
 ```bash
-# JFrog: builds every ACE image from the committed code and pushes them
+# Enterprise registry: builds all 14 ACE images from the committed code and pushes them
 ./scripts/build-and-push.sh --push --committed-only --tag RELEASE-2
 
 # Docker Hub: the same images, without rebuilding
@@ -235,7 +235,7 @@ Third-party images are pinned. A change means a new tag, never overwriting the o
    ```
 4. Copy the image into both registries. Images that are already present are skipped, so re-running is cheap.
    ```bash
-   ./scripts/mirror-images.sh --dry-run                 # show what would be copied to JFrog
+   ./scripts/mirror-images.sh --dry-run                 # show what would be copied to the enterprise registry
    ./scripts/mirror-images.sh --push                    # → …/docker-local/agentcert/<public name>
    IMAGE_REGISTRY= ./scripts/mirror-images.sh --push    # → docker.io/agentcert/<flat name>
    ./scripts/check-registry-images.sh --kind mirror   # expect 0 MISSING
@@ -280,7 +280,7 @@ Then run `./scripts/setup.sh --deploy` (or `--restart`). Each part of the platfo
 
 ```bash
 git push                                   # 1. code committed and pushed
-./scripts/build-and-push.sh --push --committed-only --tag RELEASE-N        # 2. JFrog
+./scripts/build-and-push.sh --push --committed-only --tag RELEASE-N        # 2. enterprise registry
 IMAGE_REGISTRY= ./scripts/build-and-push.sh --push --committed-only --reuse-local --tag RELEASE-N   # 3. Docker Hub
 ./scripts/check-registry-images.sh --kind build                     # 4. every build row OK
 # 5. on each deployment: ACE_IMAGE_TAG=RELEASE-N in .env, then

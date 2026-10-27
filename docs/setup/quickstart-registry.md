@@ -1,17 +1,17 @@
 ---
-title: "Quick start: inside or outside the Infosys network"
+title: "Quick start: inside or open / local environment"
 parent: "Setup"
 nav_order: 1
 ---
 
-# Quick start: inside or outside the Infosys network
+# Quick start: inside or open / local environment
 
 One setting in `.env` decides where every container image comes from:
 
 | You are… | `IMAGE_REGISTRY` | Images come from |
 |---|---|---|
-| **Outside Infosys** (open source) | *(empty)* | Docker Hub: ACE's own images, plus frozen copies of third-party images under `agentcert/`. No login. |
-| **Inside Infosys** | `infyartifactory.jfrog.io/docker-local` | JFrog Artifactory. Needs your JFrog username and an access token. |
+| **Open / local environment** (open source) | *(empty)* | Docker Hub: ACE's own images, plus frozen copies of third-party images under `agentcert/`. No login. |
+| **Enterprise environment** | `infyartifactory.jfrog.io/docker-local` | Enterprise image repository. Needs your enterprise registry username and an access token. |
 
 Nothing else changes between the two.
 
@@ -21,7 +21,7 @@ Nothing else changes between the two.
 
 ---
 
-## Outside the Infosys network
+## Outside the enterprise network
 
 ```bash
 git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
@@ -33,29 +33,29 @@ At the **Image registry** question, press **Enter** to leave it empty. Answer th
 
 ---
 
-## Inside the Infosys network
+## Enterprise environment
 
-1. **Clone.** Use your usual Infosys Git access.
+1. **Clone.** Use your usual Git access.
    ```bash
    git clone --recurse-submodules https://github.com/AgentCert/ace-monorepo
    cd ace-monorepo
    ```
-2. **Check that JFrog has every image.** Optional, takes about a minute, and every line should say `OK`:
+2. **Check that the enterprise registry has every image.** Optional, takes about a minute, and every line should say `OK`:
    ```bash
    cp .env.example .env
    # edit .env: IMAGE_REGISTRY=infyartifactory.jfrog.io/docker-local
-   #            REGISTRY_USERNAME=<your Infosys id>   REGISTRY_PASSWORD=<JFrog access token>
+   #            REGISTRY_USERNAME=<your registry username>   REGISTRY_PASSWORD=<enterprise registry access token>
    ./scripts/check-registry-images.sh
    ```
 3. **Run setup.**
    ```bash
    ./scripts/setup.sh --deploy
    ```
-   At **Image registry**, enter `infyartifactory.jfrog.io/docker-local`, then your JFrog username and access token. If your machine sits behind the corporate proxy (Zscaler), give the path of the corporate CA certificate when asked.
+   At **Image registry**, enter `infyartifactory.jfrog.io/docker-local`, then your enterprise registry username and access token. If your machine sits behind the corporate proxy, give the path of the corporate CA certificate when asked.
 
-`setup.sh` then logs in to JFrog, puts the login into the cluster (`scripts/apply_cluster_prereqs.sh`), and deploys. Every image the cluster pulls comes from JFrog.
+`setup.sh` then logs in to the enterprise registry, puts the login into the cluster (`scripts/apply_cluster_prereqs.sh`), and deploys. Every image the cluster pulls comes from the enterprise registry.
 
-> Use the **Helm** deploy option (the default). For a JFrog access token: JFrog UI → your profile → *Generate an Identity Token*.
+> Use the **Helm** deploy option (the default). For a registry access token: log in to the registry UI → your profile → *Generate an Identity Token*.
 
 ---
 
@@ -64,7 +64,7 @@ At the **Image registry** question, press **Enter** to leave it empty. Answer th
 Run these after setup and after your first experiment.
 
 ```bash
-# Inside Infosys: every image actually pulled must come from JFrog (prints nothing when correct)
+# Enterprise environment: every image actually pulled must come from the enterprise registry (prints nothing when correct)
 kubectl get events -A -o jsonpath='{range .items[?(@.reason=="Pulling")]}{.message}{"\n"}{end}' \
   | grep -v 'infyartifactory.jfrog.io/docker-local/'
 
@@ -76,7 +76,7 @@ kubectl get events -A | grep -E 'ErrImagePull|ImagePullBackOff|401|unauthorized'
 
 ## Switching networks later
 
-Edit `IMAGE_REGISTRY` in `.env`, then run `./scripts/setup.sh --restart`. Set it empty to use public images, or to the JFrog value to use JFrog.
+Edit `IMAGE_REGISTRY` in `.env`, then run `./scripts/setup.sh --restart`. Set it empty to use public images, or to your enterprise registry URL to use that registry.
 
 ---
 
@@ -96,11 +96,11 @@ All images are listed once, in `deploy/images.txt`.
 
 ```bash
 # third-party images (copied as-is, skips what is already there)
-./scripts/mirror-images.sh --push                 # into JFrog (IMAGE_REGISTRY from .env)
+./scripts/mirror-images.sh --push                 # into the enterprise registry (IMAGE_REGISTRY from .env)
 IMAGE_REGISTRY= ./scripts/mirror-images.sh --push # into the frozen Docker Hub copies (agentcert/)
 
 # ACE's own images, built from the committed code
-./scripts/build-and-push.sh --push --committed-only --reuse-local                 # JFrog
+./scripts/build-and-push.sh --push --committed-only --reuse-local                 # enterprise registry
 IMAGE_REGISTRY= ./scripts/build-and-push.sh --push --committed-only --reuse-local # Docker Hub
 
 # verify both, and refresh the link lists

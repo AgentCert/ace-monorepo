@@ -61,14 +61,9 @@
 
 ## Pipeline in action
 
-<div style="width:100%;height:480px;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 4px 24px rgba(0,0,0,.08);margin:1rem 0 1.5rem">
-  <iframe
-    src="docs/animated_archiecture/agentcert_workflow_animation.html"
-    style="width:100%;height:100%;border:none"
-    scrolling="no"
-    title="AgentCert workflow animation">
-  </iframe>
-</div>
+![AgentCert pipeline animation](docs/animated_archiecture/agentcert_workflow_animation.gif)
+
+> Click the GIF to open the [interactive version](https://agentcert.github.io/ace-monorepo/animated_archiecture/agentcert_workflow_animation.html) on the docs site.
 
 ---
 

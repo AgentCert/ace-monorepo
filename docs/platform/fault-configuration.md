@@ -75,7 +75,7 @@ not trust field definitions supplied by a client.
 - **Lenient:** an engine from an older revision, or a legacy unannotated engine
   (looked up by experiment name). Only declared settings that hold a literal value
   are checked against the current schema. `valueFrom` references and values
-  containing `{{` (for example ConfigMap-backed workflow parameters) are skipped,
+  containing `{% raw %}{{{% endraw %}` (for example ConfigMap-backed workflow parameters) are skipped,
   and undeclared or hidden variables are accepted. Whole workflow parameter
   references in imported hub workflows are checked by their resolved values.
 

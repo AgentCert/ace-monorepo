@@ -254,6 +254,7 @@ cp -r flash-agent my-sre-agent
 
 `agent-charts/charts/agents.chartserviceversion.yaml` → `spec.agents[]`:
 
+{% raw %}
 ```yaml
     - name: my-sre-agent
       displayName: My SRE Agent
@@ -274,6 +275,7 @@ cp -r flash-agent my-sre-agent
         - helmPath: "agent.config.WORKFLOW_NAME"
           source: "{{workflow.labels.subject}}"
 ```
+{% endraw %}
 
 `contextInjection` tells the GraphQL server which Helm paths to populate with workflow
 context at experiment-save time. Copy the three entries verbatim — they are identical for
@@ -296,6 +298,7 @@ pushing it, run `./build-install-agent.sh --kind-load`.
 
 In `chaos-charts/experiments/<app>-itbench/experiment.yaml`:
 
+{% raw %}
 ```yaml
   arguments:
     parameters:
@@ -319,6 +322,7 @@ In `chaos-charts/experiments/<app>-itbench/experiment.yaml`:
           - "--set=agent.workflowUid={{workflow.uid}}"
           - "--set=sidecar.upstream={{workflow.parameters.litellmUpstream}}"
 ```
+{% endraw %}
 
 > **Note:** the installer escapes `:` and `,` inside `--set` values, because Helm treats
 > them as nested-key and key-value separators. URLs pass through safely.

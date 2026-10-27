@@ -305,6 +305,7 @@ onboarding guide.
 Copy `chaos-charts/experiments/bookinfo-itbench/experiment.yaml` →
 `chaos-charts/experiments/my-app-itbench/experiment.yaml`.
 
+{% raw %}
 ```yaml
 spec:
   entrypoint: argowf-chaos
@@ -337,6 +338,7 @@ spec:
           - "-wait"
           - "-timeout={{workflow.parameters.installTimeout}}"
 ```
+{% endraw %}
 
 **Is this step mandatory?** No — you can compose experiments by hand in the ChaosCenter
 UI. But then every run is manual and not version-controlled.

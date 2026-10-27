@@ -49,6 +49,13 @@ footer_content: >-
   ACE — Agent Certification Engine · Released under the Apache License 2.0.
 last_edit_timestamp: false
 
+# Suppress Dart Sass @import deprecation warnings that come from the
+# just-the-docs theme's own SCSS (not fixable without replacing the theme).
+sass:
+  silence_deprecations:
+    - import
+    - color-functions
+
 # Keep build output and tooling out of the source.
 exclude:
   - _site/

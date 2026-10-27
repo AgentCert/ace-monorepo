@@ -1,3 +1,8 @@
+---
+nav_exclude: true
+search_exclude: true
+---
+
 # ACE images in infyartifactory.jfrog.io/docker-local
 
 Generated 2026-10-07 12:07 UTC by `scripts/check-registry-images.sh --markdown` from `deploy/images.txt`.

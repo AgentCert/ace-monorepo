@@ -1,3 +1,8 @@
+---
+nav_exclude: true
+search_exclude: true
+---
+
 # ACE images in docker.io/agentcert (frozen open-source copies)
 
 Generated 2026-10-07 11:59 UTC by `scripts/check-registry-images.sh --markdown` from `deploy/images.txt`.

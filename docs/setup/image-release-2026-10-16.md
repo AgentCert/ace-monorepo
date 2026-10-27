@@ -1,3 +1,9 @@
+---
+title: "Verified Docker Hub images — 16 October 2026"
+parent: "Setup"
+nav_order: 93
+---
+
 # Verified Docker Hub images — 16 October 2026
 
 Completed: 2026-10-16T13:21:15+05:30 (India time).

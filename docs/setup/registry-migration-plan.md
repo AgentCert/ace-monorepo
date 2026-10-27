@@ -1,3 +1,9 @@
+---
+title: "Running ACE in an enterprise environment or open setup: image registry plan"
+parent: "Setup"
+nav_order: 92
+---
+
 # Running ACE in an enterprise environment or open setup: image registry plan
 
 ## 1. problem

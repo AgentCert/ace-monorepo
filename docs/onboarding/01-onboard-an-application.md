@@ -1,3 +1,9 @@
+---
+title: "Onboarding a Target Application"
+parent: "Setup"
+nav_order: 94
+---
+
 # Onboarding a Target Application
 
 > How to add a new "system under test" (SUT) to the ACE platform — the application that

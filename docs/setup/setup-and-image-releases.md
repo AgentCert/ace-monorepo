@@ -1,3 +1,9 @@
+---
+title: "How setup.sh works, and how images are published and released"
+parent: "Setup"
+nav_order: 91
+---
+
 # How `setup.sh` works, and how images are published and released
 
 This guide covers three things:

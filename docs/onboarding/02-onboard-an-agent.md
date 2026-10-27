@@ -1,3 +1,9 @@
+---
+title: "Onboarding an AI Agent"
+parent: "Setup"
+nav_order: 95
+---
+
 # Onboarding an AI Agent
 
 > How to add a new AI agent to the ACE platform — the system under evaluation that must

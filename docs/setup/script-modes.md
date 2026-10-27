@@ -1,3 +1,9 @@
+---
+title: "Build, publish and install script modes"
+parent: "Setup"
+nav_order: 90
+---
+
 # Build, publish and install script modes
 
 ## The one distinction that catches people out

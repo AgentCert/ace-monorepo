@@ -1,3 +1,9 @@
+---
+title: "Onboarding an LLM"
+parent: "Setup"
+nav_order: 96
+---
+
 # Onboarding an LLM
 
 > How to add an LLM to your project from the ACE UI, with your own API key, and run your

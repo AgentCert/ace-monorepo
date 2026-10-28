@@ -1048,6 +1048,8 @@ These are backfilled into `.env` automatically on every `setup.sh` install run (
 | `AZURE_OPENAI_KEY` / `AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI for LiteLLM + agents |
 | `OPENROUTER_API_KEY` | OpenRouter (optional fallback) |
 | `LITELLM_MASTER_KEY` | LiteLLM gateway auth key (local dev: `sk-agentcert-2026`) |
+| `LITELLM_DATABASE_URL` / `LITELLM_SALT_KEY` | LLM Models registry (UI page `/llm-models`): LiteLLM's own database on Langfuse's Postgres, and the salt its stored API keys are encrypted with. Written by `setup.sh` via `scripts/lib/model_registry.sh` (salt once, never replaced: back up `.env`). The registry is on only when both are set. Never put `DATABASE_URL` itself in `.env`: Langfuse reads it. Design: `docs_2/MULTI_MODEL_CONFIGURATION_DESIGN.md`; guide: `docs/onboarding/03-onboard-an-llm.md` |
+| `LITELLM_ADMIN_URL_COMPOSE` | docker compose only: where graphql reaches LiteLLM's admin API (default `http://litellm:4000`). Kubernetes derives it from `OPENAI_BASE_URL`. Don't run LiteLLM with `--detailed_debug` or `LITELLM_LOG=DEBUG`: at debug level it logs every API key on every request |
 | `LANGFUSE_ORG_ID` / `LANGFUSE_PROJECT_ID` | Langfuse project scoping for GraphQL server |
 | `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | Fallback push credentials for `build-and-push.sh --push` when `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` are unset |
 | `ALLOWED_ORIGINS` | CORS/WebSocket origin allowlist. Extended regex includes `[a-z0-9.-]+\.svc\.cluster\.local` so in-cluster Kubernetes services (e.g. subscriber) can connect. |

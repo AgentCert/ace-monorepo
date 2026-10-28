@@ -69,6 +69,8 @@ source "${SCRIPT_DIR}/lib/registry.sh"
 # defines functions; nothing runs on source.
 # shellcheck source=lib/cluster_profile.sh
 source "${SCRIPT_DIR}/lib/cluster_profile.sh"
+# shellcheck source=lib/model_registry.sh
+source "${SCRIPT_DIR}/lib/model_registry.sh"
 EXAMPLE_FILE="${REPO_ROOT}/.env.example"
 
 # Force UTF-8 as Python's default text encoding (PEP 540) for every embedded
@@ -2790,6 +2792,15 @@ k8s_env_patch() {
     set_env POSTGRES_USER     "postgres"
     set_env POSTGRES_PASSWORD "postgres"
     set_env POSTGRES_DB       "postgres"
+
+    # LLM Models registry: LiteLLM's own database on this Postgres, and the
+    # salt key its stored API keys are encrypted with.
+    local had_salt_key
+    had_salt_key="$(cur LITELLM_SALT_KEY)"
+    model_registry_env cur set_env model_registry_new_salt
+    if [[ -z "${had_salt_key}" ]]; then
+        warn "Generated LITELLM_SALT_KEY in .env. It encrypts the API keys of models added under LLM Models: back up .env, and never change it (a new one means re-entering every model's key)."
+    fi
 
     # ClickHouse (Langfuse): default dev credentials
     set_env CLICKHOUSE_USER     "default"

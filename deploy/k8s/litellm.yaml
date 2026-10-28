@@ -198,7 +198,9 @@ spec:
         - name: litellm
           image: litellm/litellm:v1.82.0-stable
           imagePullPolicy: IfNotPresent
-          args: [--config, /app/config.yaml, --port, "4000", --detailed_debug]
+          # No --detailed_debug: at debug level LiteLLM logs every model's
+          # plaintext API key on every request.
+          args: [--config, /app/config.yaml, --port, "4000"]
           ports:
             - containerPort: 4000
           envFrom:

@@ -3420,3 +3420,60 @@ They had patched the chart by hand to get past these. Rendering those patches sh
 **Still to do:**
 - Rebuild the images.
 - Do a live KinD and AKS run.
+
+## §143 — LLM models can be added from the UI, with your own key; a hole in project permissions is closed (2026-10-27, uncommitted)
+
+**What:** projects can now add their own LLMs.
+- A new **LLM Models** page sits in the sidebar after Apps Hub. A project owner picks a provider (Azure OpenAI, OpenAI, Gemini, OpenRouter, Ollama or any OpenAI-compatible server), enters the model and their API key, presses **Test**, then **Save**.
+- The model works at once, with no redeploy, and appears on the Studio agent node's **LLM model** setting, so one experiment can be benchmarked across models.
+- Each model can be tested, given a new key, or deleted. Delete is refused while a running or scheduled experiment uses the model.
+- ACE stores everything about the model except the key, which only the LiteLLM gateway holds, encrypted. `setup.sh` now gives LiteLLM a small database on Langfuse's Postgres, plus the salt key that encrypts the stored keys.
+- A guide for users is at `docs/onboarding/03-onboard-an-llm.md`, and the design doc now matches what was built.
+
+**Why some things differ from the design:** testing against the real gateway showed that:
+- it creates its own database, so no setup job is needed;
+- it reports "no database" as a server error, so errors are recognised by their message;
+- a lost model's key-rotation error is a 404, not the 400 the design expected.
+
+More seriously, the gateway would hand the platform's own keys to any address a user typed in, if the key field said `os.environ/…`, `oidc/…`, or was left empty. ACE now refuses those and always sends an explicit key and address. The gateway's debug logging also printed every API key on every request, platform keys included, so it is turned off.
+
+**Found along the way:** the permission check behind every project screen let any signed-in user act in any project, with any role. Non-members could read other projects, and viewers could make changes. It is a one-line bug inherited from the original Litmus code. It is fixed and has a test. Real member records should still be checked before this is rolled out.
+
+**Verified:** all Go, web and script tests pass. On a separate test copy of the stack, with the real gateway and its database, a fake model behind it, and the servers built from this code, the following were all confirmed:
+- adding, testing, using, re-keying and deleting a model;
+- project isolation and roles;
+- recovery after the gateway loses a model;
+- the web page in a real browser.
+
+No key showed up in any log or in ACE's database.
+
+**Still to do:**
+- Rebuild the images (`./scripts/setup.sh --restart --local-build`) and try it on a real deployment with a real provider key.
+- Commit.
+- Decide who backs up `.env`, which now holds the salt key.
+
+## §144 — Adding a model now tests it before saving; reasoning models no longer fail Test (2026-10-28, uncommitted)
+
+**What happened:** the first model added through the new LLM Models page was saved with the wrong Azure deployment name (`admin`, the login name, probably filled in by the browser). Nothing stopped it. The experiment ran, and every call its agent made failed with "deployment does not exist".
+
+**What changed:**
+- **Save tests the model first.** If the model doesn't answer, nothing is saved and the reason is shown. The button then reads **Save anyway**, for the rare case you know better. Changing any field brings back the normal Save.
+- **The browser can no longer autofill your login** into the Add Model form or the Rotate key dialog.
+- **For Azure, the field is now called "Deployment name"**, which is what Azure actually wants.
+- **Test now passes reasoning models (GPT-5, o-series).** While checking the fix, it turned out your `gpt4o` deployment is really GPT-5.1. The gateway's test always asks for a one-token answer, which these models refuse, so Test said "failed" for a model that works. ACE now recognises that refusal as a working model. A wrong name, key, version or address still fails, each with its own message (checked against your Azure resource).
+
+**Verified:** all web tests (308) and the model-registry Go tests pass. Each new rule was also removed on purpose, and the tests failed as they should. Against your real gateway and Azure, the right deployment passes and a wrong one fails. The new web and graphql builds are running on your KinD cluster.
+
+**Not verified:** the form wasn't clicked through in a browser on your cluster, because the admin password in `.env` no longer works (you changed it at first login).
+
+**Then confirmed end to end:** the model was added again from the UI.
+- Save refused one attempt whose deployment name Azure didn't know. That's the original mistake, caught this time.
+- Save accepted the corrected values as `gpt-4o-bench`.
+- The next run went through cleanly: every LLM call worked, and the agent spotted the scaled-down `carts` service.
+- The fault passed, and the certificate was produced: detection and mitigation 100%, RAI PASS 88.
+
+A few harmless log messages remain: a known bug in the gateway's tool table, the monitoring Prometheus being turned away from the auth service's metrics page, and a missing local ChaosHub folder.
+
+**Decided:** models added on the LLM Models page are for agents only. Certification keeps using the certifier's own model from `.env`. This was already how it worked (the certifier never called the gateway during the run); it is now written down in the design and the user guide.
+
+**Still to do:** commit, and refresh the Add Model screenshot in the user guide.

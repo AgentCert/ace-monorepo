@@ -18,6 +18,15 @@ spec:
     requests:
       storage: {{ .Values.storage.litellm }}
 ---
+{{- /*
+LLM Models registry: with a database LiteLLM stores the models projects add
+from the UI (ACE's /llm-models page) and their keys, encrypted with
+LITELLM_SALT_KEY. setup.sh sets both values; an empty one leaves the registry
+off, never a DATABASE_URL pointing at nothing. LiteLLM creates its database on
+first start. DATABASE_URL is set only here, never in ace-env: Langfuse reads
+that name too.
+*/}}
+{{- $modelRegistry := and .Values.env.LITELLM_DATABASE_URL .Values.env.LITELLM_SALT_KEY }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,11 +52,36 @@ spec:
         checksum/config: {{ .Values.litellm.config | sha256sum }}
     spec:
       {{- include "ace.imagePullSecrets" $ | nindent 6 }}
+      {{- if $modelRegistry }}
+      initContainers:
+        # LiteLLM connects to its database once, at startup: started before
+        # Postgres is ready, it would serve without the registry until its next
+        # restart. pg_isready only needs the server up, not the database.
+        - name: wait-for-db
+          image: {{ include "ace.image" (dict "root" $ "image" .Values.images.postgres "local" false) }}
+          imagePullPolicy: {{ .Values.infraImagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -q -d "$LITELLM_DATABASE_URL" -t 3; do
+                echo "waiting for the LiteLLM database server to accept connections..."
+                sleep 2
+              done
+          env:
+            - name: LITELLM_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_DATABASE_URL
+      {{- end }}
       containers:
         - name: litellm
           image: {{ include "ace.image" (dict "root" $ "image" .Values.images.litellm "local" false) }}
           imagePullPolicy: {{ .Values.infraImagePullPolicy }}
-          args: [--config, /app/config.yaml, --port, "4000", --detailed_debug]
+          # No --detailed_debug: at debug level LiteLLM logs every model's
+          # plaintext API key on every request.
+          args: [--config, /app/config.yaml, --port, "4000"]
           ports:
             - containerPort: 4000
           envFrom:
@@ -70,6 +104,15 @@ spec:
             # timeout is rather than relying on the 120s default.
             - name: AIOHTTP_KEEPALIVE_TIMEOUT
               value: "45"
+            {{- if $modelRegistry }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: LITELLM_DATABASE_URL
+            - name: STORE_MODEL_IN_DB
+              value: "True"
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /app/config.yaml

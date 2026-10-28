@@ -10240,3 +10240,93 @@ The user hand-patched the chart. Rendering their diff against HEAD with setup's 
 - the chartconfig empty-numeric relaxation also applies to string-typed chart integers (minor);
 - legacy lookup by name only checks the default hub;
 - app-charts 056cf5e keeps its one-word message "fix" (it sits under a merge).
+
+### §143 — LLM Models registry: onboard models from the UI with project-owned keys; auth RBAC bypass fixed; LiteLLM key logging removed (2026-10-27, uncommitted; images not rebuilt)
+
+Implements `docs_2/MULTI_MODEL_CONFIGURATION_DESIGN.md` end to end. A project owner adds an LLM on the new **LLM Models** page (sidebar, after Apps Hub) with their own API key, tests it, and picks it on the Studio agent node. MongoDB `modelConfig` holds the record and status; LiteLLM (now DB-backed) holds the encrypted key and serves the alias at once. The design doc was corrected in place to the as-built facts (§2.4, D8, D9, §5.4, §5.6, §6, §9.1, §9.3, §9.5, §10.1, §11, §13). User guide: `docs/onboarding/03-onboard-an-llm.md`.
+
+**LiteLLM 1.82.0 facts, verified on a running `litellm/litellm:v1.82.0-stable`** (several overturned the design as written):
+- `prisma migrate deploy` creates the `litellm` database itself → no db-init job. If the DB is unreachable at boot LiteLLM still serves config models but never connects later → Helm `wait-for-db` init container; compose `depends_on: postgres`.
+- Registry off = **500** `No DB Connected` (not a 4xx) → classified by message. PATCH of an unknown id = **404** `not found on proxy` (design said 400); delete = 400 `not found in db`; duplicate id = 500 `Failed to add model to db` (known failure); wrong master key = 401 echoing part of the key.
+- `LITELLM_SALT_KEY=""` is used as an empty salt (`os.getenv(..., None)`) → registry on only when URL **and** salt are non-empty.
+- **Credential exfiltration paths** (each sent `*-ENV-SENTINEL` platform keys to a caller-chosen `api_base` in the harness): `os.environ/X` in a stored key or in `/health/test_connection`; `oidc/...` (cloud identity tokens); missing or empty `api_key` (provider env fallback); `test_connection` merging a config model's credentials by model string. → server rejects `os.environ/` / `oidc/`, always sends an explicit key (placeholder `ace-no-key` for keyless providers) and api_base (provider default).
+- `--detailed_debug` and `LITELLM_LOG=DEBUG` each log every deployment's plaintext key on every request (5–6×/request); `set_verbose: true` alone does not → removed from every launch. This was already exposing platform keys.
+- Test endpoints emit Langfuse traces tagged `litellm-internal-health-check` (no key, no run id); `no-log` doesn't suppress.
+
+**Pre-existing critical bug found by the E2E and fixed:** auth `pkg/validations/rbac_validator.go` checked `project == nil`, but `pkg/project/repository.go` `GetProjects` returns `[]*Project{}` → every signed-in user passed every `ValidateRole` for every project/role (non-member listed another project's models and experiments; a Viewer created a model). Present since the "Base - litmus 3.23.0" import. Fixed to `len(project) == 0`; regression case added (fails without the fix). Member records carry `invitation: Accepted`, so legitimate users are unaffected in the test stack; **check real deployments' member records before rolling out**.
+
+| Repo | Files | Change |
+|---|---|---|
+| AgentCert graphql | `definitions/shared/model_config.graphqls` (new), `chaos_experiment_run.graphqls` | ModelConfig types/mutations; `listAgentModelOptions(projectID)` + `@authorized` |
+| AgentCert graphql | `pkg/model_config/{service,litellm_client,provider,reconcile,guard,platform,mapper,errors}.go` (new) | Intent-first writes; message-based error classification; secret-reference rejection + explicit key/base; reconcile every 2 min with readiness check, CAS on `updated_at`, grace periods; delete guard (in-flight runs + enabled crons); create-vs-delete race handling |
+| AgentCert graphql | `pkg/database/mongodb/model_config/{schema,operations}.go` (new), `mongodb/{init,collection}.go` | `modelConfig` collection; unique `alias` (incl. removed) and `model_id`; guarded `Update`/`Remove` |
+| AgentCert graphql | `pkg/chaos_experiment/ops/{install_config,validation,service}.go`, `pkg/chaos_experiment_run/handler/handler.go` | `ResolvedModelAliases`, `ManifestModelAliases`, `ModelAliasValidator`; save gate in `validateExperimentComposition` (all save paths incl. gitops); run gate first in `RunChaosWorkFlow` and in `RunCronExperiment` |
+| AgentCert graphql | `pkg/chartconfig/platform.go`, `graph/{resolver,helpers,model_config.resolvers,chaos_experiment_run.resolvers}.go`, `pkg/authorization/roles.go`, `utils/variables.go`, regenerated gqlgen | `DefaultAgentModelAlias()` single source; wiring + reconciler goroutine; RBAC (lists: all roles; writes/tests: owner); `LITELLM_ADMIN_URL`, `LITELLM_MASTER_KEY`, `OPENAI_BASE_URL` config |
+| AgentCert auth | `pkg/validations/{rbac_validator.go,validations_test.go}` | RBAC bypass fix + regression test |
+| AgentCert web | `views/ModelConfiguration/*`, `controllers/ModelConfiguration/*`, `api/core/modelConfig/*`, `api/entities/modelConfig.ts` (new); `SideNav.tsx`, `RouteDefinitions.ts`, `RouteDestinations.tsx`, `runChaosExperiment.ts`, `ExperimentCreationSelectInstallStep.tsx`, `strings.en.yaml`, `types.ts` | LLM Models page, Add/Test/Rotate/Delete, polling while PENDING/DELETING; Studio options scoped to project |
+| monorepo | `deploy/helm/ace/templates/litellm.yaml`, `docker-compose.yml`, `deploy/k8s/litellm.yaml`, `scripts/lib/model_registry.sh` (new), `scripts/setup.sh`, `.env.example`, `scripts/tests/test-litellm-registry-env.sh` (new) | §6 of the design: registry gating, wrapper entrypoint, wait-for-db, `LITELLM_ADMIN_URL_COMPOSE`, salt once + URL each run, no `--detailed_debug` |
+| agentcert-stack | `litellm-setup/docker-compose-litellm.yml` | `LITELLM_LOG=INFO`, no `--detailed_debug` |
+| monorepo docs | `docs/onboarding/03-onboard-an-llm.md` + 3 screenshots (new), `docs_2/MULTI_MODEL_CONFIGURATION_DESIGN.md` | User guide; design corrected |
+
+**Deviations from the design, and why:** D8, save/run validation fails open for aliases the registry doesn't know (a strict check against the env-derived platform list would break external-gateway and config-only models). D9, secret references are rejected and key/base are always explicit. `LITELLM_ADMIN_URL` is set in compose's `environment:` (`LITELLM_ADMIN_URL_COMPOSE`), not `.env`, which also feeds Helm. The delete guard also covers enabled cron experiments. Test calls use a 55 s timeout (nginx cuts at 60 s). `CreateModelConfigInput.label` is optional (defaults to alias). `/health?model_id=` instead of `?model=`.
+
+**Durability check:** done. Everything lands in checked-in source. `setup.sh --deploy`/`--restart` writes `LITELLM_SALT_KEY` (once) and `LITELLM_DATABASE_URL` (each run) through `k8s_env_patch` on every install. The Helm chart and root compose turn the registry on from them, so a fresh checkout gets it with no manual step. Nothing was patched on a live environment.
+
+**Verified:**
+- Go: full graphql-server suite 0 FAIL; `pkg/model_config` 90+ cases, 85% statements, `-race`; mutations of the reconcile DB check, the placeholder key and the secret guard each fail tests. Full auth suite 0 FAIL.
+- Web: jest 47 suites / 299 tests; `tsc` 0 errors in `src`; eslint clean; production webpack build OK.
+- Shell: `test-litellm-registry-env.sh` 25/25 (wrapper mutation caught), `test-cloud-profile.sh` 66/66, `test-script-modes.py` 153; `helm lint`; `docker compose config --quiet` with the real `.env`.
+- E2E on an isolated stack (mmc-* containers on the rootless daemon; auth + graphql built from this checkout, mongo:5 replica set, LiteLLM launched with the real compose wrapper, fake upstream): main suite 37/37, isolation + RBAC 22/22 (with the auth fix), reconcile 8/8 (LiteLLM loses a model → NEEDS_KEY → Rotate key re-registers under the same id through the real PATCH-404 path). Go integration test (`-tags integration`) 4/4 against registry-on and registry-off proxies. Playwright run of the production web build: list, Add Model + Test + Save, masked key, no GraphQL errors. No user or platform key in LiteLLM/graphql/auth logs or MongoDB.
+
+**Not verified:** no KinD/AKS deploy. graphql, auth and web images not rebuilt (`./scripts/setup.sh --restart --local-build` needed). No real provider key used (fake upstream). Chaos Studio agent drawer not exercised in a browser (needs an infrastructure); its query change is covered by unit tests and the E2E API calls.
+
+**Open:**
+- Pre-existing, unrelated: web component tests need `--globals '{"ts-jest":{"diagnostics":false}}'` (TS2698 in `src/strings/String.tsx`); `tsc` reports 50 errors in `node_modules/@types/node` (26.1.2 vs TS 4.9.5); `strings:check` has 5 duplicate-value errors; `yarn install`'s husky `prepare` sets `core.hooksPath` (unset again this session); `yaml-sort` is not idempotent on `strings.en.yaml`.
+- Salt-key backup ownership on shared hosts (design §13.1).
+- Per-run `model_id` snapshot on runs (design §12).
+
+### §144 — LLM Models: Save tests the model first; reasoning models pass Test; browser autofill blocked; Azure field is "Deployment name" (2026-10-28, uncommitted; web + graphql images rebuilt and rolled out on KinD `agentcert-sachin-mourya`)
+
+**Trigger:** on the first live use of §143 (KinD, `setup.sh --restart --local-build`), model `gpt-4-bench` was saved as `azure/admin` instead of deployment `gpt4o`. It registered ACTIVE, the save/run gates passed, and every agent call in run `fc95528b-…` got Azure 404 *"The API deployment for this resource does not exist"*. LiteLLM's log shows no `/health/test_connection` call, so Test was never clicked. `admin` is the login name, so browser credential autofill is the likely source (not proven). The user stopped the run and deleted the model.
+
+**Second bug, found while verifying the fix:** deployment `gpt4o` is really **GPT-5.1** (`model='gpt-5.1-2025-11-13'` in the response). LiteLLM's `/health/test_connection` and `GET /health?model_id=` always send `max_tokens: 1`. `_update_litellm_params_for_health_check(model_info={})` hard-codes it for test_connection, so it can't be overridden. GPT-5.1 answers 400 *"Unsupported parameter: 'max_tokens'"* as `azure/gpt4o`, and *"max_tokens or model output limit was reached"* as `azure/gpt5_series/gpt4o`. So Test failed **every** reasoning model, working ones included, and a Save-tests-first gate would have refused the correct model. LiteLLM 1.82 has no per-request `user_config`, so an unsaved model can't be tested through `/chat/completions`. The agent's real call shape (flash-agent: `temperature=0.1`, no token cap) works on plain `azure/gpt4o`.
+
+| Repo | Files | Change |
+|---|---|---|
+| AgentCert web | `controllers/ModelConfiguration/CreateModelConfig.tsx`, `__tests__/CreateModelConfig.test.tsx` (new) | Save runs `testModelConnection` first and creates only on `ok`. A failed test stops (reason shown). Saving the same values again (`connectionKey` = JSON of `toConnection`) saves without re-testing ("Save anyway"). A passed manual Test lets Save go straight through. |
+| AgentCert web | `views/ModelConfiguration/{ModelConfigForm,RotateModelKey}.tsx`, `modelConfigUtils.ts`, `components/PasswordInput/PasswordInput.tsx` (CRLF kept), `strings.en.yaml`, `types.ts`, form tests | `lastTest` prop replaces `testResult`; result shown only for the values it was run on; Save label `modelSaveAnyway` after a failure; `<Form autoComplete="off">`; key fields `autoComplete="new-password"` (new optional PasswordInput prop); `ProviderRule.modelLabel` (Azure: `modelDeploymentName`) |
+| AgentCert graphql | `pkg/model_config/litellm_client.go`, `litellm_client_test.go`, `litellm_integration_test.go` | `tokenCapRefusals` + `testOutcome`: those two refusals are a pass in both `TestConnection` and `HealthCheck`. Unit fixtures recorded from the live gateway; opt-in `TestIntegrationReasoningModelPassesTheConnectionTest` (`LITELLM_IT_AZURE_*`, read-only) |
+| monorepo docs | `docs/onboarding/03-onboard-an-llm.md`, `docs_2/MULTI_MODEL_CONFIGURATION_DESIGN.md` (§2.4 row, §5.2, §9.1, §9.6) | Save behaviour, Deployment name, deployment-not-found troubleshooting row, token-cap rule |
+
+**Why this classification is safe:** against the same Azure resource, a wrong deployment gives a 404 (*does not exist*), a wrong key *AuthenticationError*, a wrong API version *Resource not found*, and a wrong endpoint *Connection error*. All four are rejected before parameters are validated, and none matches the two markers.
+
+**Durability check:** source only. The images were rebuilt from this checkout (`docker build --no-cache` with the same `agentcert/` base images setup.sh resolves), `kind load`ed, and `rollout restart`ed for `web` and `graphql`. The next `setup.sh --restart --local-build` produces the same thing. Rollback tags: `agentcert/agentcert-{web,graphql}:before-save-test`.
+
+**Verified:**
+- Web: jest 48 suites / 308 tests; `tsc` 0 in `src`; eslint clean; prettier on the touched new files; `strings:check` only the 5 pre-existing duplicates. Mutations caught: dropping `if (result.ok)` fails 4 controller tests; dropping the autocomplete attributes fails the form test.
+- Go: `pkg/model_config` `-race` OK, 86.5%; `go vet -composites=false` (plus `-tags integration`) clean; `go build ./...` OK; disabling the rule fails the new unit test.
+- Live (KinD, real Azure): the integration test passes. Direct test_connection calls in the LiteLLM pod: `azure/admin` → 404; `azure/gpt4o` → refused max_tokens (now a pass). New images run; graphql starts clean; the bundle contains *Save anyway* and the binary the new marker.
+
+**Not verified:** the Add Model flow was not driven in a browser on the live stack, because the `.env` admin password no longer logs in (changed at first login; no token was forged). Browser password-manager behaviour can't be reproduced headless; only the DOM attributes are tested. The guide's `llm-models-add.png` still shows the old "Model" label for Azure.
+
+**Live end-to-end result (2026-10-28, after the user re-added the model in the UI):**
+- At 05:51:04 a test came back DeploymentNotFound and nothing was saved: the gate caught a wrong deployment name again.
+- At 05:51:27 Save tested the corrected values (`azure/gpt4o`; the max_tokens refusal counted as a pass) and then called `/model/new`. `gpt-4o-bench` is ACTIVE, with the same id (`467b65e6-…`) in ACE and LiteLLM.
+- New experiment `3f74a908-…`, run `8faa3921-…`:
+  - All 7 workflow steps Succeeded. ChaosResult `scaled-to-zero-kubernetes-workload` Pass, probes 100%. Run Completed, resiliency 100.
+  - Agent `MODEL_ALIAS=gpt-4o-bench` through the sidecar: 11/11 LiteLLM chat calls 200; ReAct scans with ~10 tool calls each; it flagged *[CRITICAL] carts … scaled down to zero replicas*.
+  - Certifier: 11 events in the fault bucket; detection 1.0, mitigation 1.0, FP/FN 0, RAI PASS 88; `EXPERIMENT_CERTIFICATE_READY`, aggregation v1; 0 certifier errors.
+- Confirmed: the stale agent left by the stopped run (alias `gpt-4-bench`, calling every 2 min with LiteLLM 400 "no healthy deployments") was replaced by the new run's `helm upgrade --install`.
+- No key-shaped strings in LiteLLM's log, no model-registry warnings, all pods Running with 0 restarts.
+
+**Log noise seen, not caused by this work:**
+- LiteLLM 1.82.0 `tool_registry_writer batch_upsert_tools error: column "created_at" is of type timestamp … expression is of type text` on tool-bearing requests (its raw SQL binds an ISO string). It appears because §143 turned the DB on; LiteLLM catches it, requests succeed, ACE doesn't use `LiteLLM_ToolTable`. Recheck on a LiteLLM upgrade.
+- auth `invalid token RS256` every 15 s: the `monitoring` Prometheus scrapes `/metrics` with its service-account token; it is rejected in JwtMiddleware, before any role check.
+- graphql `file reading error … /tmp/default/Litmus ChaosHub/faults/`.
+
+**Decision (user, 2026-10-28): the certifier never uses registry models.** Its LLMs stay env-only (`certifier/configs/configs.json` `ENV_*` placeholders). Verified as already true: 0 certifier→LiteLLM requests during the run, direct Azure client (`utils/azure_openai_util.py`), and no model field in `BucketingRequest`/`AggregationRequest`. Recorded in design §12 and the user guide §1; no code change.
+
+**Open:**
+- Commit (AgentCert, agentcert-stack, monorepo).
+- Refresh `docs/onboarding/images/llm-models-add.png`, which shows the old "Model" label for Azure.
+- An agent that sends `max_tokens` would still fail on a GPT-5 deployment entered as plain `azure/<name>`. `azure/gpt5_series/<name>` maps it, but also changes temperature handling. Not needed for flash-agent.

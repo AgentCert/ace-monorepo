@@ -317,6 +317,11 @@ services:
       # refused", so we always set them here.)
       CERTIFIER_BASE_URL: ${CERTIFIER_BASE_URL_COMPOSE:-http://certifier:8000}
       CERTIFICATE_PDF_BASE_URL: ${CERTIFICATE_PDF_BASE_URL_COMPOSE:-http://certifier:8000}
+      # graphql → LiteLLM's admin API for the LLM Models registry. Its
+      # OPENAI_BASE_URL above is the KinD-gateway address agents use, so name
+      # the compose service instead. Kept out of .env, which also feeds the
+      # Helm path, where the gateway is litellm:14000.
+      LITELLM_ADMIN_URL: ${LITELLM_ADMIN_URL_COMPOSE:-http://litellm:4000}
       # Hub content comes from this checkout, mounted read-only below at fixed
       # in-container paths (same layout as the Kubernetes hub bundle), so the
       # checkout can live anywhere on the host and nothing is cloned at runtime.
@@ -445,7 +450,30 @@ services:
     volumes:
       - ./agentcert-stack/litellm-setup/litellm_config.yaml:/app/config.yaml:ro
       - litellm-data:/app/data
-    command: --config /app/config.yaml --port 4000 --detailed_debug
+    # LLM Models registry: with LITELLM_DATABASE_URL and LITELLM_SALT_KEY both
+    # set (scripts/setup.sh writes them), LiteLLM keeps the models projects add
+    # from the UI, and their keys, in its own database on Langfuse's Postgres,
+    # creating it on first start. DATABASE_URL is exported only inside this
+    # container: Langfuse reads that name from .env too. A service can't omit a
+    # variable conditionally, and LiteLLM treats an empty DATABASE_URL as set,
+    # hence the wrapper around the image's own entrypoint.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -n "$$LITELLM_DATABASE_URL" ] && [ -n "$$LITELLM_SALT_KEY" ]; then
+          export DATABASE_URL="$$LITELLM_DATABASE_URL" STORE_MODEL_IN_DB=True
+        fi
+        exec docker/prod_entrypoint.sh "$$@"
+      - --
+    # No --detailed_debug: at debug level LiteLLM logs every model's
+    # plaintext API key on every request.
+    command: --config /app/config.yaml --port 4000
+    depends_on:
+      # LiteLLM connects to its database once, at startup.
+      postgres:
+        condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=5)"]
       interval: 30s

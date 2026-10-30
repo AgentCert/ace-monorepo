@@ -49,7 +49,7 @@ build|platform|agentcert/cluster-init:latest|compose/cluster-init|Dockerfile|
 build|infra|agentcert/litmusportal-subscriber:3.0.0|AgentCert/chaoscenter/subscriber|Dockerfile|
 build|workflow|agentcert/agentcert-install-app:latest|app-charts|install-app/Dockerfile|
 build|workflow|agentcert/agentcert-install-agent:latest|agent-charts|install-agent/Dockerfile|
-build|workflow|agentcert/itbench-experiment:dev|litmus-go|build/Dockerfile.itbench|
+build|workflow|agentcert/itbench-experiment:latest|litmus-go|build/Dockerfile.itbench|
 build|agents|agentcert/agentcert-flash-agent:latest|agents/flash-agent|Dockerfile|
 build|agents|agentcert/sre-agent-comprehensive:latest|agents/sre-agent-comprehensive|Dockerfile|
 build|agents|agentcert/sre-agent-crewai:latest|agents/sre-agent-crewai|Dockerfile|

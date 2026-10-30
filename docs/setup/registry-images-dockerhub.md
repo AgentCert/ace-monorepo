@@ -1,24 +1,19 @@
----
-nav_exclude: true
-search_exclude: true
----
-
 # ACE images in docker.io/agentcert (frozen open-source copies)
 
-Generated 2026-10-07 11:59 UTC by `scripts/check-registry-images.sh --markdown` from `deploy/images.txt`.
+Generated 2026-10-29 13:09 UTC by `scripts/check-registry-images.sh --markdown` from `deploy/images.txt`.
 Re-run that command to refresh this file.
 
-**Summary:** 103 OK, 2 OLD, 0 MISSING
+**Summary:** 109 OK, 0 OLD, 0 MISSING
 
 - **OK**: present at the expected name (ACE images: built from the current source).
 - **OLD**: ACE image whose moving tag (`:latest`) is an older build; the current build is linked as *new build*.
 - **MISSING**: not in the registry.
-- **build** = built from this repo by `scripts/build-and-push.sh`; **mirror** = third-party copy made by `scripts/mirror-images.sh`.
+- **build** = built from this repo and published by `scripts/build-and-push.sh --push`; **mirror** = third-party copy published by `scripts/mirror-images.sh --push`.
 
 | Status | Kind | Group | Image | Registry location |
 |---|---|---|---|---|
-| OLD | build | platform | `agentcert/agentcert-graphql:latest` | `agentcert/agentcert-graphql:latest` |
-| OLD | build | platform | `agentcert/agentcert-auth:latest` | `agentcert/agentcert-auth:latest` |
+| OK | build | platform | `agentcert/agentcert-graphql:latest` | `agentcert/agentcert-graphql:latest` |
+| OK | build | platform | `agentcert/agentcert-auth:latest` | `agentcert/agentcert-auth:latest` |
 | OK | build | platform | `agentcert/agentcert-web:latest` | `agentcert/agentcert-web:latest` |
 | OK | build | platform | `agentcert/certifier:latest` | `agentcert/certifier:latest` |
 | OK | build | platform | `agentcert/ace-hub-bundle:latest` | `agentcert/ace-hub-bundle:latest` |
@@ -26,7 +21,7 @@ Re-run that command to refresh this file.
 | OK | build | infra | `agentcert/litmusportal-subscriber:3.0.0` | `agentcert/litmusportal-subscriber:3.0.0` |
 | OK | build | workflow | `agentcert/agentcert-install-app:latest` | `agentcert/agentcert-install-app:latest` |
 | OK | build | workflow | `agentcert/agentcert-install-agent:latest` | `agentcert/agentcert-install-agent:latest` |
-| OK | build | workflow | `agentcert/itbench-experiment:dev` | `agentcert/itbench-experiment:dev` |
+| OK | build | workflow | `agentcert/itbench-experiment:latest` | `agentcert/itbench-experiment:latest` |
 | OK | build | agents | `agentcert/agentcert-flash-agent:latest` | `agentcert/agentcert-flash-agent:latest` |
 | OK | build | agents | `agentcert/sre-agent-comprehensive:latest` | `agentcert/sre-agent-comprehensive:latest` |
 | OK | build | agents | `agentcert/sre-agent-crewai:latest` | `agentcert/sre-agent-crewai:latest` |
@@ -54,6 +49,7 @@ Re-run that command to refresh this file.
 | OK | mirror | workflow | `litmuschaos.docker.scarf.sh/litmuschaos/go-runner:latest` | `agentcert/litmuschaos-go-runner:latest` |
 | OK | mirror | workflow | `litmuschaos/go-runner:latest` | `agentcert/litmuschaos-go-runner:latest` |
 | OK | mirror | workflow | `litmuschaos/litmus-checker:latest` | `agentcert/litmuschaos-litmus-checker:latest` |
+| OK | mirror | workflow | `litmuschaos/litmus-checker:2.11.0` | `agentcert/litmuschaos-litmus-checker:2.11.0` |
 | OK | mirror | workflow | `litmuschaos/litmus-app-deployer:latest` | `agentcert/litmuschaos-litmus-app-deployer:latest` |
 | OK | mirror | workflow | `alpine/k8s:1.29.2` | `agentcert/alpine-k8s:1.29.2` |
 | OK | mirror | workflow | `alpine/k8s:1.18.2` | `agentcert/alpine-k8s:1.18.2` |
@@ -64,6 +60,7 @@ Re-run that command to refresh this file.
 | OK | mirror | workflow | `curlimages/curl:8.10.1` | `agentcert/curlimages-curl:8.10.1` |
 | OK | mirror | workflow | `registry.k8s.io/pause:3.9` | `agentcert/pause:3.9` |
 | OK | mirror | workflow | `registry.access.redhat.com/ubi10-minimal:10.2-1782798957` | `agentcert/ubi10-minimal:10.2-1782798957` |
+| OK | mirror | workflow | `devth/alpine-bench:latest` | `agentcert/devth-alpine-bench:latest` |
 | OK | mirror | apps | `weaveworksdemos/front-end:0.3.12` | `agentcert/weaveworksdemos-front-end:0.3.12` |
 | OK | mirror | apps | `weaveworksdemos/catalogue:0.3.5` | `agentcert/weaveworksdemos-catalogue:0.3.5` |
 | OK | mirror | apps | `weaveworksdemos/catalogue-db:0.3.0` | `agentcert/weaveworksdemos-catalogue-db:0.3.0` |
@@ -122,3 +119,5 @@ Re-run that command to refresh this file.
 | OK | mirror | build-base | `registry.access.redhat.com/ubi9/ubi-minimal:9.6` | `agentcert/ubi9-ubi-minimal:9.6` |
 | OK | mirror | build-base | `registry.access.redhat.com/ubi8/ubi-minimal:8.10` | `agentcert/ubi8-ubi-minimal:8.10` |
 | OK | mirror | build-base | `gcr.io/distroless/static-debian12:nonroot` | `agentcert/distroless-static-debian12:nonroot` |
+| OK | mirror | local | `ollama/ollama:latest` | `agentcert/ollama-ollama:latest` |
+| OK | mirror | local | `kindest/node:v1.35.0` | `agentcert/kindest-node:v1.35.0` |

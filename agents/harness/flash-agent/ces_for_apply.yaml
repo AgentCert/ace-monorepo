@@ -195,9 +195,9 @@ description:
     "misconfigured-kubernetes-workload-container-readiness-probe" (index 49).
 kind: ChaosExperiment
 metadata:
-  name: misconfigured-kubernetes-workload-container-readiness-probe
+  name: misconfigured-k8s-workload-container-readiness-probe
   labels:
-    name: misconfigured-kubernetes-workload-container-readiness-probe
+    name: misconfigured-k8s-workload-container-readiness-probe
     app.kubernetes.io/part-of: litmus
     app.kubernetes.io/component: chaosexperiment
     app.kubernetes.io/version: ci
@@ -291,7 +291,7 @@ spec:
         value: "300"
 
     labels:
-      name: misconfigured-kubernetes-workload-container-readiness-probe
+      name: misconfigured-k8s-workload-container-readiness-probe
       app.kubernetes.io/part-of: litmus
       app.kubernetes.io/component: experiment-job
       app.kubernetes.io/version: ci
@@ -759,9 +759,9 @@ description:
     (modified-kubernetes-workload-container-environment-variable).
 kind: ChaosExperiment
 metadata:
-  name: modified-kubernetes-workload-container-environment-variable
+  name: modified-k8s-workload-container-environment-variable
   labels:
-    name: modified-kubernetes-workload-container-environment-variable
+    name: modified-k8s-workload-container-environment-variable
     app.kubernetes.io/part-of: litmus
     app.kubernetes.io/component: chaosexperiment
     app.kubernetes.io/version: ci
@@ -875,7 +875,7 @@ spec:
         value: "300"
 
     labels:
-      name: modified-kubernetes-workload-container-environment-variable
+      name: modified-k8s-workload-container-environment-variable
       app.kubernetes.io/part-of: litmus
       app.kubernetes.io/component: experiment-job
       app.kubernetes.io/version: ci
@@ -1074,9 +1074,9 @@ description:
     all target the otel-demo `checkout` Deployment.
 kind: ChaosExperiment
 metadata:
-  name: unsupported-architecture-kubernetes-workload-container-image
+  name: unsupported-architecture-k8s-workload-container-image
   labels:
-    name: unsupported-architecture-kubernetes-workload-container-image
+    name: unsupported-architecture-k8s-workload-container-image
     app.kubernetes.io/part-of: litmus
     app.kubernetes.io/component: chaosexperiment
     app.kubernetes.io/version: ci
@@ -1166,7 +1166,7 @@ spec:
         value: "300"
 
     labels:
-      name: unsupported-architecture-kubernetes-workload-container-image
+      name: unsupported-architecture-k8s-workload-container-image
       app.kubernetes.io/part-of: litmus
       app.kubernetes.io/component: experiment-job
       app.kubernetes.io/version: ci
@@ -2530,7 +2530,7 @@ description:
     `pods/exec` access into the target container. This keeps the fault
     consistent with this chaos-chart's other simple kubectl-only experiments
     (see scaled-to-zero-kubernetes-workload,
-    misconfigured-kubernetes-workload-container-readiness-probe).
+    misconfigured-k8s-workload-container-readiness-probe).
 
     Tradeoffs of this approach vs. ITBench's code-injection method:
       - The exact memory ceiling needed to reliably trigger an OOM kill
@@ -2549,7 +2549,7 @@ description:
         before), so the workload's resource footprint is fully restored;
         it does not, however, remove any extra ReplicaSet/revision history
         left behind by the pod-template patch (the same tradeoff accepted by
-        misconfigured-kubernetes-workload-container-readiness-probe in this
+        misconfigured-k8s-workload-container-readiness-probe in this
         chart).
 
     Mirrors ITBench SRE scenario 40 (`valkey-cart` OOM in the
@@ -2678,9 +2678,9 @@ description:
     Deployment (there paired with a separate memory-stress injection).
 kind: ChaosExperiment
 metadata:
-  name: unassigned-kubernetes-workload-container-resource-limits
+  name: unassigned-k8s-workload-container-resource-limits
   labels:
-    name: unassigned-kubernetes-workload-container-resource-limits
+    name: unassigned-k8s-workload-container-resource-limits
     app.kubernetes.io/part-of: litmus
     app.kubernetes.io/component: chaosexperiment
     app.kubernetes.io/version: ci
@@ -2767,7 +2767,7 @@ spec:
         value: "300"
 
     labels:
-      name: unassigned-kubernetes-workload-container-resource-limits
+      name: unassigned-k8s-workload-container-resource-limits
       app.kubernetes.io/part-of: litmus
       app.kubernetes.io/component: experiment-job
       app.kubernetes.io/version: ci
@@ -3154,9 +3154,9 @@ description:
     (fault library index 25).
 kind: ChaosExperiment
 metadata:
-  name: unschedulable-kubernetes-workload-pod-anti-affinity-rule
+  name: unschedulable-k8s-workload-pod-anti-affinity-rule
   labels:
-    name: unschedulable-kubernetes-workload-pod-anti-affinity-rule
+    name: unschedulable-k8s-workload-pod-anti-affinity-rule
     app.kubernetes.io/part-of: litmus
     app.kubernetes.io/component: chaosexperiment
     app.kubernetes.io/version: ci
@@ -3258,7 +3258,7 @@ spec:
         value: "300"
 
     labels:
-      name: unschedulable-kubernetes-workload-pod-anti-affinity-rule
+      name: unschedulable-k8s-workload-pod-anti-affinity-rule
       app.kubernetes.io/part-of: litmus
       app.kubernetes.io/component: experiment-job
       app.kubernetes.io/version: ci

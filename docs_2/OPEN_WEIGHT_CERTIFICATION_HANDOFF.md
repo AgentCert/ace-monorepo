@@ -5151,6 +5151,20 @@ Two real Go bugs found and fixed during live smoke testing:
 
 Updated in each fault's `fault.yaml` (`metadata.name`, `metadata.labels.name`, `spec.definition.labels.name`) and `engine.yaml` (`spec.experiments[].name`, must match exactly for the operator to resolve it). Deliberately did **not** touch: the fault directory name, the `-name` argument passed to the dispatcher binary (independent CLI routing key, unrelated to the K8s object name), or the `rbac.yaml` `ServiceAccount` name (`<directory-name>-sa`, not subject to this constraint — SA names allow up to 253 chars).
 
+> **Update — superseded, this is how it actually landed.** Only 3 of the 5 renames above were ever applied to `chaos-charts` (`modified-container-environment-variable`, `unassigned-container-resource-limits`, `unschedulable-pod-anti-affinity-rule`), and the generated aggregates (`faults/itbench/experiments.yaml`, the harness `ces_for_apply.yaml` ConfigMap bundle) were never regenerated afterwards, so they kept the long pre-rename names. `misconfigured-kubernetes-workload-container-readiness-probe` and `unsupported-architecture-kubernetes-workload-container-image` were never shortened at all and went on failing Job admission in production exactly as described above.
+>
+> The split identity ("directory name kept long, `ChaosExperiment` name shortened") is what allowed those two gaps to go unnoticed — nothing checked that the directory, the object name and the aggregates still agreed. So the approach was reversed: all 5 faults are now renamed **consistently**, with `kubernetes` abbreviated to `k8s`, so that directory name == `metadata.name` == `engine.yaml` experiment name == the dispatcher `-name` argument:
+>
+> | Before | After | len |
+> |---|---|---|
+> | `unsupported-architecture-kubernetes-workload-container-image` | `unsupported-architecture-k8s-workload-container-image` | 53 |
+> | `modified-kubernetes-workload-container-environment-variable` | `modified-k8s-workload-container-environment-variable` | 52 |
+> | `misconfigured-kubernetes-workload-container-readiness-probe` | `misconfigured-k8s-workload-container-readiness-probe` | 52 |
+> | `unschedulable-kubernetes-workload-pod-anti-affinity-rule` | `unschedulable-k8s-workload-pod-anti-affinity-rule` | 49 |
+> | `unassigned-kubernetes-workload-container-resource-limits` | `unassigned-k8s-workload-container-resource-limits` | 49 |
+>
+> The longest remaining fault name across all 64 bundles is now `nonexistent-kubernetes-workload-persistent-volume-claim` (55 → 62-char Job name). The upstream ITBench scenario ids are unchanged and are still quoted verbatim in every fault's `description`/`ground_truth.yaml` prose, so ITBench parity stays traceable. `chaos-charts/scripts/validate-fault-names.sh` (`make validateFaultNames`, wired into the `ChaosCharts` PR workflow) now fails the build if any fault name exceeds 56 characters or if the directory / `metadata.name` / engine experiment name drift apart again.
+
 ### Files changed
 
 | File | Change |

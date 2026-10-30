@@ -132,9 +132,9 @@ APP_SRC="$(image_source_normalize "${APP_SRC:-registry}")"
 AGENT_SRC="$(image_source_normalize "${AGENT_SRC:-registry}")"
 LITMUS_SRC="$(image_source_normalize "${LITMUS_SRC:-registry}")"
 SRE_AGENTS_SRC="$(image_source_normalize "${SRE_AGENTS_SRC:-local}")"
-# No Docker Hub image has ever been published for this one (Docker Hub API 404s
-# on agentcert/itbench-experiment); it exists only in the Infosys registry. local
-# is therefore the default, same as SRE_AGENTS_SRC's rationale.
+# Built from this checkout by default so a fault always runs the code in the
+# working tree. agentcert/itbench-experiment:latest is published on Docker Hub
+# too, so "registry" is a valid choice with or without IMAGE_REGISTRY set.
 ITBENCH_EXPERIMENT_SRC="$(image_source_normalize "${ITBENCH_EXPERIMENT_SRC:-local}")"
 HUB_BUNDLE_SRC="$(image_source_normalize "${HUB_BUNDLE_SRC:-local}")"
 HUB_BUNDLE_IMAGE="${HUB_BUNDLE_IMAGE:-agentcert/ace-hub-bundle:local}"
@@ -584,7 +584,7 @@ build_and_load_sre_agent() {
 build_and_load_itbench_experiment() {
     local dockerfile="${REPO_ROOT}/litmus-go/build/Dockerfile.itbench"
     local ctx="${REPO_ROOT}/litmus-go"
-    local img="agentcert/itbench-experiment:dev"
+    local img="agentcert/itbench-experiment:latest"
     if image_already_built "${img}"; then
         ok "${img} already built + kind-loaded by setup.sh's build step this run — skipping redundant rebuild"
         return 0
@@ -1015,13 +1015,7 @@ case "${ITBENCH_EXPERIMENT_SRC}" in
         fi
         ;;
     registry)
-        if [[ -z "${IMAGE_REGISTRY}" ]]; then
-            warn "itbench-experiment: registry selected with IMAGE_REGISTRY empty, but no image has" \
-                 "ever been published to docker.io/agentcert/itbench-experiment — every ITBench" \
-                 "fault under chaos-charts/faults/itbench/ will hit ImagePullBackOff. Use 'local' instead."
-        else
-            info "itbench-experiment: registry ($(registry_ref agentcert/itbench-experiment:dev), pulled at runtime)"
-        fi
+        info "itbench-experiment: registry ($(registry_ref agentcert/itbench-experiment:latest), pulled at runtime)"
         ;;
 esac
 

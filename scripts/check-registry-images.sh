@@ -124,6 +124,13 @@ echo "Summary: ${n_ok} OK, ${n_old} OLD, ${n_missing} MISSING"
 
 if [[ -n "${MARKDOWN_OUT}" ]]; then
     {
+        # Jekyll front matter keeps this generated inventory out of the GitHub
+        # Pages sidebar and search; emitted here so a regen cannot drop it.
+        echo "---"
+        echo "nav_exclude: true"
+        echo "search_exclude: true"
+        echo "---"
+        echo
         echo "# ACE images in ${IMAGE_REGISTRY:-docker.io/${IMAGE_MIRROR_NAMESPACE} (frozen open-source copies)}"
         echo
         echo "Generated $(date -u '+%Y-%m-%d %H:%M UTC') by \`scripts/check-registry-images.sh --markdown\` from \`deploy/images.txt\`."
